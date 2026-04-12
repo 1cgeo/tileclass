@@ -59,6 +59,9 @@ _login_attempts: dict[str, list[float]] = {}
 
 
 def check_login_rate_limit(ip: str) -> None:
+    import os
+    if os.environ.get("TILECLASS_DISABLE_RATE_LIMIT") == "1":
+        return
     now = time.time()
     recent = [t for t in _login_attempts.get(ip, []) if now - t < 60]
     if not recent:

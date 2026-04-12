@@ -45,21 +45,21 @@
                 </section>
                 <section class="tools">
                     <h3>Ferramentas</h3>
-                    <button id="tool-brush" class="tool active" title="Pincel (B)">Pincel</button>
-                    <button id="tool-eraser" class="tool" title="Borracha (E)">Borracha</button>
-                    <button id="tool-fill" class="tool" title="Balde (G)">Balde</button>
+                    <button id="tool-brush" class="tool active" title="Pincel (B)">Pincel <span class="kbd">B</span></button>
+                    <button id="tool-eraser" class="tool" title="Borracha (E)">Borracha <span class="kbd">E</span></button>
+                    <button id="tool-fill" class="tool" title="Balde (G)">Balde <span class="kbd">G</span></button>
                     <label>Tamanho: <span id="brush-size-label">3</span>
                         <input type="range" id="brush-size" min="1" max="5" value="2">
                     </label>
                 </section>
                 <section class="opacity">
-                    <h3>Opacidade</h3>
+                    <h3>Opacidade <span id="opacity-label" style="float:right;color:var(--text-muted);font-weight:400;text-transform:none;letter-spacing:0;">50%</span></h3>
                     <input type="range" id="mask-opacity" min="0" max="100" value="50">
-                    <span id="opacity-label">50%</span>
                 </section>
                 <section class="progress">
                     <h3>Progresso</h3>
                     <div id="progress-line">Pixels: <span id="pixel-count">0</span>/65536 (<span id="pixel-pct">0</span>%)</div>
+                    <div class="progress-bar"><div id="progress-bar-fill"></div></div>
                     <div id="hover-class" class="hover-class">—</div>
                 </section>
             </aside>
@@ -79,10 +79,10 @@
         </main>
 
         <footer class="footer">
-            <button id="btn-undo" title="Ctrl+Z">Desfazer</button>
-            <button id="btn-redo" title="Ctrl+Shift+Z">Refazer</button>
+            <button id="btn-undo" title="Ctrl+Z">Desfazer <span class="kbd">⌃Z</span></button>
+            <button id="btn-redo" title="Ctrl+Shift+Z">Refazer <span class="kbd">⌃⇧Z</span></button>
             <button id="btn-problem">Reportar Problema</button>
-            <button id="btn-submit" class="primary">Submeter</button>
+            <button id="btn-submit" class="primary">Submeter <span class="kbd">⌃S</span></button>
         </footer>
 
         <!-- Problem modal -->

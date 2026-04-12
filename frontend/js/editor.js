@@ -5,6 +5,14 @@ import { showToast } from "./toast.js";
 import { renderMinimap } from "./minimap.js";
 import { createLockedMap, setMapBbox } from "./maplib.js";
 import { hexToRgb, blobToImage } from "./utils.js";
+import {
+    paintAt as corePaintAt,
+    paintLine as corePaintLine,
+    floodFill as coreFloodFill,
+    toUndoEntry,
+    applyPatch as coreApplyPatch,
+    screenToLogical as coreScreenToLogical,
+} from "./mask-core.js";
 
 const TILE = 256;
 const DISPLAY = 768;
@@ -61,6 +69,20 @@ let minimapMap = null;
 
 export async function initEditor(user) {
     currentUser = user;
+    // Test hook: when ?test=1 is present in the URL, expose internal state so
+    // E2E tests can inspect the mask and drive state transitions. Never enabled
+    // in normal use. Do not add production logic that depends on __tcTest__.
+    if (new URLSearchParams(location.search).get("test") === "1") {
+        window.__tcTest__ = {
+            get mask() { return mask; },
+            get currentTile() { return currentTile; },
+            get filledCount() { return filledCount; },
+            get undoStackLen() { return undoStack.length; },
+            get redoStackLen() { return redoStack.length; },
+            get maskHidden() { return maskHidden; },
+            get preloadedNextId() { return preloadedNext?.tile?.id ?? null; },
+        };
+    }
     document.getElementById("user-label").textContent = user.username;
     const [cfg, cls] = await Promise.all([
         apiGet("/api/config/tileserver"),
@@ -271,6 +293,8 @@ function updateProgress() {
     document.getElementById("pixel-pct").textContent = pct;
     const line = document.getElementById("progress-line");
     line.classList.toggle("complete", filledCount === PIXELS);
+    const bar = document.getElementById("progress-bar-fill");
+    if (bar) bar.style.width = pct + "%";
 }
 
 // --- Rendering ---
@@ -359,12 +383,7 @@ function drawOutlines(overlay) {
 // --- Painting ---
 
 function screenToLogical(ev) {
-    const rect = canvasCursor.getBoundingClientRect();
-    const sx = (ev.clientX - rect.left) / rect.width;
-    const sy = (ev.clientY - rect.top) / rect.height;
-    const x = Math.floor(sx * TILE);
-    const y = Math.floor(sy * TILE);
-    return [Math.max(0, Math.min(TILE-1, x)), Math.max(0, Math.min(TILE-1, y))];
+    return coreScreenToLogical(canvasCursor.getBoundingClientRect(), ev.clientX, ev.clientY);
 }
 
 function brushRadius() { return Math.floor(BRUSH_SIZES[brushSizeIdx] / 2); }
@@ -372,84 +391,44 @@ function brushRadius() { return Math.floor(BRUSH_SIZES[brushSizeIdx] / 2); }
 function paintAt(cx, cy) {
     const r = brushRadius();
     const value = tool === "eraser" ? 255 : activeClass;
-    const x0 = Math.max(0, cx - r), x1 = Math.min(TILE, cx + r + 1);
-    const y0 = Math.max(0, cy - r), y1 = Math.min(TILE, cy + r + 1);
-    for (let y = y0; y < y1; y++) {
-        for (let x = x0; x < x1; x++) {
-            const i = y * TILE + x;
-            const prev = mask[i];
-            if (prev === value) continue;
-            if (!gestureTouched.has(i)) gestureTouched.set(i, prev);
-            if (prev === 255 && value !== 255) filledCount++;
-            else if (prev !== 255 && value === 255) filledCount--;
-            mask[i] = value;
-        }
-    }
-    // Update dirty region into imageData and fully blit (cheap — 65k pixels).
+    const res = corePaintAt(mask, cx, cy, value, r, gestureTouched);
+    filledCount += res.deltaFilled;
+    const [x0, y0, x1, y1] = res.region;
     writeMaskPixels(x0, y0, x1, y1);
     blitMask();
 }
 
 function paintLine(x0, y0, x1, y1) {
-    const dx = Math.abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
-    const dy = -Math.abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
-    let err = dx + dy;
-    let x = x0, y = y0;
-    while (true) {
-        paintAt(x, y);
-        if (x === x1 && y === y1) break;
-        const e2 = 2 * err;
-        if (e2 >= dy) { err += dy; x += sx; }
-        if (e2 <= dx) { err += dx; y += sy; }
-    }
+    const value = tool === "eraser" ? 255 : activeClass;
+    const res = corePaintLine(mask, x0, y0, x1, y1, value, brushRadius());
+    filledCount += res.deltaFilled;
+    // Merge touched into the gesture map
+    for (const [i, v] of res.touched) if (!gestureTouched.has(i)) gestureTouched.set(i, v);
+    writeMaskPixels(0, 0, TILE, TILE);
+    blitMask();
 }
 
 function floodFill(cx, cy) {
-    const target = mask[cy * TILE + cx];
     const replacement = activeClass;
-    if (target === replacement) return;
-    const touched = new Map();
-    const stack = [[cx, cy]];
-    while (stack.length) {
-        const [x, y] = stack.pop();
-        if (x < 0 || x >= TILE || y < 0 || y >= TILE) continue;
-        const i = y * TILE + x;
-        if (mask[i] !== target) continue;
-        touched.set(i, target);
-        if (target === 255) filledCount++;
-        mask[i] = replacement;
-        stack.push([x+1, y], [x-1, y], [x, y+1], [x, y-1]);
-    }
-    if (touched.size === 0) return;
-    pushUndo(touched);
+    const res = coreFloodFill(mask, cx, cy, replacement);
+    if (res.touched.size === 0) return;
+    filledCount += res.deltaFilled;
+    pushUndo(res.touched);
     renderMaskFull();
     updateProgress();
     saveBackup();
 }
 
 function pushUndo(touchedMap) {
-    const n = touchedMap.size;
-    const positions = new Uint32Array(n);
-    const prevValues = new Uint8Array(n);
-    let i = 0;
-    for (const [pos, val] of touchedMap) { positions[i] = pos; prevValues[i] = val; i++; }
-    undoStack.push({ positions, prevValues });
+    undoStack.push(toUndoEntry(touchedMap));
     if (undoStack.length > MAX_UNDO) undoStack.shift();
     redoStack.length = 0;
 }
 
 function applyPatch(entry) {
-    const { positions, prevValues } = entry;
-    const newPrev = new Uint8Array(prevValues.length);
-    for (let i = 0; i < positions.length; i++) {
-        const p = positions[i];
-        newPrev[i] = mask[p];
-        const v = prevValues[i];
-        if (mask[p] === 255 && v !== 255) filledCount++;
-        else if (mask[p] !== 255 && v === 255) filledCount--;
-        mask[p] = v;
-    }
-    return { positions, prevValues: newPrev };
+    const res = coreApplyPatch(mask, entry);
+    filledCount += res.deltaFilled;
+    return res.inverse;
 }
 
 function undo() {

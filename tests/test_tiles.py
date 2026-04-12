@@ -25,6 +25,11 @@ def test_next_different_operators_get_different_tiles(client, operators, tiles):
     r1 = client.get("/api/tiles/next", headers=headers(t1)).json()
     r2 = client.get("/api/tiles/next", headers=headers(t2)).json()
     assert r1["id"] != r2["id"]
+    # Each tile must be assigned to the requesting user, not cross-wired
+    assert r1["assigned_to"] == operators[0]["id"]
+    assert r2["assigned_to"] == operators[1]["id"]
+    assert r1["status"] == "in_progress"
+    assert r2["status"] == "in_progress"
 
 
 def test_preview_does_not_assign(client, operators, tiles):
@@ -76,12 +81,24 @@ def test_classify_rejects_unfilled(client, operators, tiles):
 
 
 def test_classify_rejects_wrong_size(client, operators, tiles):
+    """Tight assertion: must be 400 invalid_mask, not a 500 leak, and state untouched."""
+    from backend.database import connect
     t = token(client, "op1", "secret123")
     tile = client.get("/api/tiles/next", headers=headers(t)).json()
     r = client.post(f"/api/tiles/{tile['id']}/classify",
                     headers={**headers(t), "Content-Type": "application/octet-stream"},
                     content=b"\x01" * 100)
-    assert r.status_code in (400, 422, 500)  # ValueError propagates
+    assert r.status_code == 400
+    assert r.json()["detail"]["error"] == "invalid_mask"
+
+    conn = connect()
+    try:
+        row = conn.execute("SELECT status, classified_by FROM tiles WHERE id=?",
+                           (tile["id"],)).fetchone()
+    finally:
+        conn.close()
+    assert row["status"] == "in_progress"
+    assert row["classified_by"] is None
 
 
 def test_reviewer_never_gets_own_classification(client, operators, tiles):

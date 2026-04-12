@@ -1,0 +1,17 @@
+{
+  "name": "tileclass",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:unit": "vitest run",
+    "test:unit:watch": "vitest",
+    "test:e2e": "node tests/e2e/runner.mjs",
+    "test:all": "npm run test:unit && python -m pytest tests/ && npm run test:e2e"
+  },
+  "devDependencies": {
+    "vitest": "^2.1.5",
+    "jsdom": "^25.0.1",
+    "puppeteer": "^23.9.0"
+  }
+}

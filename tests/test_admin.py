@@ -42,10 +42,16 @@ def test_deactivate_user_blocks_login(client, admin_user, operators):
 
 
 def test_thumbnail(client, admin_user, tiles):
+    """Thumbnail must be a valid PNG of the requested size, not arbitrary bytes."""
+    import io
+    from PIL import Image
     t = token(client, "admin", "admin123")
-    r = client.get("/api/admin/dashboard", headers=headers(t))
     tiles_list = client.get("/api/admin/tiles", headers=headers(t)).json()
     tid = tiles_list[0]["id"]
-    r = client.get(f"/api/admin/tiles/{tid}/thumbnail", headers=headers(t))
+    r = client.get(f"/api/admin/tiles/{tid}/thumbnail?size=64", headers=headers(t))
     assert r.status_code == 200
     assert r.headers["content-type"] == "image/png"
+    assert r.content[:8] == b"\x89PNG\r\n\x1a\n"
+    img = Image.open(io.BytesIO(r.content))
+    assert img.format == "PNG"
+    assert img.size == (64, 64)

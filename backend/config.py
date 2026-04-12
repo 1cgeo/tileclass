@@ -1,4 +1,5 @@
 """Load and expose YAML config as a singleton."""
+import os
 from pathlib import Path
 import yaml
 
@@ -9,7 +10,8 @@ _cache = None
 def get_config() -> dict:
     global _cache
     if _cache is None:
-        with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
+        path = os.environ.get("TILECLASS_CONFIG") or _CONFIG_PATH
+        with open(path, "r", encoding="utf-8") as f:
             _cache = yaml.safe_load(f)
     return _cache
 
