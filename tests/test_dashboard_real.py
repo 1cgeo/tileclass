@@ -107,3 +107,73 @@ def test_dashboard_empty_state_no_crash(client, admin_user):
     assert d["total_tiles"] == 0
     assert d["completion_percent"] == 0.0
     assert d["eta_days"] is None
+    assert d["avg_classify_seconds"] == 0.0
+    assert d["avg_review_seconds"] == 0.0
+
+
+def test_dashboard_avg_durations_split_by_action(client, admin_user, operators, tiles):
+    """Global and per-operator classify/review times come from action_log
+    (assign_* → classify/review pairs) and must be reported separately."""
+    import time
+    from backend.database import connect, log_action
+    from datetime import datetime, timezone, timedelta
+
+    t1 = token(client, "op1", "secret123")
+    t2 = token(client, "op2", "secret123")
+
+    # op1 classifies two tiles.
+    classified_ids = []
+    for _ in range(2):
+        tile = client.get("/api/tiles/next", headers=h(t1)).json()
+        _classify(client, t1, tile["id"])
+        classified_ids.append(tile["id"])
+
+    # op2 reviews one of them.
+    client.get("/api/tiles/next", headers=h(t2))
+    _review(client, t2, classified_ids[0])
+
+    # Backdate assigns so the measured durations are large and deterministic.
+    # Rewrite the assign_* rows to 120s before their matching classify/review.
+    conn = connect()
+    try:
+        rows = conn.execute(
+            "SELECT id, action, created_at, user_id, tile_id FROM action_log ORDER BY id"
+        ).fetchall()
+        for r in rows:
+            if r["action"] == "assign_classify":
+                finish = conn.execute(
+                    "SELECT created_at FROM action_log WHERE action='classify' "
+                    "AND user_id=? AND tile_id=? ORDER BY id DESC LIMIT 1",
+                    (r["user_id"], r["tile_id"]),
+                ).fetchone()
+                if finish:
+                    new_ts = (datetime.fromisoformat(finish["created_at"])
+                              - timedelta(seconds=120)).isoformat()
+                    conn.execute("UPDATE action_log SET created_at=? WHERE id=?",
+                                 (new_ts, r["id"]))
+            elif r["action"] == "assign_review":
+                finish = conn.execute(
+                    "SELECT created_at FROM action_log WHERE action='review' "
+                    "AND user_id=? AND tile_id=? ORDER BY id DESC LIMIT 1",
+                    (r["user_id"], r["tile_id"]),
+                ).fetchone()
+                if finish:
+                    new_ts = (datetime.fromisoformat(finish["created_at"])
+                              - timedelta(seconds=45)).isoformat()
+                    conn.execute("UPDATE action_log SET created_at=? WHERE id=?",
+                                 (new_ts, r["id"]))
+    finally:
+        conn.close()
+
+    adm = token(client, "admin", "admin123")
+    d = client.get("/api/admin/dashboard", headers=h(adm)).json()
+
+    # Globals: classify ≈ 120s, review ≈ 45s (±2s slack for julianday rounding)
+    assert 118 <= d["avg_classify_seconds"] <= 122
+    assert 43 <= d["avg_review_seconds"] <= 47
+
+    by_user = {u["username"]: u for u in d["per_operator"]}
+    assert 118 <= by_user["op1"]["avg_classify_seconds"] <= 122
+    assert by_user["op1"]["avg_review_seconds"] == 0.0
+    assert by_user["op2"]["avg_classify_seconds"] == 0.0
+    assert 43 <= by_user["op2"]["avg_review_seconds"] <= 47

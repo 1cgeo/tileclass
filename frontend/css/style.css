@@ -154,6 +154,21 @@ input[type="range"] {
     padding: 3px 8px; background: var(--bg-2);
     border-radius: var(--radius-sm); border: 1px solid var(--border);
 }
+.mode-pill {
+    display: inline-flex; align-items: center;
+    padding: 4px 10px; border-radius: 99px;
+    font-size: 11px; font-weight: 700; letter-spacing: 0.08em;
+    text-transform: uppercase;
+    border: 1px solid transparent;
+}
+.mode-pill.mode-classify {
+    background: rgba(76,141,255,0.15); color: var(--accent-hi);
+    border-color: var(--accent-lo);
+}
+.mode-pill.mode-review {
+    background: rgba(255,159,10,0.18); color: var(--warn);
+    border-color: #8a5200;
+}
 .review-banner {
     background: var(--warn); color: #1a1000;
     padding: 4px 10px; border-radius: var(--radius-sm);
@@ -233,6 +248,42 @@ input[type="range"] {
     height: 100%; background: linear-gradient(90deg, var(--accent), var(--ok));
     width: 0%; transition: width 180ms ease;
 }
+.missing-line {
+    font-size: 12px; font-weight: 600;
+    color: var(--err);
+    padding: 6px 10px; margin-top: 4px;
+    background: rgba(255,107,107,0.10);
+    border: 1px solid rgba(255,107,107,0.35);
+    border-radius: var(--radius-sm);
+    display: flex; align-items: center; gap: 6px;
+}
+.missing-line::before { content: "⚠"; font-size: 14px; }
+
+.shortcuts-quick { font-size: 12px; color: var(--text-muted); }
+.shortcuts-quick .sc-row {
+    display: flex; align-items: center; gap: 4px;
+    padding: 3px 0;
+}
+.shortcuts-quick .sc-row > span:not(.kbd) {
+    margin-left: 6px; color: var(--text-muted);
+}
+.link-btn {
+    background: none; border: none; color: var(--accent-hi);
+    padding: 4px 0; font-size: 12px; text-align: left;
+    text-decoration: underline; cursor: pointer;
+}
+.link-btn:hover { color: var(--accent); background: none; }
+
+/* Submit button state: incomplete → warning */
+#btn-submit.incomplete {
+    background: #3a2818; border-color: #8a5200; color: var(--warn);
+    box-shadow: none;
+}
+#btn-submit.incomplete:hover:not(:disabled) {
+    background: #4a3420; border-color: var(--warn);
+}
+#btn-submit.incomplete .kbd { color: var(--warn); border-color: #8a5200; }
+
 .hover-class {
     font-size: 12px; color: var(--info); min-height: 18px;
     font-family: ui-monospace, monospace;

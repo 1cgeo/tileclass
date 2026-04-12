@@ -25,6 +25,7 @@
         <header class="header">
             <div class="header-left">
                 <strong>TileClass</strong>
+                <span id="mode-pill" class="mode-pill mode-classify">CLASSIFICAR</span>
                 <span id="tile-name-label"></span>
                 <span id="queue-progress" class="queue-progress"></span>
                 <span id="review-banner" class="review-banner hidden"></span>
@@ -60,7 +61,19 @@
                     <h3>Progresso</h3>
                     <div id="progress-line">Pixels: <span id="pixel-count">0</span>/65536 (<span id="pixel-pct">0</span>%)</div>
                     <div class="progress-bar"><div id="progress-bar-fill"></div></div>
+                    <div id="missing-line" class="missing-line hidden">Faltam <span id="missing-count">0</span> pixels</div>
                     <div id="hover-class" class="hover-class">—</div>
+                </section>
+                <section class="shortcuts-quick">
+                    <h3>Atalhos</h3>
+                    <div class="sc-row"><span class="kbd">1</span>–<span class="kbd">6</span><span>Classe</span></div>
+                    <div class="sc-row"><span class="kbd">B</span><span class="kbd">E</span><span class="kbd">G</span><span>Pincel/Borracha/Balde</span></div>
+                    <div class="sc-row"><span class="kbd">+</span><span class="kbd">−</span><span>Tamanho</span></div>
+                    <div class="sc-row"><span class="kbd">[</span><span class="kbd">]</span><span>Opacidade</span></div>
+                    <div class="sc-row"><span class="kbd">Space</span><span>Esconder máscara</span></div>
+                    <div class="sc-row"><span class="kbd">⌃Z</span><span class="kbd">⌃⇧Z</span><span>Desfazer/Refazer</span></div>
+                    <div class="sc-row"><span class="kbd">⌃S</span><span>Submeter</span></div>
+                    <button id="btn-help-inline" class="link-btn" type="button">Ver todos os atalhos</button>
                 </section>
             </aside>
 
@@ -82,7 +95,7 @@
             <button id="btn-undo" title="Ctrl+Z">Desfazer <span class="kbd">⌃Z</span></button>
             <button id="btn-redo" title="Ctrl+Shift+Z">Refazer <span class="kbd">⌃⇧Z</span></button>
             <button id="btn-problem">Reportar Problema</button>
-            <button id="btn-submit" class="primary">Submeter <span class="kbd">⌃S</span></button>
+            <button id="btn-submit" class="primary"><span id="submit-label">Submeter</span> <span class="kbd">⌃S</span></button>
         </footer>
 
         <!-- Problem modal -->

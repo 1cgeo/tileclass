@@ -1,13 +1,15 @@
 # TileClass
 
-Aplicação web para classificação pixel-a-pixel de tiles de satélite (256×256, 6 classes).
+Aplicação web para classificação pixel-a-pixel de tiles de satélite (256×256 @ **2.5 m/pixel** = **640 m × 640 m** no chão, 6 classes).
 Backend FastAPI + SQLite; frontend Vanilla JS com Canvas HTML5. Imagem de fundo via TileServer-GL (XYZ).
+
+**Classes (config.yaml):** Massa d'água, Área edificada, Floresta, Campo, Cultivo, Terreno exposto. Cores contrastantes sobre satélite (azul / vermelho / roxo / amarelo / ciano / laranja — sem verde nem tons escuros por regra de contraste).
 
 Spec completa: `docs/requirements.md`. Em caso de dúvida, o requirements manda.
 
 ## Stack
 
-- **Backend:** Python 3.11+, FastAPI, Uvicorn, SQLite (sqlite3 nativo — **sem ORM**), PyJWT, bcrypt, Pillow, NumPy, PyYAML, rasterio (export)
+- **Backend:** Python 3.11+, FastAPI, Uvicorn, SQLite (sqlite3 nativo — **sem ORM**), PyJWT, bcrypt, Pillow, NumPy, PyYAML, rasterio (export), pyproj (geodésica WGS84)
 - **Frontend:** Vanilla JS (sem framework), Canvas HTML5, fetch API. MapLibre GL JS (via CDN) para renderização georreferenciada dos tiles XYZ. Servido como estático pelo FastAPI.
 - **Testes:** pytest + httpx (backend), Vitest + jsdom (frontend unit), Puppeteer + uvicorn real (E2E)
 - **Config:** `backend/config.yaml` (classes, TileServer URL, JWT secret, DB path). Override por env: `TILECLASS_CONFIG=<path>` (usado nos E2E). Rate limit desligável via `TILECLASS_DISABLE_RATE_LIMIT=1` (apenas E2E — nunca em produção).
@@ -24,7 +26,8 @@ uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
 
 # Scripts CLI (rodar como módulo para imports relativos funcionarem)
 python -m backend.scripts.create_admin
-python -m backend.scripts.import_tiles <csv>
+python -m backend.scripts.import_points --point <lat> <lon> <name>          # um ponto
+python -m backend.scripts.import_points --csv pontos.csv [--block 3]        # CSV lat,lon,name; block NxN
 python -m backend.scripts.export_tiles <out_dir> [--mosaic]
 
 # Testes
@@ -48,7 +51,8 @@ tileclass/
 │   ├── admin_service.py     # Dashboard, bulk reset/re-review, users, thumbnail
 │   ├── mask_utils.py        # Uint8Array ↔ PNG "L" + validação
 │   ├── config.yaml
-│   └── scripts/             # create_admin / import_tiles / export_tiles
+│   ├── geo.py               # Constantes TILE_PX/METERS_PER_PX/TILE_METERS + bbox_from_center (pyproj.Geod WGS84)
+│   └── scripts/             # create_admin / import_points / export_tiles
 ├── frontend/
 │   ├── index.html           # SPA (login / editor / admin)
 │   ├── js/mask-core.js      # Lógica PURA de máscara (paint, bresenham, flood, undo) — testável sem DOM
@@ -78,11 +82,14 @@ tileclass/
 
 ## Invariantes do domínio
 
+- **Geometria do tile (backend/geo.py):** `TILE_PX=256`, `METERS_PER_PX=2.5`, `TILE_METERS=640`. Cada tile é definido **pelo centro geodésico**. `bbox_from_center(lat, lon)` usa `pyproj.Geod` (WGS84) para calcular ±320 m em cada direção cardeal — precisão < 1 mm em qualquer latitude. Schema de `tiles` tem apenas `bbox_*`; zoom/tile_x/tile_y/context_tiles foram removidos.
+- **Adjacência sem gap:** `offset_center(lat, lon, dx, dy)` caminha `dx*640m` e `dy*640m` por geodésica, garantindo que tiles vizinhos do `--block NxN` compartilhem arestas exatamente (gap < 1 mm, validado por teste).
 - **Fonte de verdade da máscara:** `Uint8Array(65536)` no cliente. Valores válidos: `1..6` (classes) e `255` (não preenchido). O canvas é apenas visualização.
 - **PNG do backend:** banda única (grayscale "L"), 8 bits, 256×256, sem compressão com perda. Pillow faz a conversão `bytes ↔ PNG`.
 - **Protocolo wire:** frontend envia **raw bytes** (Uint8Array, 65536 bytes) no body do classify/review; nunca PNG. Backend converte.
 - **Submissão:** rejeitar se houver `255` no array. Resposta de erro traz a contagem.
 - **Máquina de estados de tile:** `pending → in_progress → classified → in_review → reviewed`; qualquer estado `→ problem`; `problem → pending` e `reviewed → in_review` são transições de admin.
+- **Export GeoTIFF:** `export_tiles.py` usa `rasterio.transform.from_bounds(west, south, east, north, 256, 256)` com `crs=EPSG:4326`. Combinado com a bbox de `bbox_from_center`, o pixel resultante é exatamente 2.5 m na latitude do centro (validado para 20 pontos mundiais em `test_raster_worldwide.py`).
 
 ## Regras críticas de backend
 
@@ -97,6 +104,7 @@ tileclass/
 - **Rate limit:** `/api/auth/login` — 5/min por IP. Use `auth.reset_rate_limits()` nos testes (não acesse `_login_attempts` direto).
 - **bcrypt:** cost ≥ 12. **JWT:** HS256, access 8h, refresh 24h (valores em `config.yaml`).
 - **Índices:** `status`, `assigned_to`, `classified_by`, `reviewed_by`, `classified_at`, `reviewed_at` — manter quando adicionar filtros no admin.
+- **Métricas de duração (dashboard):** derivadas do `action_log` via pares `assign_classify→classify` e `assign_review→review` (não há schema novo). `dashboard()` retorna `avg_classify_seconds`/`avg_review_seconds` globais + por operador em `per_operator[]`. Pareamento usa `MAX(...)` por `(user_id, tile_id)` para suportar tiles re-atribuídos; `julianday()*86400` converte o diff para segundos.
 
 ## Regras críticas de frontend
 
@@ -118,8 +126,20 @@ tileclass/
 - **Pré-carregar próximo tile:** `/api/tiles/next-preview` (peek sem atribuir) enquanto operador pinta o atual. Cache em `preloadedNext` é invalidado se o tile realmente atribuído em `/next` for diferente.
 - Após submeter: próximo tile carrega automaticamente (sem clique extra); flash verde 200ms antes.
 - Pixels faltantes ao submeter: pisca vermelho 2s sobre o canvas.
+- **Pixels faltantes sempre visíveis:** linha `⚠ Faltam N pixels` (`#missing-line`) na sidebar enquanto incompleto; some em 0.
+- **Botão de submit auto-explicativo:** quando incompleto, troca para label `"Faltam N px"` com estilo `.incomplete` (laranja-aviso). Em tile `in_review`, label vira `"Aprovar revisão"`.
+- **Modo sempre visível:** pill `#mode-pill` no header — azul `CLASSIFICAR` ou laranja `REVISAR`. Atualizado em `loadTile()` junto com o `review-banner`.
+- **Barra de progresso:** `#progress-bar-fill` (gradiente azul→verde) reflete `filledCount/65536`.
+- **Atalhos visíveis:** badges `<span class="kbd">` inline nos botões (Tools/Undo/Redo/Submit) + seção `"Atalhos"` persistente no sidebar com as combinações principais + link "Ver todos" abrindo modal completo.
 - Backup do `Uint8Array` em `localStorage` durante edição; restaurar em caso de F5 (confirmação obrigatória antes de sobrescrever estado do servidor).
 - **JWT refresh proativo:** `api.js` decodifica o `exp` do token e agenda refresh 60s antes de expirar. Além disso, re-tenta automaticamente no 401 (reativo). O usuário não deve ver logout por expiração durante uso contínuo.
+
+## Design system (CSS)
+
+- **Tokens em `:root`** (`style.css`): `--bg-0…bg-4`, `--accent`, `--ok`, `--warn`, `--err`, `--info`, `--space-1…6`, `--radius*`, `--shadow*`, `--header-h`, `--sidebar-w`, `--minimap-w`. Sempre via `var()`, nunca hex hardcoded em componentes.
+- **Responsive breakpoints:** 1180px (encolhe sidebar/minimap), 960px (minimap vira faixa horizontal abaixo do canvas), 720px (single-column, sidebar vira scroll-snap horizontal), 480px (stats grid 1-col). `prefers-reduced-motion` respeitado.
+- **Status chips** (`.chip.pending/in_progress/classified/in_review/reviewed/problem`) disponíveis para tabelas admin.
+- **Spinner de loading** (`.loading`) e `.loading-text` padrão.
 
 ## Segurança
 
@@ -132,12 +152,15 @@ tileclass/
 
 Três camadas. Todas devem passar antes de commitar:
 
-### Backend (`tests/*.py`, pytest + TestClient) — 138 testes
+### Backend (`tests/*.py`, pytest + TestClient) — 175 testes
 - Fixture `app_env` em `conftest.py` monkey-patcha o DB para arquivo temporário. Precisa patchar `get_config` em **cada módulo** que fez `from .config import get_config` (referência é copiada no import).
 - Fixtures: `admin_user`, `operators` (3), `operators_10`, `tiles` (10 pending), `tiles_many` (100).
 - Rate limit entre logins: `auth.reset_rate_limits()` antes de cada login quando >5 no mesmo teste.
 - Concorrência crítica: `test_concurrent_10_operators_no_duplicates` (10 threads pending), `test_10_reviewers_race_on_classified_queue` (9 reviewers simultâneos na fila de revisão).
-- Invariantes de domínio com teste próprio: `test_auth_invariants` (bcrypt cost≥12, JWT TTL 8h/24h, forgery, typ access↔refresh, escalação via claim), `test_authz_crossuser` (bypass de `/next`, POST cross-user, gate admin), `test_state_machine` (todas transições + ilegais), `test_rate_limit_real` (sem reset), `test_dashboard_real` (atua antes de conferir — não-tautológico), `test_mask_roundtrip_strong` (padrões não-uniformes).
+- Invariantes de domínio com teste próprio: `test_auth_invariants` (bcrypt cost≥12, JWT TTL 8h/24h, forgery, typ access↔refresh, escalação via claim), `test_authz_crossuser` (bypass de `/next`, POST cross-user, gate admin), `test_state_machine` (todas transições + ilegais), `test_rate_limit_real` (sem reset), `test_dashboard_real` (atua antes de conferir — não-tautológico, inclui `test_dashboard_avg_durations_split_by_action` que faz backdate do `action_log` e valida pareamento assign→classify/review), `test_mask_roundtrip_strong` (padrões não-uniformes).
+- **Invariantes geométricas (`test_geo.py` — 14 testes):** tile sempre 640m×640m em qualquer latitude (equador → -70°), pixel = 2.5m em ambos eixos, bbox simétrica ao centro, adjacência sem gap, bloco 3x3 cobre exatamente 1920m, `from_bounds` do rasterio bate com 2.5m.
+- **Rasters mundiais (`test_raster_worldwide.py` — 22 testes):** 20 pontos (equador, trópicos, NY, Tóquio, Moscou, Tromsø, McMurdo/Antártica) geram GeoTIFF real pela mesma pipeline do `export_tiles._write_geotiff`, reabrem com `rasterio` e validam CRS=EPSG:4326, bounds, transform, pixel em metros, e `dataset.xy()` retornando ao centro. Um teste reverso prova que **span em graus encolhe com a latitude** — se voltar alguma aproximação esférica, quebra.
+- **PROJ no Windows:** existem 3 instalações concorrentes (PostgreSQL/PostGIS, pyproj, rasterio) com versões diferentes de `proj.db`. `test_raster_worldwide.py` força `PROJ_LIB=PROJ_DATA=<rasterio>/proj_data` no topo do arquivo **antes** de qualquer op que toque CRS.
 
 ### Frontend unit (`tests/frontend/*.test.js`, Vitest + jsdom) — 57 testes
 - `mask-core.test.js` testa `frontend/js/mask-core.js` (paint, Bresenham sem gaps, floodFill com fronteira, undo/redo byte-exato com Uint32Array, `screenToLogical` com rect deslocado/esticado, `validateSubmission` espelhando backend).

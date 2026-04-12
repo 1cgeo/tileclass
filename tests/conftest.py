@@ -98,9 +98,9 @@ def tiles_many(app_env):
         for i in range(100):
             conn.execute(
                 """INSERT INTO tiles(name,bbox_west,bbox_south,bbox_east,bbox_north,
-                   zoom,tile_x,tile_y,status,data_png)
-                   VALUES (?,?,?,?,?,?,?,?,'pending',?)""",
-                (f"tile_{i:03d}", 0.0 + i, 0.0, 0.1 + i, 0.1, 15, 100 + i, 200, empty),
+                   status,data_png)
+                   VALUES (?,?,?,?,?,'pending',?)""",
+                (f"tile_{i:03d}", 0.0 + i, 0.0, 0.1 + i, 0.1, empty),
             )
     finally:
         conn.close()
@@ -117,9 +117,9 @@ def tiles(app_env):
         for i in range(10):
             conn.execute(
                 """INSERT INTO tiles(name,bbox_west,bbox_south,bbox_east,bbox_north,
-                   zoom,tile_x,tile_y,status,data_png)
-                   VALUES (?,?,?,?,?,?,?,?,'pending',?)""",
-                (f"tile_{i:03d}", 0.0 + i, 0.0, 0.1 + i, 0.1, 15, 100 + i, 200, empty),
+                   status,data_png)
+                   VALUES (?,?,?,?,?,'pending',?)""",
+                (f"tile_{i:03d}", 0.0 + i, 0.0, 0.1 + i, 0.1, empty),
             )
     finally:
         conn.close()

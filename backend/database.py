@@ -55,9 +55,6 @@ CREATE TABLE IF NOT EXISTS tiles (
     bbox_south REAL NOT NULL,
     bbox_east REAL NOT NULL,
     bbox_north REAL NOT NULL,
-    zoom INTEGER NOT NULL,
-    tile_x INTEGER NOT NULL,
-    tile_y INTEGER NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',
     assigned_to INTEGER REFERENCES users(id),
     classified_by INTEGER REFERENCES users(id),
@@ -65,8 +62,7 @@ CREATE TABLE IF NOT EXISTS tiles (
     classified_at TEXT,
     reviewed_at TEXT,
     data_png BLOB,
-    problem_note TEXT,
-    context_tiles TEXT
+    problem_note TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_tiles_status ON tiles(status);

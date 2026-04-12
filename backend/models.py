@@ -37,9 +37,6 @@ class TileOut(BaseModel):
     bbox_south: float
     bbox_east: float
     bbox_north: float
-    zoom: int
-    tile_x: int
-    tile_y: int
     status: str
     assigned_to: Optional[int]
     classified_by: Optional[int]
@@ -63,6 +60,8 @@ class DashboardOut(BaseModel):
     completion_percent: float
     daily_completed: list
     per_operator: list
+    avg_classify_seconds: float = 0.0
+    avg_review_seconds: float = 0.0
     rate_per_day: float
     eta_days: Optional[float]
 

@@ -47,10 +47,9 @@ def main(db_path: str) -> None:
         for i in range(10):
             conn.execute(
                 """INSERT INTO tiles(name, bbox_west, bbox_south, bbox_east, bbox_north,
-                   zoom, tile_x, tile_y, status, data_png)
-                   VALUES (?,?,?,?,?,?,?,?,'pending',?)""",
-                (f"e2e_{i:03d}", i * 0.1, 0.0, (i + 1) * 0.1, 0.1,
-                 15, 100 + i, 200, empty),
+                   status, data_png)
+                   VALUES (?,?,?,?,?,'pending',?)""",
+                (f"e2e_{i:03d}", i * 0.1, 0.0, (i + 1) * 0.1, 0.1, empty),
             )
     finally:
         conn.close()

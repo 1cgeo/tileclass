@@ -220,11 +220,22 @@ async function loadTile(t, preloadedMask = null) {
     undoStack.length = 0; redoStack.length = 0;
     document.getElementById("tile-name-label").textContent = `Tile: ${t.name} (#${t.id})`;
     const reviewBanner = document.getElementById("review-banner");
+    const modePill = document.getElementById("mode-pill");
     if (t.status === "in_review") {
-        reviewBanner.textContent = `MODO REVISÃO — Classificado por ${t.classified_by_username || "?"}`;
+        reviewBanner.textContent = `Classificado por ${t.classified_by_username || "?"}`;
         reviewBanner.classList.remove("hidden");
+        if (modePill) {
+            modePill.textContent = "REVISAR";
+            modePill.classList.remove("mode-classify");
+            modePill.classList.add("mode-review");
+        }
     } else {
         reviewBanner.classList.add("hidden");
+        if (modePill) {
+            modePill.textContent = "CLASSIFICAR";
+            modePill.classList.remove("mode-review");
+            modePill.classList.add("mode-classify");
+        }
     }
     if (preloadedMask) mask = preloadedMask;
     else await loadMaskFromServer(t.id);
@@ -295,6 +306,31 @@ function updateProgress() {
     line.classList.toggle("complete", filledCount === PIXELS);
     const bar = document.getElementById("progress-bar-fill");
     if (bar) bar.style.width = pct + "%";
+    const missing = PIXELS - filledCount;
+    const missLine = document.getElementById("missing-line");
+    const missCount = document.getElementById("missing-count");
+    if (missLine && missCount) {
+        missLine.classList.toggle("hidden", missing === 0);
+        missCount.textContent = missing.toLocaleString("pt-BR");
+    }
+    updateSubmitButton(missing);
+}
+
+function updateSubmitButton(missing) {
+    const btn = document.getElementById("btn-submit");
+    const label = document.getElementById("submit-label");
+    if (!btn || !label) return;
+    const isReview = currentTile && currentTile.status === "in_review";
+    const baseLabel = isReview ? "Aprovar revisão" : "Submeter";
+    if (missing > 0) {
+        btn.classList.add("incomplete");
+        label.textContent = `Faltam ${missing.toLocaleString("pt-BR")} px`;
+        btn.title = `Complete a máscara — faltam ${missing} pixels`;
+    } else {
+        btn.classList.remove("incomplete");
+        label.textContent = baseLabel;
+        btn.title = isReview ? "Aprovar esta revisão (Ctrl+S)" : "Submeter classificação (Ctrl+S)";
+    }
 }
 
 // --- Rendering ---
@@ -489,6 +525,8 @@ function attachEvents() {
     document.getElementById("problem-confirm").addEventListener("click", confirmProblem);
 
     document.getElementById("btn-help").addEventListener("click", () => document.getElementById("modal-help").classList.remove("hidden"));
+    const btnHelpInline = document.getElementById("btn-help-inline");
+    if (btnHelpInline) btnHelpInline.addEventListener("click", () => document.getElementById("modal-help").classList.remove("hidden"));
     document.getElementById("help-close").addEventListener("click", () => document.getElementById("modal-help").classList.add("hidden"));
 
     document.getElementById("btn-logout").addEventListener("click", () => {

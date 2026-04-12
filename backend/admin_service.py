@@ -36,24 +36,54 @@ def dashboard() -> dict:
                GROUP BY u.id ORDER BY u.username"""
         ).fetchall()
 
-        # Compute avg seconds per tile per user using min(assign_*) and max(classify/review)
-        # within the same tile_id for each user. SQLite julianday() does the arithmetic.
-        avg_rows = conn.execute(
-            """SELECT user_id, AVG(delta_sec) avg_sec FROM (
-                 SELECT a.user_id, a.tile_id,
-                   (julianday(MAX(CASE WHEN a.action IN ('classify','review') THEN a.created_at END))
-                  - julianday(MIN(CASE WHEN a.action IN ('assign_classify','assign_review') THEN a.created_at END)))*86400 delta_sec
-                 FROM action_log a
-                 GROUP BY a.user_id, a.tile_id
-                 HAVING delta_sec IS NOT NULL AND delta_sec > 0
-               ) GROUP BY user_id"""
+        # Duration per (user, tile, kind): diff between the latest assign_* and the
+        # latest classify/review of the same kind. Split into classify vs review so
+        # admins can see both averages separately (global and per-operator).
+        classify_rows = conn.execute(
+            """SELECT user_id, tile_id,
+                 (julianday(MAX(CASE WHEN action='classify' THEN created_at END))
+                - julianday(MAX(CASE WHEN action='assign_classify' THEN created_at END)))*86400 AS dur
+               FROM action_log
+               WHERE action IN ('assign_classify','classify')
+               GROUP BY user_id, tile_id
+               HAVING dur IS NOT NULL AND dur > 0"""
         ).fetchall()
-        avg_by_user = {r["user_id"]: r["avg_sec"] for r in avg_rows}
+        review_rows = conn.execute(
+            """SELECT user_id, tile_id,
+                 (julianday(MAX(CASE WHEN action='review' THEN created_at END))
+                - julianday(MAX(CASE WHEN action='assign_review' THEN created_at END)))*86400 AS dur
+               FROM action_log
+               WHERE action IN ('assign_review','review')
+               GROUP BY user_id, tile_id
+               HAVING dur IS NOT NULL AND dur > 0"""
+        ).fetchall()
+
+        def _avg_by_user(rows):
+            agg: dict[int, list[float]] = {}
+            for r in rows:
+                agg.setdefault(r["user_id"], []).append(r["dur"])
+            return {uid: sum(v) / len(v) for uid, v in agg.items()}
+
+        classify_by_user = _avg_by_user(classify_rows)
+        review_by_user = _avg_by_user(review_rows)
+
+        all_classify = [r["dur"] for r in classify_rows]
+        all_review = [r["dur"] for r in review_rows]
+        avg_classify_seconds = round(sum(all_classify) / len(all_classify), 1) if all_classify else 0.0
+        avg_review_seconds = round(sum(all_review) / len(all_review), 1) if all_review else 0.0
 
         per_op_list = []
         for r in per_op:
             d = dict(r)
-            d["avg_seconds_per_tile"] = round(avg_by_user.get(r["id"], 0) or 0, 1)
+            c = classify_by_user.get(r["id"])
+            rv = review_by_user.get(r["id"])
+            d["avg_classify_seconds"] = round(c, 1) if c else 0.0
+            d["avg_review_seconds"] = round(rv, 1) if rv else 0.0
+            # Combined (legacy) average kept for backwards compatibility
+            combined = []
+            if c: combined.append(c)
+            if rv: combined.append(rv)
+            d["avg_seconds_per_tile"] = round(sum(combined) / len(combined), 1) if combined else 0.0
             per_op_list.append(d)
 
         # ETA: remaining = total - reviewed; rate = tiles reviewed in last 7 days / day
@@ -73,6 +103,8 @@ def dashboard() -> dict:
         "completion_percent": pct,
         "daily_completed": [{"date": r["d"], "count": r["c"]} for r in daily],
         "per_operator": per_op_list,
+        "avg_classify_seconds": avg_classify_seconds,
+        "avg_review_seconds": avg_review_seconds,
         "rate_per_day": round(rate_per_day, 2),
         "eta_days": eta_days,
     }

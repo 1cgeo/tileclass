@@ -64,6 +64,8 @@ async function renderDashboard(root) {
         statCard("Problemas", d.totals_by_status.problem || 0),
         statCard("Ritmo (tiles/dia)", d.rate_per_day),
         statCard("ETA (dias)", d.eta_days ?? "—"),
+        statCard("Tempo médio / classificação", fmtDuration(d.avg_classify_seconds)),
+        statCard("Tempo médio / revisão", fmtDuration(d.avg_review_seconds)),
     );
     root.appendChild(grid);
 
@@ -88,12 +90,13 @@ async function renderDashboard(root) {
     const table = document.createElement("table");
     table.className = "admin-table";
     const thead = document.createElement("thead");
-    thead.innerHTML = "<tr><th>Usuário</th><th>Classificados</th><th>Revisados</th><th>Problemas</th><th>Tempo médio (s/tile)</th></tr>";
+    thead.innerHTML = "<tr><th>Usuário</th><th>Classificados</th><th>Revisados</th><th>Problemas</th><th>Tempo médio classificação</th><th>Tempo médio revisão</th></tr>";
     table.appendChild(thead);
     const tbody = document.createElement("tbody");
     for (const op of d.per_operator) {
         const tr = document.createElement("tr");
-        [op.username, op.classified || 0, op.reviewed || 0, op.problems || 0, op.avg_seconds_per_tile || 0]
+        [op.username, op.classified || 0, op.reviewed || 0, op.problems || 0,
+         fmtDuration(op.avg_classify_seconds), fmtDuration(op.avg_review_seconds)]
             .forEach(v => { const td = document.createElement("td"); td.textContent = v; tr.appendChild(td); });
         tbody.appendChild(tr);
     }
@@ -114,6 +117,17 @@ async function renderDashboard(root) {
         row.append(name, bar, count);
         root.appendChild(row);
     }
+}
+
+function fmtDuration(sec) {
+    const s = Number(sec) || 0;
+    if (s <= 0) return "—";
+    if (s < 60) return `${s.toFixed(1)}s`;
+    const m = Math.floor(s / 60);
+    const r = Math.round(s - m * 60);
+    if (m < 60) return `${m}m ${r}s`;
+    const h = Math.floor(m / 60);
+    return `${h}h ${m - h * 60}m`;
 }
 
 function statCard(label, value) {
