@@ -269,14 +269,14 @@ def test_classify_rejects_invalid_class_seven(client, operators, tiles):
     assert r.status_code == 400
 
 
-def test_classify_wrong_size_returns_400(client, operators, tiles):
+def test_classify_wrong_size_returns_422(client, operators, tiles):
     t = token(client, "op1", "secret123")
     tile = client.get("/api/tiles/next", headers=h(t)).json()
     r = client.post(f"/api/tiles/{tile['id']}/classify",
                     headers={**h(t), "Content-Type": "application/octet-stream"},
                     content=b"\x01" * 100)
-    assert r.status_code == 400
-    assert r.json()["detail"]["error"] == "invalid_mask"
+    assert r.status_code == 422
+    assert r.json()["detail"]["error"] == "invalid_mask_size"
 
 
 def test_classify_missing_count_reported(client, operators, tiles):

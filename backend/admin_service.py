@@ -116,29 +116,57 @@ def list_tiles(status: str | None = None, user_id: int | None = None,
     where = []
     args: list = []
     if status:
-        where.append("status=?")
+        where.append("t.status=?")
         args.append(status)
     if user_id is not None:
-        where.append("(classified_by=? OR reviewed_by=?)")
+        where.append("(t.classified_by=? OR t.reviewed_by=?)")
         args.extend([user_id, user_id])
     if date_from:
-        where.append("(classified_at >= ? OR reviewed_at >= ?)")
+        where.append("(t.classified_at >= ? OR t.reviewed_at >= ?)")
         args.extend([date_from, date_from])
     if date_to:
         to_end = date_to + "T23:59:59"
-        where.append("(classified_at <= ? OR reviewed_at <= ?)")
+        where.append("(t.classified_at <= ? OR t.reviewed_at <= ?)")
         args.extend([to_end, to_end])
-    sql = ("SELECT id, name, status, classified_by, reviewed_by, "
-           "classified_at, reviewed_at, problem_note FROM tiles")
-    if where:
-        sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY id LIMIT ? OFFSET ?"
-    args.extend([limit, offset])
+    where_sql = (" WHERE " + " AND ".join(where)) if where else ""
     conn = connect()
     try:
-        return [dict(r) for r in conn.execute(sql, args).fetchall()]
+        rows = conn.execute(
+            "SELECT t.id, t.name, t.status, t.classified_by, t.reviewed_by, "
+            "t.classified_at, t.reviewed_at, t.problem_note, "
+            "uc.username AS classified_by_username, "
+            "ur.username AS reviewed_by_username "
+            "FROM tiles t "
+            "LEFT JOIN users uc ON uc.id=t.classified_by "
+            "LEFT JOIN users ur ON ur.id=t.reviewed_by"
+            + where_sql
+            + " ORDER BY t.id LIMIT ? OFFSET ?",
+            args + [limit, offset],
+        ).fetchall()
     finally:
         conn.close()
+    return [dict(r) for r in rows]
+
+
+def count_tiles(status: str | None = None, user_id: int | None = None,
+                date_from: str | None = None, date_to: str | None = None) -> int:
+    where = []
+    args: list = []
+    if status: where.append("status=?"); args.append(status)
+    if user_id is not None:
+        where.append("(classified_by=? OR reviewed_by=?)"); args.extend([user_id, user_id])
+    if date_from:
+        where.append("(classified_at >= ? OR reviewed_at >= ?)"); args.extend([date_from, date_from])
+    if date_to:
+        to_end = date_to + "T23:59:59"
+        where.append("(classified_at <= ? OR reviewed_at <= ?)"); args.extend([to_end, to_end])
+    where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+    conn = connect()
+    try:
+        row = conn.execute("SELECT COUNT(*) c FROM tiles" + where_sql, args).fetchone()
+    finally:
+        conn.close()
+    return int(row["c"])
 
 
 def list_problems() -> list[dict]:
@@ -159,29 +187,39 @@ def list_problems() -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def reset_many(tile_ids: list[int], admin_id: int) -> int:
+_MAX_REASON_LEN = 500
+
+
+def _clean_reason(reason: str | None) -> str | None:
+    return ((reason or "").strip()[:_MAX_REASON_LEN]) or None
+
+
+def reset_many(tile_ids: list[int], admin_id: int, reason: str | None = None) -> int:
     if not tile_ids:
         return 0
     empty = empty_mask_png()
+    detail = _clean_reason(reason)
     with transaction("IMMEDIATE") as conn:
         for tid in tile_ids:
             conn.execute(
                 """UPDATE tiles SET status='pending', data_png=?, assigned_to=NULL,
                    classified_by=NULL, reviewed_by=NULL, classified_at=NULL,
-                   reviewed_at=NULL, problem_note=NULL WHERE id=?""",
+                   reviewed_at=NULL, problem_note=NULL, version=version+1 WHERE id=?""",
                 (empty, tid),
             )
-            log_action(conn, admin_id, tid, "reset")
+            log_action(conn, admin_id, tid, "reset", detail)
     return len(tile_ids)
 
 
-def reset_tile(tile_id: int, admin_id: int) -> None:
-    reset_many([tile_id], admin_id)
+def reset_tile(tile_id: int, admin_id: int, reason: str | None = None) -> None:
+    reset_many([tile_id], admin_id, reason)
 
 
-def re_review_many(tile_ids: list[int], admin_id: int, strict: bool = False) -> int:
+def re_review_many(tile_ids: list[int], admin_id: int, strict: bool = False,
+                    reason: str | None = None) -> int:
     if not tile_ids:
         return 0
+    detail = _clean_reason(reason)
     with transaction("IMMEDIATE") as conn:
         count = 0
         for tid in tile_ids:
@@ -196,16 +234,16 @@ def re_review_many(tile_ids: list[int], admin_id: int, strict: bool = False) -> 
                 continue
             conn.execute(
                 """UPDATE tiles SET status='classified', reviewed_by=NULL, reviewed_at=NULL,
-                   assigned_to=NULL WHERE id=?""",
+                   assigned_to=NULL, version=version+1 WHERE id=?""",
                 (tid,),
             )
-            log_action(conn, admin_id, tid, "re_review")
+            log_action(conn, admin_id, tid, "re_review", detail)
             count += 1
     return count
 
 
-def re_review_tile(tile_id: int, admin_id: int) -> None:
-    re_review_many([tile_id], admin_id, strict=True)
+def re_review_tile(tile_id: int, admin_id: int, reason: str | None = None) -> None:
+    re_review_many([tile_id], admin_id, strict=True, reason=reason)
 
 
 def list_users() -> list[dict]:
@@ -220,8 +258,7 @@ def list_users() -> list[dict]:
 
 
 def create_user(username: str, password: str, role: str) -> dict:
-    conn = connect()
-    try:
+    with transaction("IMMEDIATE") as conn:
         existing = conn.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone()
         if existing:
             raise HTTPException(409, "username already exists")
@@ -230,8 +267,6 @@ def create_user(username: str, password: str, role: str) -> dict:
             (username, hash_password(password), role, datetime.now(timezone.utc).isoformat()),
         )
         row = conn.execute("SELECT id, username, role FROM users WHERE username=?", (username,)).fetchone()
-    finally:
-        conn.close()
     return dict(row)
 
 
@@ -255,7 +290,10 @@ def tile_thumbnail(tile_id: int, size: int = 128) -> bytes:
         conn.close()
     if not row:
         raise HTTPException(404, "tile not found")
-    raw = decode_mask(row["data_png"])
+    try:
+        raw = decode_mask(row["data_png"])
+    except (ValueError, OSError) as e:
+        raise HTTPException(422, f"corrupted mask in db: {e}")
     arr = np.frombuffer(raw, dtype=np.uint8).reshape(TILE_SIZE, TILE_SIZE)
     classes = get_config()["classes"]
     lut = np.zeros((256, 4), dtype=np.uint8)

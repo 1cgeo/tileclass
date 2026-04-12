@@ -81,15 +81,15 @@ def test_classify_rejects_unfilled(client, operators, tiles):
 
 
 def test_classify_rejects_wrong_size(client, operators, tiles):
-    """Tight assertion: must be 400 invalid_mask, not a 500 leak, and state untouched."""
+    """Tight assertion: must be 422 invalid_mask_size, not a 500 leak, and state untouched."""
     from backend.database import connect
     t = token(client, "op1", "secret123")
     tile = client.get("/api/tiles/next", headers=headers(t)).json()
     r = client.post(f"/api/tiles/{tile['id']}/classify",
                     headers={**headers(t), "Content-Type": "application/octet-stream"},
                     content=b"\x01" * 100)
-    assert r.status_code == 400
-    assert r.json()["detail"]["error"] == "invalid_mask"
+    assert r.status_code == 422
+    assert r.json()["detail"]["error"] == "invalid_mask_size"
 
     conn = connect()
     try:

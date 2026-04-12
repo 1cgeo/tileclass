@@ -31,6 +31,9 @@ def app_env(monkeypatch, tmp_path):
     # Reset in-memory rate-limit state between tests
     authmod.reset_rate_limits()
 
+    # Tests use the placeholder secret from config.yaml; opt-in explicitly.
+    monkeypatch.setenv("TILECLASS_ALLOW_DEFAULT_SECRET", "1")
+
     dbmod.init_db()
     yield db_file
 

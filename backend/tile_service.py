@@ -11,7 +11,7 @@ def _now() -> str:
 
 
 def _row_to_tile_dict(row) -> dict:
-    return {
+    d = {
         "id": row["id"],
         "name": row["name"],
         "bbox_west": row["bbox_west"],
@@ -22,7 +22,23 @@ def _row_to_tile_dict(row) -> dict:
         "assigned_to": row["assigned_to"],
         "classified_by": row["classified_by"],
         "reviewed_by": row["reviewed_by"],
+        "version": row["version"],
     }
+    # If the row includes the mask blob, enrich with filled_pixels so the
+    # client doesn't need a follow-up /api/tiles/{id} round-trip.
+    try:
+        png = row["data_png"]
+    except (IndexError, KeyError):
+        png = None
+    if png:
+        try:
+            raw = decode_mask(png)
+            d["filled_pixels"] = len(raw) - raw.count(b"\xff")
+        except Exception:
+            d["filled_pixels"] = 0
+    else:
+        d["filled_pixels"] = 0
+    return d
 
 
 def peek_next_tile(user_id: int) -> dict | None:
@@ -177,7 +193,8 @@ def get_tile_image(tile_id: int) -> bytes | None:
     return row["data_png"] or empty_mask_png()
 
 
-def submit_classification(tile_id: int, user_id: int, raw_mask: bytes) -> dict:
+def submit_classification(tile_id: int, user_id: int, raw_mask: bytes,
+                          expected_version: int | None = None) -> dict:
     try:
         ok, missing = validate_submission(raw_mask)
     except ValueError as e:
@@ -185,25 +202,41 @@ def submit_classification(tile_id: int, user_id: int, raw_mask: bytes) -> dict:
     if not ok:
         raise HTTPException(422, detail={"error": "unfilled_pixels", "missing": missing})
     png = encode_mask(raw_mask)
+    # Encoded PNG of a 256x256 8-bit mask never exceeds ~100KB; guard against
+    # unexpected blowup so a bug cannot inflate the DB.
+    if len(png) > 200_000:
+        raise HTTPException(413, detail={"error": "mask_too_large"})
 
     with transaction("IMMEDIATE") as conn:
-        row = conn.execute("SELECT status, assigned_to FROM tiles WHERE id=?", (tile_id,)).fetchone()
+        row = conn.execute(
+            "SELECT status, assigned_to, version FROM tiles WHERE id=?", (tile_id,)
+        ).fetchone()
         if not row:
             raise HTTPException(404, "tile not found")
+        if expected_version is not None and row["version"] != expected_version:
+            raise HTTPException(
+                409,
+                detail={
+                    "error": "tile_modified",
+                    "message": "Este tile foi alterado por um admin enquanto você trabalhava. "
+                               "Seu progresso foi salvo localmente.",
+                    "current_version": row["version"],
+                },
+            )
         if row["assigned_to"] != user_id:
             raise HTTPException(403, "not assigned to you")
         status = row["status"]
         if status == "in_progress":
             conn.execute(
                 """UPDATE tiles SET status='classified', data_png=?, classified_by=?,
-                   classified_at=?, assigned_to=NULL WHERE id=?""",
+                   classified_at=?, assigned_to=NULL, version=version+1 WHERE id=?""",
                 (png, user_id, _now(), tile_id),
             )
             log_action(conn, user_id, tile_id, "classify")
         elif status == "in_review":
             conn.execute(
                 """UPDATE tiles SET status='reviewed', data_png=?, reviewed_by=?,
-                   reviewed_at=?, assigned_to=NULL WHERE id=?""",
+                   reviewed_at=?, assigned_to=NULL, version=version+1 WHERE id=?""",
                 (png, user_id, _now(), tile_id),
             )
             log_action(conn, user_id, tile_id, "review")
@@ -212,7 +245,14 @@ def submit_classification(tile_id: int, user_id: int, raw_mask: bytes) -> dict:
     return {"ok": True}
 
 
+_MAX_PROBLEM_NOTE = 2000
+
+
 def report_problem(tile_id: int, user_id: int, note: str) -> dict:
+    # Cap note size so action_log.detail cannot be used to bloat the DB.
+    note = (note or "").strip()
+    if len(note) > _MAX_PROBLEM_NOTE:
+        note = note[:_MAX_PROBLEM_NOTE]
     with transaction("IMMEDIATE") as conn:
         row = conn.execute("SELECT status, assigned_to FROM tiles WHERE id=?", (tile_id,)).fetchone()
         if not row:

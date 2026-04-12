@@ -4,9 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TileClass</title>
-    <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+    <link rel="stylesheet" href="/static/vendor/maplibre/maplibre-gl.css">
     <link rel="stylesheet" href="/static/css/style.css">
-    <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+    <script src="/static/vendor/maplibre/maplibre-gl.js"></script>
 </head>
 <body>
     <!-- Login view -->
@@ -55,7 +55,8 @@
                 </section>
                 <section class="opacity">
                     <h3>Opacidade <span id="opacity-label" style="float:right;color:var(--text-muted);font-weight:400;text-transform:none;letter-spacing:0;">50%</span></h3>
-                    <input type="range" id="mask-opacity" min="0" max="100" value="50">
+                    <input type="range" id="mask-opacity" min="0" max="100" value="50"
+                           title="0% esconde a máscara; 100% a deixa totalmente opaca sobre o satélite. Atalhos: [ / ]">
                 </section>
                 <section class="progress">
                     <h3>Progresso</h3>
@@ -83,6 +84,14 @@
                     <canvas id="canvas-mask" width="768" height="768"></canvas>
                     <canvas id="canvas-cursor" width="768" height="768"></canvas>
                 </div>
+                <div id="map-warning" class="map-warning hidden" role="alert">
+                    ⚠ Satélite indisponível — classifique com cuidado.
+                </div>
+                <div id="backup-banner" class="backup-banner hidden" role="status">
+                    <span>Há um backup local deste tile com alterações não salvas.</span>
+                    <button id="backup-apply" class="primary">Restaurar</button>
+                    <button id="backup-discard">Descartar</button>
+                </div>
             </div>
 
             <aside class="minimap-wrap">
@@ -102,7 +111,12 @@
         <div id="modal-problem" class="modal hidden">
             <div class="modal-box">
                 <h2>Reportar Problema</h2>
-                <textarea id="problem-note" rows="5" placeholder="Descreva o problema..."></textarea>
+                <textarea id="problem-note" rows="5" maxlength="2000"
+                          placeholder="Descreva o problema..."></textarea>
+                <div class="textarea-footer">
+                    <span class="hint">Ctrl+Enter para enviar</span>
+                    <span id="problem-note-count" class="char-count">0/2000</span>
+                </div>
                 <div class="modal-actions">
                     <button id="problem-cancel">Cancelar</button>
                     <button id="problem-confirm" class="primary">Confirmar</button>
@@ -147,6 +161,23 @@
             <button data-tab="users">Usuários</button>
         </nav>
         <main id="admin-content"></main>
+
+        <div id="modal-confirm" class="modal hidden">
+            <div class="modal-box">
+                <h2 id="confirm-title">Confirmar</h2>
+                <p id="confirm-description"></p>
+                <div id="confirm-ids" class="confirm-ids"></div>
+                <label class="confirm-reason-label">Motivo (opcional, fica registrado no log):
+                    <textarea id="confirm-reason" rows="2" maxlength="500"
+                              placeholder="Ex: máscara incorreta, limite errado..."></textarea>
+                </label>
+                <div class="hint">Ctrl+Enter para confirmar</div>
+                <div class="modal-actions">
+                    <button id="confirm-cancel">Cancelar</button>
+                    <button id="confirm-ok" class="danger">Confirmar</button>
+                </div>
+            </div>
+        </div>
 
         <div id="modal-view-tile" class="modal hidden">
             <div class="modal-box" style="min-width:800px">

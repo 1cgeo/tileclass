@@ -62,7 +62,8 @@ CREATE TABLE IF NOT EXISTS tiles (
     classified_at TEXT,
     reviewed_at TEXT,
     data_png BLOB,
-    problem_note TEXT
+    problem_note TEXT,
+    version INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE INDEX IF NOT EXISTS idx_tiles_status ON tiles(status);
@@ -84,13 +85,37 @@ CREATE TABLE IF NOT EXISTS action_log (
 CREATE INDEX IF NOT EXISTS idx_log_user ON action_log(user_id);
 CREATE INDEX IF NOT EXISTS idx_log_tile ON action_log(tile_id);
 CREATE INDEX IF NOT EXISTS idx_log_created ON action_log(created_at);
+-- Dashboard pairs assign_*→classify/review by (user_id, tile_id, action).
+CREATE INDEX IF NOT EXISTS idx_log_user_tile_action ON action_log(user_id, tile_id, action);
+
+CREATE TABLE IF NOT EXISTS rate_limit (
+    ip TEXT NOT NULL,
+    attempted_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_rl_ip ON rate_limit(ip);
+CREATE INDEX IF NOT EXISTS idx_rl_ts ON rate_limit(attempted_at);
+
+CREATE TABLE IF NOT EXISTS token_blacklist (
+    jti TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    expires_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_tb_exp ON token_blacklist(expires_at);
 """
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Idempotent schema migrations for pre-existing DBs."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(tiles)").fetchall()}
+    if "version" not in cols:
+        conn.execute("ALTER TABLE tiles ADD COLUMN version INTEGER NOT NULL DEFAULT 1")
 
 
 def init_db() -> None:
     conn = connect()
     try:
         conn.executescript(SCHEMA)
+        _migrate(conn)
     finally:
         conn.close()
 

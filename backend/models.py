@@ -42,10 +42,21 @@ class TileOut(BaseModel):
     classified_by: Optional[int]
     classified_by_username: Optional[str] = None
     reviewed_by: Optional[int]
+    version: int = 1
+    filled_pixels: int = 0
 
 
 class ReportProblemIn(BaseModel):
     note: str = Field(min_length=1, max_length=2000)
+
+
+class BulkTileIdsIn(BaseModel):
+    ids: list[int]
+    reason: Optional[str] = Field(default=None, max_length=500)
+
+
+class ResetReasonIn(BaseModel):
+    reason: Optional[str] = Field(default=None, max_length=500)
 
 
 class CreateUserIn(BaseModel):
@@ -64,10 +75,6 @@ class DashboardOut(BaseModel):
     avg_review_seconds: float = 0.0
     rate_per_day: float
     eta_days: Optional[float]
-
-
-class BulkTileIdsIn(BaseModel):
-    ids: list[int]
 
 
 class SetActiveIn(BaseModel):

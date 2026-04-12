@@ -25,7 +25,7 @@ def decode_mask(png_bytes: bytes) -> bytes:
         raise ValueError(f"invalid tile size {img.size}")
     arr = np.array(img, dtype=np.uint8)
     if arr.size != PIXELS:
-        raise ValueError(f"decoded array size {arr.size}")
+        raise ValueError(f"decoded array size {arr.size}, expected {PIXELS}")
     return arr.tobytes()
 
 

@@ -1,6 +1,6 @@
 // Canvas editor: MapLibre renders the XYZ satellite underlay; two overlay canvases
 // (mask + cursor) sit georeferenced on top of the tile bbox.
-import { apiGet, apiGetBlob, apiPostBytes, apiPostJson } from "./api.js";
+import { apiGet, apiGetBlob, apiPostBytes, apiPostJson, onSessionWarning, logout as apiLogout } from "./api.js";
 import { showToast } from "./toast.js";
 import { renderMinimap } from "./minimap.js";
 import { createLockedMap, setMapBbox } from "./maplib.js";
@@ -28,6 +28,7 @@ let classes = [];
 let classesById = {};
 let colorLut = new Uint8ClampedArray(256 * 4);
 let darkLut = new Uint8ClampedArray(256 * 4); // for outlines
+let colorLut32 = new Uint32Array(colorLut.buffer);
 let mask = new Uint8Array(PIXELS);
 let filledCount = 0;
 let activeClass = 1;
@@ -41,6 +42,7 @@ let todayCount = 0;
 
 // Preload cache for the "next" tile while user paints
 let preloadedNext = null;
+let _pendingBackup = null;
 
 // Undo/redo
 const undoStack = [];
@@ -84,6 +86,9 @@ export async function initEditor(user) {
         };
     }
     document.getElementById("user-label").textContent = user.username;
+    onSessionWarning(() => {
+        showToast("Sua sessão expira em breve. Submeta seu trabalho e faça login novamente.", "warn", 30_000);
+    });
     const [cfg, cls] = await Promise.all([
         apiGet("/api/config/tileserver"),
         apiGet("/api/config/classes"),
@@ -203,7 +208,7 @@ async function preloadNext() {
     try {
         const peek = await apiGet("/api/tiles/next-preview");
         if (!peek) { preloadedNext = null; return; }
-        const blob = await apiGetBlob(`/api/tiles/${peek.id}/image`);
+        const blob = await apiGetBlob(`/api/tiles/${peek.id}/image`, { retries: 2, timeout: 8_000 });
         const img = await blobToImage(blob);
         const tmp = document.createElement("canvas");
         tmp.width = TILE; tmp.height = TILE;
@@ -212,12 +217,16 @@ async function preloadNext() {
         const m = new Uint8Array(PIXELS);
         for (let i = 0; i < PIXELS; i++) m[i] = data[i*4];
         preloadedNext = { tile: peek, maskBytes: m };
-    } catch { preloadedNext = null; }
+    } catch (e) {
+        preloadedNext = null;
+        if (e?.timeout) showToast("Não foi possível pré-carregar o próximo tile.", "warn", 4000);
+    }
 }
 
 async function loadTile(t, preloadedMask = null) {
     currentTile = t;
     undoStack.length = 0; redoStack.length = 0;
+    updateUndoRedoButtons();
     document.getElementById("tile-name-label").textContent = `Tile: ${t.name} (#${t.id})`;
     const reviewBanner = document.getElementById("review-banner");
     const modePill = document.getElementById("mode-pill");
@@ -239,11 +248,19 @@ async function loadTile(t, preloadedMask = null) {
     }
     if (preloadedMask) mask = preloadedMask;
     else await loadMaskFromServer(t.id);
+    // Server-reported filled count is the source of truth; client recounts
+    // locally after each paint, but this reconciles anything that might drift
+    // (e.g. historical mask saved with class=0).
+    if (typeof t.filled_pixels === "number") {
+        filledCount = t.filled_pixels;
+    } else {
+        recountFilled();
+    }
     tryRestoreBackup();
-    recountFilled();
     renderMaskFull();
     renderSatellite(t);
     renderMinimapContext(t);
+    updateProgress();
 }
 
 async function loadMaskFromServer(tileId) {
@@ -259,6 +276,7 @@ async function loadMaskFromServer(tileId) {
 }
 
 function tryRestoreBackup() {
+    hideBackupBanner();
     try {
         const raw = localStorage.getItem(LS_BACKUP_KEY);
         if (!raw) return;
@@ -266,10 +284,41 @@ function tryRestoreBackup() {
         if (b.tileId !== currentTile.id || !b.mask) return;
         const restored = Uint8Array.from(atob(b.mask), c => c.charCodeAt(0));
         if (restored.length !== PIXELS) return;
-        if (confirm("Foi encontrado um backup local deste tile. Restaurar?")) {
-            mask = restored;
+        // Compare — if identical to current, nothing to offer.
+        let differs = restored.length !== mask.length;
+        if (!differs) {
+            for (let i = 0; i < PIXELS; i++) { if (restored[i] !== mask[i]) { differs = true; break; } }
         }
+        if (!differs) return;
+        _pendingBackup = restored;
+        showBackupBanner();
     } catch {}
+}
+
+function showBackupBanner() {
+    const el = document.getElementById("backup-banner");
+    if (!el) return;
+    el.classList.remove("hidden");
+}
+function hideBackupBanner() {
+    const el = document.getElementById("backup-banner");
+    if (el) el.classList.add("hidden");
+    _pendingBackup = null;
+}
+function applyPendingBackup() {
+    if (!_pendingBackup) return;
+    mask = _pendingBackup;
+    _pendingBackup = null;
+    hideBackupBanner();
+    recountFilled();
+    renderMaskFull();
+    saveBackup();
+    showToast("Trabalho local restaurado.", "success");
+}
+function discardPendingBackup() {
+    _pendingBackup = null;
+    hideBackupBanner();
+    clearBackup();
 }
 
 function uint8ToBase64(arr) {
@@ -335,18 +384,26 @@ function updateSubmitButton(missing) {
 
 // --- Rendering ---
 
+let _mapErrorCount = 0;
 function renderSatellite(t) {
     const bbox = [t.bbox_west, t.bbox_south, t.bbox_east, t.bbox_north];
+    const warnEl = document.getElementById("map-warning");
+    if (warnEl) warnEl.classList.add("hidden");
+    _mapErrorCount = 0;
     if (!satMap) {
         satMap = createLockedMap("map-satellite", tileserverUrl, bbox);
         satMap.on("error", (e) => {
-            // Swallow tile errors (frequent on restricted networks)
-            if (e && e.error) console.warn("map tile error", e.error.message);
+            // Multiple consecutive tile errors → surface a banner so the
+            // operator knows the satellite background is missing (pure
+            // black/blank is otherwise indistinguishable from water).
+            if (e && e.error) {
+                _mapErrorCount++;
+                if (_mapErrorCount >= 2 && warnEl) warnEl.classList.remove("hidden");
+            }
         });
     } else {
         setMapBbox(satMap, bbox);
     }
-    // Give MapLibre a moment to finish layout, then resize in case parent changed
     requestAnimationFrame(() => satMap && satMap.resize());
 }
 
@@ -359,18 +416,13 @@ function renderMaskFull() {
     blitMask();
 }
 
+const maskData32 = new Uint32Array(maskImageData.data.buffer);
 function writeMaskPixels(x0, y0, x1, y1) {
-    const data = maskImageData.data;
     for (let y = y0; y < y1; y++) {
+        const row = y * TILE;
         for (let x = x0; x < x1; x++) {
-            const i = y * TILE + x;
-            const v = mask[i];
-            const lut = v * 4;
-            const di = i * 4;
-            data[di]     = colorLut[lut];
-            data[di + 1] = colorLut[lut + 1];
-            data[di + 2] = colorLut[lut + 2];
-            data[di + 3] = colorLut[lut + 3];
+            const i = row + x;
+            maskData32[i] = colorLut32[mask[i]];
         }
     }
 }
@@ -459,6 +511,14 @@ function pushUndo(touchedMap) {
     undoStack.push(toUndoEntry(touchedMap));
     if (undoStack.length > MAX_UNDO) undoStack.shift();
     redoStack.length = 0;
+    updateUndoRedoButtons();
+}
+
+function updateUndoRedoButtons() {
+    const u = document.getElementById("btn-undo");
+    const r = document.getElementById("btn-redo");
+    if (u) u.disabled = undoStack.length === 0;
+    if (r) r.disabled = redoStack.length === 0;
 }
 
 function applyPatch(entry) {
@@ -474,6 +534,7 @@ function undo() {
     renderMaskFull();
     updateProgress();
     saveBackup();
+    updateUndoRedoButtons();
 }
 
 function redo() {
@@ -483,6 +544,7 @@ function redo() {
     renderMaskFull();
     updateProgress();
     saveBackup();
+    updateUndoRedoButtons();
 }
 
 // --- Events ---
@@ -529,9 +591,28 @@ function attachEvents() {
     if (btnHelpInline) btnHelpInline.addEventListener("click", () => document.getElementById("modal-help").classList.remove("hidden"));
     document.getElementById("help-close").addEventListener("click", () => document.getElementById("modal-help").classList.add("hidden"));
 
-    document.getElementById("btn-logout").addEventListener("click", () => {
-        localStorage.removeItem("tileclass_tokens"); location.reload();
+    document.getElementById("btn-logout").addEventListener("click", async () => {
+        await apiLogout();
+        location.reload();
     });
+
+    const backupApply = document.getElementById("backup-apply");
+    const backupDiscard = document.getElementById("backup-discard");
+    if (backupApply) backupApply.addEventListener("click", applyPendingBackup);
+    if (backupDiscard) backupDiscard.addEventListener("click", discardPendingBackup);
+
+    const note = document.getElementById("problem-note");
+    const noteCount = document.getElementById("problem-note-count");
+    if (note) {
+        const updateCount = () => {
+            if (noteCount) noteCount.textContent = `${note.value.length}/2000`;
+        };
+        note.addEventListener("input", updateCount);
+        note.addEventListener("keydown", (e) => {
+            if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); confirmProblem(); }
+        });
+        updateCount();
+    }
 
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("keyup", onKeyUp);
@@ -671,16 +752,27 @@ function adjustOpacity(delta) {
 
 // --- Submit / problem ---
 
+let _submitting = false;
 async function submit() {
-    if (!currentTile) return;
+    if (!currentTile || _submitting) return;
     if (filledCount < PIXELS) {
         const missing = PIXELS - filledCount;
         showToast(`Faltam ${missing} pixels.`, "error");
         flashMissing();
         return;
     }
+    _submitting = true;
+    const btn = document.getElementById("btn-submit");
+    const label = document.getElementById("submit-label");
+    const prevLabel = label?.textContent;
+    if (btn) btn.disabled = true;
+    if (label) label.textContent = "Enviando...";
     try {
-        await apiPostBytes(`/api/tiles/${currentTile.id}/classify`, mask);
+        const version = currentTile.version != null ? String(currentTile.version) : "";
+        await apiPostBytes(
+            `/api/tiles/${currentTile.id}/classify`, mask,
+            version ? { "X-Tile-Version": version } : {},
+        );
         clearBackup();
         todayCount++;
         document.getElementById("today-count").textContent = todayCount;
@@ -688,11 +780,20 @@ async function submit() {
         flashSuccess();
         setTimeout(loadNext, 220);
     } catch (e) {
-        if (e.body?.detail?.error === "unfilled_pixels") {
+        const err = e.body?.detail?.error;
+        if (err === "unfilled_pixels") {
             showToast(`Faltam ${e.body.detail.missing} pixels (servidor).`, "error");
+        } else if (err === "tile_modified") {
+            showToast("Este tile foi modificado por um admin. Seu progresso está salvo localmente.",
+                "error", 8000);
         } else {
-            showToast(`Erro: ${e.message}`, "error");
+            showToast(e.message, "error");
         }
+    } finally {
+        _submitting = false;
+        if (btn) btn.disabled = false;
+        if (label && prevLabel) label.textContent = prevLabel;
+        updateProgress();
     }
 }
 

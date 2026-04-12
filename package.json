@@ -10,8 +10,11 @@
     "test:all": "npm run test:unit && python -m pytest tests/ && npm run test:e2e"
   },
   "devDependencies": {
-    "vitest": "^2.1.5",
     "jsdom": "^25.0.1",
-    "puppeteer": "^23.9.0"
+    "puppeteer": "^23.9.0",
+    "vitest": "^2.1.5"
+  },
+  "dependencies": {
+    "maplibre-gl": "^4.7.1"
   }
 }

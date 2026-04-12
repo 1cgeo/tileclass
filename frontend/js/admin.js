@@ -1,5 +1,5 @@
 // Admin panel: dashboard, tiles (list+grid+bulk+filters+viewer), problems, users.
-import { apiGet, apiGetBlob, apiPostJson, apiJson } from "./api.js";
+import { apiGet, apiGetBlob, apiGetWithHeaders, apiPostJson, apiJson, logout as apiLogout } from "./api.js";
 import { showToast } from "./toast.js";
 import { createLockedMap } from "./maplib.js";
 import { hexToRgb, blobToImage, escapeHtml as escape } from "./utils.js";
@@ -11,10 +11,21 @@ let selectedIds = new Set();
 let currentTab = "dashboard";
 let listView = "table"; // "table" | "grid"
 
+// Sort + pagination state for the tiles tab
+let sortKey = "id";
+let sortDir = "asc";
+let page = 0;
+const PAGE_SIZE = 100;
+let totalTiles = 0;
+
+// Sort state for dashboard per-operator table
+let opSortKey = "username";
+let opSortDir = "asc";
+
 export async function initAdmin(user) {
     document.getElementById("admin-user-label").textContent = `${user.username} (admin)`;
-    document.getElementById("btn-admin-logout").addEventListener("click", () => {
-        localStorage.removeItem("tileclass_tokens"); location.reload();
+    document.getElementById("btn-admin-logout").addEventListener("click", async () => {
+        await apiLogout(); location.reload();
     });
     document.querySelectorAll(".admin-nav button").forEach(btn => {
         btn.addEventListener("click", () => selectTab(btn.dataset.tab));
@@ -29,25 +40,35 @@ export async function initAdmin(user) {
     document.getElementById("view-tile-close").addEventListener("click", () => {
         document.getElementById("modal-view-tile").classList.add("hidden");
     });
+    wireConfirmModal();
     await selectTab("dashboard");
 }
 
 async function selectTab(tab) {
     currentTab = tab;
     selectedIds.clear();
+    page = 0;
     document.querySelectorAll(".admin-nav button").forEach(b => {
         b.classList.toggle("active", b.dataset.tab === tab);
     });
     const content = document.getElementById("admin-content");
-    content.innerHTML = "<p>Carregando...</p>";
+    content.innerHTML = `<div class="loading-text"><span class="loading"></span> Carregando...</div>`;
     try {
         if (tab === "dashboard") await renderDashboard(content);
         else if (tab === "tiles") await renderTiles(content);
         else if (tab === "problems") await renderProblems(content);
         else if (tab === "users") await renderUsers(content);
     } catch (e) {
-        content.innerHTML = `<p class="error">Erro: ${e.message}</p>`;
+        renderError(content, e);
     }
+}
+
+function renderError(target, e) {
+    target.textContent = "";
+    const p = document.createElement("p");
+    p.className = "error";
+    p.textContent = `Erro: ${e.message}`;
+    target.appendChild(p);
 }
 
 async function renderDashboard(root) {
@@ -87,21 +108,7 @@ async function renderDashboard(root) {
     opH.textContent = "Por operador";
     opH.style.marginTop = "16px";
     root.appendChild(opH);
-    const table = document.createElement("table");
-    table.className = "admin-table";
-    const thead = document.createElement("thead");
-    thead.innerHTML = "<tr><th>Usuário</th><th>Classificados</th><th>Revisados</th><th>Problemas</th><th>Tempo médio classificação</th><th>Tempo médio revisão</th></tr>";
-    table.appendChild(thead);
-    const tbody = document.createElement("tbody");
-    for (const op of d.per_operator) {
-        const tr = document.createElement("tr");
-        [op.username, op.classified || 0, op.reviewed || 0, op.problems || 0,
-         fmtDuration(op.avg_classify_seconds), fmtDuration(op.avg_review_seconds)]
-            .forEach(v => { const td = document.createElement("td"); td.textContent = v; tr.appendChild(td); });
-        tbody.appendChild(tr);
-    }
-    table.appendChild(tbody);
-    root.appendChild(table);
+    renderPerOperator(root, d.per_operator);
 
     const dayH = document.createElement("h3");
     dayH.textContent = "Tiles revisados por dia";
@@ -117,6 +124,58 @@ async function renderDashboard(root) {
         row.append(name, bar, count);
         root.appendChild(row);
     }
+}
+
+function renderPerOperator(root, rows) {
+    // Remove previous table if any (re-sort re-renders in place)
+    const prev = root.querySelector(".per-op-wrap");
+    if (prev) prev.remove();
+    const wrap = document.createElement("div");
+    wrap.className = "per-op-wrap";
+    const table = document.createElement("table");
+    table.className = "admin-table";
+    const cols = [
+        ["username", "Usuário"],
+        ["classified", "Classificados"],
+        ["reviewed", "Revisados"],
+        ["problems", "Problemas"],
+        ["avg_classify_seconds", "Tempo médio classificação"],
+        ["avg_review_seconds", "Tempo médio revisão"],
+    ];
+    const thead = document.createElement("thead");
+    const trh = document.createElement("tr");
+    for (const [k, lbl] of cols) {
+        const th = document.createElement("th");
+        th.textContent = lbl;
+        th.style.cursor = "pointer";
+        th.title = "Clique para ordenar";
+        if (opSortKey === k) th.textContent += opSortDir === "asc" ? " ▲" : " ▼";
+        th.addEventListener("click", () => {
+            if (opSortKey === k) opSortDir = opSortDir === "asc" ? "desc" : "asc";
+            else { opSortKey = k; opSortDir = "asc"; }
+            renderPerOperator(root, rows);
+        });
+        trh.appendChild(th);
+    }
+    thead.appendChild(trh);
+    table.appendChild(thead);
+    const sorted = [...rows].sort((a, b) => {
+        const va = a[opSortKey] ?? 0, vb = b[opSortKey] ?? 0;
+        if (va < vb) return opSortDir === "asc" ? -1 : 1;
+        if (va > vb) return opSortDir === "asc" ? 1 : -1;
+        return 0;
+    });
+    const tbody = document.createElement("tbody");
+    for (const op of sorted) {
+        const tr = document.createElement("tr");
+        [op.username, op.classified || 0, op.reviewed || 0, op.problems || 0,
+         fmtDuration(op.avg_classify_seconds), fmtDuration(op.avg_review_seconds)]
+            .forEach(v => { const td = document.createElement("td"); td.textContent = v; tr.appendChild(td); });
+        tbody.appendChild(tr);
+    }
+    table.appendChild(tbody);
+    wrap.appendChild(table);
+    root.appendChild(wrap);
 }
 
 function fmtDuration(sec) {
@@ -162,10 +221,11 @@ async function renderTiles(root) {
             <button id="bulk-clear">Limpar seleção</button>
         </div>
         <div id="tiles-list"></div>
+        <div id="pager" class="pager"></div>
     `;
     document.getElementById("view-table").addEventListener("click", () => { listView = "table"; loadAndRender(); });
     document.getElementById("view-grid").addEventListener("click", () => { listView = "grid"; loadAndRender(); });
-    document.getElementById("btn-filter").addEventListener("click", loadAndRender);
+    document.getElementById("btn-filter").addEventListener("click", () => { page = 0; loadAndRender(); });
     document.getElementById("bulk-reset").addEventListener("click", bulkReset);
     document.getElementById("bulk-rereview").addEventListener("click", bulkReReview);
     document.getElementById("bulk-clear").addEventListener("click", () => { selectedIds.clear(); loadAndRender(); });
@@ -180,16 +240,55 @@ async function loadAndRender() {
     if (status) params.set("status", status);
     if (df) params.set("date_from", df);
     if (dt) params.set("date_to", dt);
-    const qs = params.toString() ? `?${params}` : "";
-    const tiles = await apiGet(`/api/admin/tiles${qs}`);
+    params.set("limit", PAGE_SIZE);
+    params.set("offset", page * PAGE_SIZE);
+    const target = document.getElementById("tiles-list");
+    target.innerHTML = `<div class="loading-text"><span class="loading"></span> Carregando tiles...</div>`;
+    const { json: tiles, headers: h } = await apiGetWithHeaders(`/api/admin/tiles?${params}`);
+    totalTiles = Number(h.get("X-Total-Count") || tiles.length);
     document.querySelectorAll(".view-mode-toggle button").forEach(b => {
         b.classList.toggle("active", b.id === `view-${listView}`);
     });
-    const target = document.getElementById("tiles-list");
     target.innerHTML = "";
-    if (listView === "table") renderTable(target, tiles);
-    else renderGrid(target, tiles);
+    const sorted = sortTiles(tiles);
+    if (listView === "table") renderTable(target, sorted);
+    else renderGrid(target, sorted);
     updateBulkBar();
+    renderPager();
+}
+
+function sortTiles(tiles) {
+    return [...tiles].sort((a, b) => {
+        const va = a[sortKey] ?? "", vb = b[sortKey] ?? "";
+        if (va < vb) return sortDir === "asc" ? -1 : 1;
+        if (va > vb) return sortDir === "asc" ? 1 : -1;
+        return 0;
+    });
+}
+
+function setSort(key) {
+    if (sortKey === key) sortDir = sortDir === "asc" ? "desc" : "asc";
+    else { sortKey = key; sortDir = "asc"; }
+    loadAndRender();
+}
+
+function renderPager() {
+    const el = document.getElementById("pager");
+    if (!el) return;
+    const totalPages = Math.max(1, Math.ceil(totalTiles / PAGE_SIZE));
+    el.innerHTML = "";
+    const info = document.createElement("span");
+    info.className = "pager-info";
+    const start = page * PAGE_SIZE + 1;
+    const end = Math.min(totalTiles, (page + 1) * PAGE_SIZE);
+    info.textContent = totalTiles === 0 ? "Nenhum tile" : `${start}–${end} de ${totalTiles}`;
+    const prev = document.createElement("button");
+    prev.textContent = "← Anterior"; prev.disabled = page === 0;
+    prev.addEventListener("click", () => { page--; loadAndRender(); });
+    const next = document.createElement("button");
+    next.textContent = "Próxima →"; next.disabled = page >= totalPages - 1;
+    next.addEventListener("click", () => { page++; loadAndRender(); });
+    el.append(prev, info, next);
 }
 
 function updateBulkBar() {
@@ -199,11 +298,25 @@ function updateBulkBar() {
 }
 
 function renderTable(root, tiles) {
+    const wrap = document.createElement("div");
+    wrap.className = "admin-table-wrap";
     const table = document.createElement("table");
     table.className = "admin-table";
     const thead = document.createElement("thead");
+    const sortArrow = (k) => sortKey === k ? (sortDir === "asc" ? " ▲" : " ▼") : "";
     thead.innerHTML = `<tr><th><input type="checkbox" id="check-all"></th>
-        <th>ID</th><th>Nome</th><th>Status</th><th>Classificado</th><th>Revisado</th><th>Ações</th></tr>`;
+        <th data-sort="id">ID${sortArrow("id")}</th>
+        <th data-sort="name">Nome${sortArrow("name")}</th>
+        <th data-sort="status">Status${sortArrow("status")}</th>
+        <th data-sort="classified_by_username">Classificado por${sortArrow("classified_by_username")}</th>
+        <th data-sort="reviewed_by_username">Revisado por${sortArrow("reviewed_by_username")}</th>
+        <th data-sort="classified_at">Classificado${sortArrow("classified_at")}</th>
+        <th data-sort="reviewed_at">Revisado${sortArrow("reviewed_at")}</th>
+        <th>Ações</th></tr>`;
+    thead.querySelectorAll("th[data-sort]").forEach(th => {
+        th.style.cursor = "pointer";
+        th.addEventListener("click", () => setSort(th.dataset.sort));
+    });
     table.appendChild(thead);
     const tbody = document.createElement("tbody");
     for (const t of tiles) {
@@ -213,19 +326,24 @@ function renderTable(root, tiles) {
         const cb = document.createElement("input"); cb.type = "checkbox"; cb.checked = selectedIds.has(t.id);
         cb.addEventListener("change", () => toggleSelect(t.id, cb.checked, tr));
         const tdCb = document.createElement("td"); tdCb.appendChild(cb);
-        const tdId = td(t.id), tdName = td(t.name), tdStatus = td(t.status),
-              tdC = td(t.classified_at || ""), tdR = td(t.reviewed_at || "");
+        const tdStatus = document.createElement("td");
+        const chip = document.createElement("span");
+        chip.className = `chip ${t.status}`; chip.textContent = t.status;
+        tdStatus.appendChild(chip);
         const tdAct = document.createElement("td");
         tdAct.append(
             btn("Ver", () => openViewer(t.id)),
             btn("Resetar", () => resetOne(t.id)),
         );
         if (t.status === "reviewed") tdAct.append(btn("Re-revisar", () => reReviewOne(t.id)));
-        tr.append(tdCb, tdId, tdName, tdStatus, tdC, tdR, tdAct);
+        tr.append(tdCb, td(t.id), td(t.name), tdStatus,
+                  td(t.classified_by_username || ""), td(t.reviewed_by_username || ""),
+                  td(t.classified_at || ""), td(t.reviewed_at || ""), tdAct);
         tbody.appendChild(tr);
     }
     table.appendChild(tbody);
-    root.appendChild(table);
+    wrap.appendChild(table);
+    root.appendChild(wrap);
     document.getElementById("check-all").addEventListener("change", (ev) => {
         tbody.querySelectorAll("tr").forEach(tr => {
             const id = Number(tr.dataset.id);
@@ -240,26 +358,30 @@ function renderTable(root, tiles) {
 function renderGrid(root, tiles) {
     const grid = document.createElement("div");
     grid.className = "thumb-grid";
-    const tokens = JSON.parse(localStorage.getItem("tileclass_tokens") || "{}");
     for (const t of tiles) {
         const card = document.createElement("div");
         card.className = "thumb-card" + (selectedIds.has(t.id) ? " selected" : "");
         card.dataset.id = t.id;
         const img = document.createElement("img");
-        // Thumbnails require auth; use fetch + blob URL.
+        img.alt = `Tile ${t.id}`;
+        img.className = "thumb-skeleton";
         apiGetBlob(`/api/admin/tiles/${t.id}/thumbnail?size=128`)
-            .then(b => { img.src = URL.createObjectURL(b); })
-            .catch(() => { img.alt = "?"; });
+            .then(b => { img.src = URL.createObjectURL(b); img.classList.remove("thumb-skeleton"); })
+            .catch(() => { img.alt = "?"; img.classList.remove("thumb-skeleton"); });
         const meta = document.createElement("div");
         meta.className = "meta";
         meta.textContent = `#${t.id} · ${t.status}`;
-        card.append(img, meta);
+        if (t.classified_by_username) {
+            const who = document.createElement("div");
+            who.className = "meta-dim";
+            who.textContent = `por ${t.classified_by_username}`;
+            card.append(img, meta, who);
+        } else {
+            card.append(img, meta);
+        }
         card.addEventListener("click", (ev) => {
-            if (ev.shiftKey) {
-                toggleSelect(t.id, !selectedIds.has(t.id), card);
-            } else {
-                openViewer(t.id);
-            }
+            if (ev.shiftKey) toggleSelect(t.id, !selectedIds.has(t.id), card);
+            else openViewer(t.id);
         });
         grid.appendChild(card);
     }
@@ -273,37 +395,105 @@ function toggleSelect(id, on, el) {
 }
 
 function td(v) { const el = document.createElement("td"); el.textContent = v ?? ""; return el; }
-function btn(label, fn) {
+function btn(label, fn, cls) {
     const b = document.createElement("button"); b.textContent = label;
+    if (cls) b.className = cls;
     b.style.marginRight = "4px";
     b.addEventListener("click", (ev) => { ev.stopPropagation(); fn(); });
     return b;
 }
 
+// ---------- Custom confirm modal for destructive bulk ops ----------
+function wireConfirmModal() {
+    const modal = document.getElementById("modal-confirm");
+    if (!modal) return;
+    const reason = document.getElementById("confirm-reason");
+    if (reason) reason.addEventListener("keydown", (e) => {
+        if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+            e.preventDefault();
+            document.getElementById("confirm-ok")?.click();
+        }
+    });
+}
+
+function confirmDestructive({ title, description, ids, confirmLabel = "Confirmar", danger = true }) {
+    return new Promise((resolve) => {
+        const modal = document.getElementById("modal-confirm");
+        document.getElementById("confirm-title").textContent = title;
+        document.getElementById("confirm-description").textContent = description;
+        const list = document.getElementById("confirm-ids");
+        list.innerHTML = "";
+        const preview = ids.slice(0, 20);
+        list.textContent = `IDs: ${preview.join(", ")}${ids.length > 20 ? ` … (+${ids.length - 20})` : ""}`;
+        const reason = document.getElementById("confirm-reason");
+        reason.value = "";
+        const ok = document.getElementById("confirm-ok");
+        ok.textContent = confirmLabel;
+        ok.classList.toggle("danger", !!danger);
+        const cancel = document.getElementById("confirm-cancel");
+
+        const cleanup = (result) => {
+            modal.classList.add("hidden");
+            ok.removeEventListener("click", onOk);
+            cancel.removeEventListener("click", onCancel);
+            resolve(result);
+        };
+        const onOk = () => cleanup({ confirmed: true, reason: reason.value.trim() });
+        const onCancel = () => cleanup({ confirmed: false });
+        ok.addEventListener("click", onOk);
+        cancel.addEventListener("click", onCancel);
+        modal.classList.remove("hidden");
+        setTimeout(() => reason.focus(), 50);
+    });
+}
+
 async function resetOne(id) {
-    if (!confirm(`Resetar tile #${id}?`)) return;
-    await apiPostJson(`/api/admin/tiles/${id}/reset`, {});
+    const r = await confirmDestructive({
+        title: `Resetar tile #${id}`,
+        description: "Esta ação é irreversível. Toda a classificação deste tile será perdida e voltará para pendente.",
+        ids: [id], confirmLabel: "Resetar",
+    });
+    if (!r.confirmed) return;
+    await apiPostJson(`/api/admin/tiles/${id}/reset`, { reason: r.reason });
     showToast("Resetado.", "success");
     loadAndRender();
 }
 async function reReviewOne(id) {
-    await apiPostJson(`/api/admin/tiles/${id}/re-review`, {});
+    const r = await confirmDestructive({
+        title: `Enviar tile #${id} para nova revisão`,
+        description: "O tile voltará ao status 'classified' e aparecerá novamente na fila de revisão.",
+        ids: [id], confirmLabel: "Re-revisar", danger: false,
+    });
+    if (!r.confirmed) return;
+    await apiPostJson(`/api/admin/tiles/${id}/re-review`, { reason: r.reason });
     showToast("Enviado para nova revisão.", "success");
     loadAndRender();
 }
 async function bulkReset() {
     if (selectedIds.size === 0) return;
-    if (!confirm(`Resetar ${selectedIds.size} tiles?`)) return;
-    const r = await apiPostJson("/api/admin/tiles/bulk/reset", { ids: [...selectedIds] });
-    showToast(`${r.affected} resetados.`, "success");
+    const ids = [...selectedIds];
+    const r = await confirmDestructive({
+        title: `Resetar ${ids.length} tiles`,
+        description: "Esta ação é irreversível. Toda a classificação destes tiles será perdida.",
+        ids, confirmLabel: `Resetar ${ids.length} tiles`,
+    });
+    if (!r.confirmed) return;
+    const resp = await apiPostJson("/api/admin/tiles/bulk/reset", { ids, reason: r.reason });
+    showToast(`${resp.affected} resetados.`, "success");
     selectedIds.clear();
     loadAndRender();
 }
 async function bulkReReview() {
     if (selectedIds.size === 0) return;
-    if (!confirm(`Enviar ${selectedIds.size} tiles para re-revisão?`)) return;
-    const r = await apiPostJson("/api/admin/tiles/bulk/re-review", { ids: [...selectedIds] });
-    showToast(`${r.affected} enviados.`, "success");
+    const ids = [...selectedIds];
+    const r = await confirmDestructive({
+        title: `Re-revisar ${ids.length} tiles`,
+        description: "Os tiles revisados voltarão ao status 'classified' e reaparecerão na fila de revisão.",
+        ids, confirmLabel: `Enviar ${ids.length} para revisão`, danger: false,
+    });
+    if (!r.confirmed) return;
+    const resp = await apiPostJson("/api/admin/tiles/bulk/re-review", { ids, reason: r.reason });
+    showToast(`${resp.affected} enviados.`, "success");
     selectedIds.clear();
     loadAndRender();
 }
@@ -312,7 +502,9 @@ async function openViewer(tileId) {
     const modal = document.getElementById("modal-view-tile");
     const body = document.getElementById("view-tile-body");
     document.getElementById("view-tile-title").textContent = `Tile #${tileId}`;
-    body.innerHTML = `<div id="viewer-loading">Carregando...</div>`;
+    body.innerHTML = `
+        <div class="loading-text"><span class="loading"></span> Carregando tile...</div>
+        <div class="viewer-skeleton"></div>`;
     modal.classList.remove("hidden");
     try {
         const [t, history, blob] = await Promise.all([
@@ -325,7 +517,9 @@ async function openViewer(tileId) {
         const meta = document.createElement("div");
         const statusLine = document.createElement("p");
         statusLine.innerHTML = `<b>Status:</b> `;
-        statusLine.append(document.createTextNode(t.status));
+        const chip = document.createElement("span");
+        chip.className = `chip ${t.status}`; chip.textContent = t.status;
+        statusLine.appendChild(chip);
         if (t.classified_by_username) {
             statusLine.append(document.createTextNode(" · classificado por "));
             const b = document.createElement("b"); b.textContent = t.classified_by_username;
@@ -334,7 +528,6 @@ async function openViewer(tileId) {
         meta.appendChild(statusLine);
         body.appendChild(meta);
 
-        // Action history
         if (history.length) {
             const h = document.createElement("details");
             h.open = true;
@@ -350,9 +543,7 @@ async function openViewer(tileId) {
                 const by = document.createTextNode(`por ${ev.username || "?"}`);
                 const when = document.createElement("div"); when.className = "when"; when.textContent = ev.created_at;
                 li.append(act, by);
-                if (ev.detail) {
-                    li.append(document.createTextNode(` — ${ev.detail}`));
-                }
+                if (ev.detail) li.append(document.createTextNode(` — ${ev.detail}`));
                 li.append(when);
                 ul.appendChild(li);
             }
@@ -367,12 +558,10 @@ async function openViewer(tileId) {
         maskCnv.width = 512; maskCnv.height = 512;
         stack.append(mapDiv, maskCnv);
         body.appendChild(stack);
-        // Render satellite
         setTimeout(() => {
             createLockedMap(`viewer-map-${tileId}`, tileserverUrl,
                 [t.bbox_west, t.bbox_south, t.bbox_east, t.bbox_north]);
         }, 0);
-        // Render mask colorized
         const tmp = document.createElement("canvas");
         tmp.width = 256; tmp.height = 256;
         const tctx = tmp.getContext("2d");
@@ -393,7 +582,7 @@ async function openViewer(tileId) {
         mctx.imageSmoothingEnabled = false;
         mctx.drawImage(off, 0, 0, 512, 512);
     } catch (e) {
-        body.innerHTML = `<p class="error">Erro: ${e.message}</p>`;
+        renderError(body, e);
     }
 }
 
@@ -401,6 +590,13 @@ async function openViewer(tileId) {
 async function renderProblems(root) {
     const problems = await apiGet("/api/admin/tiles/problems");
     root.innerHTML = "<h3>Tiles com problema</h3>";
+    if (!problems.length) {
+        const p = document.createElement("p");
+        p.className = "empty-state";
+        p.textContent = "Nenhum problema reportado. 🎉";
+        root.appendChild(p);
+        return;
+    }
     const table = document.createElement("table");
     table.className = "admin-table";
     const thead = document.createElement("thead");
@@ -432,6 +628,9 @@ async function renderUsers(root) {
     `;
     document.getElementById("form-user").addEventListener("submit", async (ev) => {
         ev.preventDefault();
+        const btn = ev.target.querySelector("button[type=submit]");
+        if (btn.disabled) return;
+        btn.disabled = true;
         try {
             await apiPostJson("/api/admin/users", {
                 username: document.getElementById("nu-username").value,
@@ -440,7 +639,7 @@ async function renderUsers(root) {
             });
             showToast("Usuário criado.", "success");
             selectTab("users");
-        } catch (e) { showToast(`Erro: ${e.message}`, "error"); }
+        } catch (e) { showToast(`Erro: ${e.message}`, "error"); btn.disabled = false; }
     });
     const table = document.createElement("table");
     table.className = "admin-table";

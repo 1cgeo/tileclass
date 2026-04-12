@@ -34,18 +34,26 @@ function route(user) {
 function showLogin() {
     show("view-login");
     const form = document.getElementById("login-form");
+    const btn = form.querySelector("button[type=submit]");
     form.onsubmit = async (ev) => {
         ev.preventDefault();
+        if (btn.disabled) return;
         const u = document.getElementById("login-username").value;
         const p = document.getElementById("login-password").value;
         const err = document.getElementById("login-error");
         err.textContent = "";
+        btn.disabled = true;
+        const originalLabel = btn.textContent;
+        btn.innerHTML = '<span class="loading"></span> Entrando...';
         try {
             await login(u, p);
             const me = await apiGet("/api/auth/me");
             route(me);
         } catch (e) {
             err.textContent = e.message;
+        } finally {
+            btn.disabled = false;
+            btn.textContent = originalLabel;
         }
     };
 }

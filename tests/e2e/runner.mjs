@@ -29,7 +29,7 @@ function runPython(args) {
     return new Promise((res, rej) => {
         const p = spawn("python", args, {
             cwd: ROOT,
-            env: { ...process.env, TILECLASS_CONFIG: cfgPath },
+            env: { ...process.env, TILECLASS_CONFIG: cfgPath, TILECLASS_ALLOW_DEFAULT_SECRET: "1" },
             stdio: "inherit",
         });
         p.on("exit", (code) => code === 0 ? res() : rej(new Error(`python exit ${code}`)));
@@ -144,6 +144,7 @@ try {
             ...process.env,
             TILECLASS_CONFIG: cfgPath,
             TILECLASS_DISABLE_RATE_LIMIT: "1",
+            TILECLASS_ALLOW_DEFAULT_SECRET: "1",
             PYTHONUNBUFFERED: "1",
         },
         stdio: ["ignore", "inherit", "inherit"],
