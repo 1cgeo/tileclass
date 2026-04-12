@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+
+# Banco / dados
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+backend/config.yaml
+backend/tileclass.db
+
+# Node / frontend build
+node_modules/
+dist/
+.vite/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log
+
+# Dados locais
+data/
+exports/
+*.tif
+*.tiff

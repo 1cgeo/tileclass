@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TileClass</title>
+    <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+    <link rel="stylesheet" href="/static/css/style.css">
+    <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+</head>
+<body>
+    <!-- Login view -->
+    <div id="view-login" class="view">
+        <form id="login-form" class="login-box">
+            <h1>TileClass</h1>
+            <label>Usuário <input type="text" id="login-username" autocomplete="username" required></label>
+            <label>Senha <input type="password" id="login-password" autocomplete="current-password" required></label>
+            <button type="submit">Entrar</button>
+            <div id="login-error" class="error"></div>
+        </form>
+    </div>
+
+    <!-- Editor view (operator) -->
+    <div id="view-editor" class="view hidden">
+        <header class="header">
+            <div class="header-left">
+                <strong>TileClass</strong>
+                <span id="tile-name-label"></span>
+                <span id="queue-progress" class="queue-progress"></span>
+                <span id="review-banner" class="review-banner hidden"></span>
+            </div>
+            <div class="header-right">
+                <span>Hoje: <span id="today-count">0</span></span>
+                <span id="user-label"></span>
+                <button id="btn-help" title="Atalhos (?)">?</button>
+                <button id="btn-logout">Sair</button>
+            </div>
+        </header>
+
+        <main class="editor-main">
+            <aside class="sidebar">
+                <section class="classes">
+                    <h3>Classes</h3>
+                    <ul id="class-list"></ul>
+                </section>
+                <section class="tools">
+                    <h3>Ferramentas</h3>
+                    <button id="tool-brush" class="tool active" title="Pincel (B)">Pincel</button>
+                    <button id="tool-eraser" class="tool" title="Borracha (E)">Borracha</button>
+                    <button id="tool-fill" class="tool" title="Balde (G)">Balde</button>
+                    <label>Tamanho: <span id="brush-size-label">3</span>
+                        <input type="range" id="brush-size" min="1" max="5" value="2">
+                    </label>
+                </section>
+                <section class="opacity">
+                    <h3>Opacidade</h3>
+                    <input type="range" id="mask-opacity" min="0" max="100" value="50">
+                    <span id="opacity-label">50%</span>
+                </section>
+                <section class="progress">
+                    <h3>Progresso</h3>
+                    <div id="progress-line">Pixels: <span id="pixel-count">0</span>/65536 (<span id="pixel-pct">0</span>%)</div>
+                    <div id="hover-class" class="hover-class">—</div>
+                </section>
+            </aside>
+
+            <div class="canvas-wrap">
+                <div id="canvas-stack" class="canvas-stack">
+                    <div id="map-satellite"></div>
+                    <canvas id="canvas-mask" width="768" height="768"></canvas>
+                    <canvas id="canvas-cursor" width="768" height="768"></canvas>
+                </div>
+            </div>
+
+            <aside class="minimap-wrap">
+                <h3>Contexto</h3>
+                <div id="minimap"></div>
+            </aside>
+        </main>
+
+        <footer class="footer">
+            <button id="btn-undo" title="Ctrl+Z">Desfazer</button>
+            <button id="btn-redo" title="Ctrl+Shift+Z">Refazer</button>
+            <button id="btn-problem">Reportar Problema</button>
+            <button id="btn-submit" class="primary">Submeter</button>
+        </footer>
+
+        <!-- Problem modal -->
+        <div id="modal-problem" class="modal hidden">
+            <div class="modal-box">
+                <h2>Reportar Problema</h2>
+                <textarea id="problem-note" rows="5" placeholder="Descreva o problema..."></textarea>
+                <div class="modal-actions">
+                    <button id="problem-cancel">Cancelar</button>
+                    <button id="problem-confirm" class="primary">Confirmar</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Help overlay -->
+        <div id="modal-help" class="modal hidden">
+            <div class="modal-box">
+                <h2>Atalhos</h2>
+                <table class="shortcuts">
+                    <tr><td>1–6</td><td>Selecionar classe</td></tr>
+                    <tr><td>B / E</td><td>Pincel / Borracha (E alterna)</td></tr>
+                    <tr><td>G</td><td>Balde de tinta</td></tr>
+                    <tr><td>+ / −</td><td>Tamanho do pincel</td></tr>
+                    <tr><td>Ctrl+Z / Ctrl+Shift+Z</td><td>Desfazer / Refazer</td></tr>
+                    <tr><td>Espaço (segurar)</td><td>Esconder máscara</td></tr>
+                    <tr><td>O</td><td>Modo só contornos</td></tr>
+                    <tr><td>[ / ]</td><td>Opacidade da máscara</td></tr>
+                    <tr><td>Ctrl+roda do mouse</td><td>Ajustar opacidade</td></tr>
+                    <tr><td>Ctrl+S</td><td>Submeter</td></tr>
+                </table>
+                <div class="modal-actions"><button id="help-close" class="primary">Fechar</button></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Admin view -->
+    <div id="view-admin" class="view hidden">
+        <header class="header">
+            <div class="header-left"><strong>TileClass · Admin</strong></div>
+            <div class="header-right">
+                <span id="admin-user-label"></span>
+                <button id="btn-admin-logout">Sair</button>
+            </div>
+        </header>
+        <nav class="admin-nav">
+            <button data-tab="dashboard" class="active">Dashboard</button>
+            <button data-tab="tiles">Tiles</button>
+            <button data-tab="problems">Problemas</button>
+            <button data-tab="users">Usuários</button>
+        </nav>
+        <main id="admin-content"></main>
+
+        <div id="modal-view-tile" class="modal hidden">
+            <div class="modal-box" style="min-width:800px">
+                <h2 id="view-tile-title">Tile</h2>
+                <div id="view-tile-body"></div>
+                <div class="modal-actions">
+                    <button id="view-tile-close" class="primary">Fechar</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="toast" class="toast hidden"></div>
+
+    <script type="module" src="/static/js/app.js"></script>
+</body>
+</html>

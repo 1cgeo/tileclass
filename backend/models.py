@@ -1,0 +1,75 @@
+"""Pydantic schemas for request/response bodies."""
+from pydantic import BaseModel, Field
+from typing import Optional, Literal
+
+
+class LoginIn(BaseModel):
+    username: str
+    password: str
+
+
+class TokenOut(BaseModel):
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"
+
+
+class RefreshIn(BaseModel):
+    refresh_token: str
+
+
+class UserOut(BaseModel):
+    id: int
+    username: str
+    role: str
+
+
+class ClassOut(BaseModel):
+    id: int
+    name: str
+    color: str
+
+
+class TileOut(BaseModel):
+    id: int
+    name: str
+    bbox_west: float
+    bbox_south: float
+    bbox_east: float
+    bbox_north: float
+    zoom: int
+    tile_x: int
+    tile_y: int
+    status: str
+    assigned_to: Optional[int]
+    classified_by: Optional[int]
+    classified_by_username: Optional[str] = None
+    reviewed_by: Optional[int]
+
+
+class ReportProblemIn(BaseModel):
+    note: str = Field(min_length=1, max_length=2000)
+
+
+class CreateUserIn(BaseModel):
+    username: str = Field(min_length=3, max_length=64)
+    password: str = Field(min_length=6)
+    role: Literal["operator", "admin"] = "operator"
+
+
+class DashboardOut(BaseModel):
+    totals_by_status: dict
+    total_tiles: int
+    completion_percent: float
+    daily_completed: list
+    per_operator: list
+    rate_per_day: float
+    eta_days: Optional[float]
+
+
+class BulkTileIdsIn(BaseModel):
+    ids: list[int]
+
+
+class SetActiveIn(BaseModel):
+    active: bool
