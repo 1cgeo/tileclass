@@ -37,6 +37,8 @@ node tests/e2e/runner.mjs                                                # E2E (
 npm run test:all                                                         # tudo em sequência
 ```
 
+**venv no Windows:** sempre ative antes de rodar `uvicorn`/`pytest`/scripts — `.\.venv\Scripts\Activate.ps1` (PowerShell) ou `.venv\Scripts\activate` (cmd/bash). Sem ativar, o terminal não acha `uvicorn` no PATH. Alternativa sem ativar: `.\.venv\Scripts\python -m uvicorn ...` (idem para `pytest`, scripts). Se o PowerShell bloquear `Activate.ps1`, rode uma vez `Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned`.
+
 ## Estrutura
 
 ```
