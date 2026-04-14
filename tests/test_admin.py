@@ -212,6 +212,97 @@ def test_list_tiles_exposes_current_assignee(
     assert row["classified_by_username"] is None
 
 
+def _set_can_review(client, admin_tok, user_id, flag):
+    return client.patch(f"/api/admin/users/{user_id}/can-review",
+                        headers=headers(admin_tok), json={"can_review": flag})
+
+
+def test_operator_without_can_review_skips_review_queue(
+    client, admin_user, operators, tiles
+):
+    """An operator not opted-in as reviewer must never be assigned a classified
+    tile from the review queue — even if one is available. They fall through to
+    the pending queue instead."""
+    import numpy as np
+    adm = token(client, "admin", "admin123")
+    # Revoke op2 so we can assert the filter blocks them.
+    _set_can_review(client, adm, operators[1]["id"], False)
+
+    op1 = token(client, "op1", "secret123")
+    tile1 = client.get("/api/tiles/next", headers=headers(op1)).json()
+    client.post(f"/api/tiles/{tile1['id']}/classify",
+                headers={**headers(op1), "Content-Type": "application/octet-stream"},
+                content=np.full(65536, 1, dtype=np.uint8).tobytes())
+
+    op2 = token(client, "op2", "secret123")
+    served = client.get("/api/tiles/next", headers=headers(op2)).json()
+    assert served["id"] != tile1["id"]
+    assert served["status"] == "in_progress"
+
+
+def test_operator_with_can_review_gets_review_tile_first(
+    client, admin_user, operators, tiles
+):
+    """Happy path: opted-in operator is assigned the review queue before pending."""
+    import numpy as np
+    adm = token(client, "admin", "admin123")
+    # Revoke then re-grant to also exercise the endpoint's on path.
+    _set_can_review(client, adm, operators[1]["id"], False)
+
+    op1 = token(client, "op1", "secret123")
+    tile1 = client.get("/api/tiles/next", headers=headers(op1)).json()
+    client.post(f"/api/tiles/{tile1['id']}/classify",
+                headers={**headers(op1), "Content-Type": "application/octet-stream"},
+                content=np.full(65536, 1, dtype=np.uint8).tobytes())
+
+    r = _set_can_review(client, adm, operators[1]["id"], True)
+    assert r.status_code == 200 and r.json()["can_review"] is True
+
+    op2 = token(client, "op2", "secret123")
+    served = client.get("/api/tiles/next", headers=headers(op2)).json()
+    assert served["id"] == tile1["id"]
+    assert served["status"] == "in_review"
+
+
+def test_revoking_can_review_blocks_future_review_assignments(
+    client, admin_user, operators, tiles
+):
+    import numpy as np
+    op1 = token(client, "op1", "secret123")
+    tile1 = client.get("/api/tiles/next", headers=headers(op1)).json()
+    client.post(f"/api/tiles/{tile1['id']}/classify",
+                headers={**headers(op1), "Content-Type": "application/octet-stream"},
+                content=np.full(65536, 1, dtype=np.uint8).tobytes())
+
+    adm = token(client, "admin", "admin123")
+    # Opt-out: was defaulted on by the fixture; admin turns it off.
+    _set_can_review(client, adm, operators[1]["id"], False)
+
+    op2 = token(client, "op2", "secret123")
+    served = client.get("/api/tiles/next", headers=headers(op2)).json()
+    # Opt-out effective immediately: tile1 still 'classified' in the DB,
+    # but op2 gets a pending one.
+    assert served["id"] != tile1["id"]
+    assert served["status"] == "in_progress"
+
+
+def test_list_users_exposes_can_review_flag(client, admin_user, operators):
+    """The users endpoint must surface can_review so the admin UI can render
+    and toggle it. Default value is not asserted here (the fixture forces on);
+    what matters is that the column exists in the payload."""
+    adm = token(client, "admin", "admin123")
+    users = client.get("/api/admin/users", headers=headers(adm)).json()
+    for u in users:
+        assert "can_review" in u, f"user row missing can_review: {u}"
+
+
+def test_can_review_endpoint_requires_admin(client, admin_user, operators):
+    op1 = token(client, "op1", "secret123")
+    r = client.patch(f"/api/admin/users/{operators[1]['id']}/can-review",
+                     headers=headers(op1), json={"can_review": True})
+    assert r.status_code == 403
+
+
 def test_thumbnail(client, admin_user, tiles):
     """Thumbnail must be a valid PNG of the requested size, not arbitrary bytes."""
     import io

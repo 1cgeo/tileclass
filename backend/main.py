@@ -16,7 +16,7 @@ from .mask_utils import PIXELS
 from .models import (
     LoginIn, TokenOut, RefreshIn, UserOut, ClassOut, TileOut,
     ReportProblemIn, CreateUserIn, DashboardOut, BulkTileIdsIn, SetActiveIn,
-    ResetReasonIn,
+    SetCanReviewIn, ResetReasonIn,
 )
 
 
@@ -388,6 +388,12 @@ def admin_create_user(body: CreateUserIn, _: auth.CurrentUser = Depends(auth.req
 def admin_set_user_active(body: SetActiveIn, user_id: int = Path(ge=1),
                           u: auth.CurrentUser = Depends(auth.require_admin)):
     return admin_service.set_user_active(user_id, body.active, u.id)
+
+
+@app.patch("/api/admin/users/{user_id}/can-review")
+def admin_set_user_can_review(body: SetCanReviewIn, user_id: int = Path(ge=1),
+                              u: auth.CurrentUser = Depends(auth.require_admin)):
+    return admin_service.set_user_can_review(user_id, body.can_review, u.id)
 
 
 # ---------- Static frontend ----------

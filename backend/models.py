@@ -79,3 +79,7 @@ class DashboardOut(BaseModel):
 
 class SetActiveIn(BaseModel):
     active: bool
+
+
+class SetCanReviewIn(BaseModel):
+    can_review: bool

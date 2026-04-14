@@ -279,11 +279,23 @@ def list_users() -> list[dict]:
     conn = connect()
     try:
         rows = conn.execute(
-            "SELECT id, username, role, active, created_at FROM users ORDER BY username"
+            "SELECT id, username, role, active, can_review, created_at FROM users ORDER BY username"
         ).fetchall()
     finally:
         conn.close()
     return [dict(r) for r in rows]
+
+
+def set_user_can_review(user_id: int, can_review: bool, admin_id: int) -> dict:
+    with transaction("IMMEDIATE") as conn:
+        row = conn.execute("SELECT id, role FROM users WHERE id=?", (user_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "user not found")
+        conn.execute("UPDATE users SET can_review=? WHERE id=?",
+                     (1 if can_review else 0, user_id))
+        log_action(conn, admin_id, None, "set_user_can_review",
+                   json.dumps({"user_id": user_id, "can_review": bool(can_review)}))
+    return {"id": user_id, "can_review": bool(can_review)}
 
 
 def create_user(username: str, password: str, role: str) -> dict:

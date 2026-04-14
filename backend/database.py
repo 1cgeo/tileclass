@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash TEXT NOT NULL,
     role TEXT NOT NULL CHECK(role IN ('operator','admin')),
     active INTEGER NOT NULL DEFAULT 1,
+    can_review INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL
 );
 
@@ -109,6 +110,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
     cols = {r[1] for r in conn.execute("PRAGMA table_info(tiles)").fetchall()}
     if "version" not in cols:
         conn.execute("ALTER TABLE tiles ADD COLUMN version INTEGER NOT NULL DEFAULT 1")
+    user_cols = {r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
+    if "can_review" not in user_cols:
+        # Admins get review rights automatically (role check runs first anyway);
+        # operators stay at 0 until an admin opts them in.
+        conn.execute("ALTER TABLE users ADD COLUMN can_review INTEGER NOT NULL DEFAULT 0")
+        conn.execute("UPDATE users SET can_review=1 WHERE role='admin'")
 
 
 def init_db() -> None:

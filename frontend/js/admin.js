@@ -686,7 +686,7 @@ async function renderUsers(root) {
     const table = document.createElement("table");
     table.className = "admin-table";
     const thead = document.createElement("thead");
-    thead.innerHTML = "<tr><th>ID</th><th>Usuário</th><th>Role</th><th>Ativo</th><th>Criado em</th><th>Ações</th></tr>";
+    thead.innerHTML = "<tr><th>ID</th><th>Usuário</th><th>Role</th><th>Ativo</th><th>Revisor</th><th>Criado em</th><th>Ações</th></tr>";
     table.appendChild(thead);
     const tbody = document.createElement("tbody");
     for (const u of users) {
@@ -694,11 +694,30 @@ async function renderUsers(root) {
         const tdAct = document.createElement("td");
         const actLabel = u.active ? "Desativar" : "Ativar";
         tdAct.append(btn(actLabel, () => toggleActive(u.id, !u.active)));
-        tr.append(td(u.id), td(u.username), td(u.role), td(u.active ? "sim" : "não"), td(fmtDate(u.created_at)), tdAct);
+        if (u.role !== "admin") {
+            const rvLabel = u.can_review ? "Revogar revisão" : "Permitir revisão";
+            tdAct.append(btn(rvLabel, () => toggleCanReview(u.id, !u.can_review)));
+        }
+        const reviewerCell = u.role === "admin" ? "—" : (u.can_review ? "sim" : "não");
+        tr.append(td(u.id), td(u.username), td(u.role),
+                  td(u.active ? "sim" : "não"), td(reviewerCell),
+                  td(fmtDate(u.created_at)), tdAct);
         tbody.appendChild(tr);
     }
     table.appendChild(tbody);
     root.appendChild(table);
+}
+
+async function toggleCanReview(userId, canReview) {
+    try {
+        await apiJson(`/api/admin/users/${userId}/can-review`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ can_review: canReview }),
+        });
+        showToast(canReview ? "Revisor habilitado." : "Revisor revogado.", "success");
+        selectTab("users");
+    } catch (e) { showToast(`Erro: ${e.message}`, "error"); }
 }
 
 async function toggleActive(userId, active) {

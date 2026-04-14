@@ -39,8 +39,8 @@ def main(db_path: str) -> None:
         )
         for i in range(1, 4):
             conn.execute(
-                "INSERT INTO users(username, password_hash, role, active, created_at) "
-                "VALUES (?,?,?,1,?)",
+                "INSERT INTO users(username, password_hash, role, active, can_review, created_at) "
+                "VALUES (?,?,?,1,1,?)",
                 (f"op{i}", hash_password("secret123"), "operator", now),
             )
         empty = empty_mask_png()

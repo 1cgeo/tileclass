@@ -71,14 +71,15 @@ def peek_next_tile(user_id: int) -> dict | None:
         ).fetchone()
         if row:
             return _row_to_tile_dict(row)
-        row = conn.execute(
-            """SELECT * FROM tiles
-               WHERE status='classified' AND (classified_by IS NULL OR classified_by != ?)
-               ORDER BY classified_at LIMIT 1""",
-            (user_id,),
-        ).fetchone()
-        if row:
-            return _row_to_tile_dict(row)
+        if _user_can_review(conn, user_id):
+            row = conn.execute(
+                """SELECT * FROM tiles
+                   WHERE status='classified' AND (classified_by IS NULL OR classified_by != ?)
+                   ORDER BY classified_at LIMIT 1""",
+                (user_id,),
+            ).fetchone()
+            if row:
+                return _row_to_tile_dict(row)
         row = conn.execute(
             "SELECT * FROM tiles WHERE status='pending' ORDER BY id LIMIT 1"
         ).fetchone()
@@ -136,6 +137,15 @@ def today_classify_count(user_id: int) -> int:
     return int(row["c"]) if row else 0
 
 
+def _user_can_review(conn, user_id: int) -> bool:
+    row = conn.execute(
+        "SELECT can_review, role FROM users WHERE id=?", (user_id,)
+    ).fetchone()
+    if not row:
+        return False
+    return bool(row["can_review"]) or row["role"] == "admin"
+
+
 def get_next_tile(user_id: int) -> dict | None:
     """Atomically assign next tile to user. Review > pending. Never own classification."""
     with transaction("IMMEDIATE") as conn:
@@ -149,13 +159,15 @@ def get_next_tile(user_id: int) -> dict | None:
         if row:
             return _row_to_tile_dict(row)
 
-        # 2) Review queue: in_review not assigned, not classified by this user
-        row = conn.execute(
-            """SELECT * FROM tiles
-               WHERE status='classified' AND (classified_by IS NULL OR classified_by != ?)
-               ORDER BY classified_at LIMIT 1""",
-            (user_id,),
-        ).fetchone()
+        # 2) Review queue — only operators explicitly opted-in by an admin.
+        row = None
+        if _user_can_review(conn, user_id):
+            row = conn.execute(
+                """SELECT * FROM tiles
+                   WHERE status='classified' AND (classified_by IS NULL OR classified_by != ?)
+                   ORDER BY classified_at LIMIT 1""",
+                (user_id,),
+            ).fetchone()
         if row:
             conn.execute(
                 "UPDATE tiles SET status='in_review', assigned_to=? WHERE id=?",

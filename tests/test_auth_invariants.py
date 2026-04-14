@@ -58,7 +58,7 @@ def test_forged_admin_token_with_wrong_secret_rejected(client, admin_user):
     payload = {"sub": "999", "username": "hacker", "role": "admin",
                "typ": "access", "iat": int(time.time()),
                "exp": int(time.time()) + 3600}
-    forged = pyjwt.encode(payload, "wrong-secret", algorithm="HS256")
+    forged = pyjwt.encode(payload, "wrong-secret-" + "x" * 32, algorithm="HS256")
     r = client.get("/api/admin/dashboard", headers=h(forged))
     assert r.status_code == 401
 

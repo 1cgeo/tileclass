@@ -71,7 +71,8 @@ def _make_operators(n: int):
         for i in range(n):
             u = f"op{i+1}"
             conn.execute(
-                "INSERT INTO users(username, password_hash, role, active, created_at) VALUES (?,?,?,1,?)",
+                "INSERT INTO users(username, password_hash, role, active, can_review, created_at) "
+                "VALUES (?,?,?,1,1,?)",
                 (u, hash_password("secret123"), "operator", now),
             )
             row = conn.execute("SELECT id FROM users WHERE username=?", (u,)).fetchone()
