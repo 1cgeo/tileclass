@@ -83,3 +83,8 @@ class SetActiveIn(BaseModel):
 
 class SetCanReviewIn(BaseModel):
     can_review: bool
+
+
+class AssignTileIn(BaseModel):
+    user_id: int
+    reason: str | None = None

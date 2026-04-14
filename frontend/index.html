@@ -214,6 +214,25 @@
             </div>
         </div>
 
+        <div id="modal-assign" class="modal hidden">
+            <div class="modal-box">
+                <h2 id="assign-title">Atribuir tile</h2>
+                <p id="assign-description" class="hint"></p>
+                <label style="display:block;margin-top:var(--space-2);">
+                    Operador:
+                    <select id="assign-user" style="width:100%;margin-top:4px;"></select>
+                </label>
+                <label class="confirm-reason-label" style="margin-top:var(--space-2);">
+                    Motivo (opcional):
+                    <textarea id="assign-reason" rows="2" maxlength="500"></textarea>
+                </label>
+                <div class="modal-actions">
+                    <button id="assign-cancel">Cancelar</button>
+                    <button id="assign-ok" class="primary">Atribuir</button>
+                </div>
+            </div>
+        </div>
+
         <div id="modal-view-tile" class="modal hidden">
             <div class="modal-box" style="min-width:800px">
                 <h2 id="view-tile-title">Tile</h2>

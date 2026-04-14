@@ -303,6 +303,131 @@ def test_can_review_endpoint_requires_admin(client, admin_user, operators):
     assert r.status_code == 403
 
 
+def test_admin_assigns_pending_tile_to_operator(
+    client, admin_user, operators, tiles
+):
+    """Admin hand-picks an operator for a pending tile. The tile becomes
+    in_progress / assigned_to that operator, and the standard assign_classify
+    action is logged under the operator (so dashboard pairing still works)."""
+    adm = token(client, "admin", "admin123")
+    pending = client.get("/api/admin/tiles?status=pending",
+                         headers=headers(adm)).json()
+    tile_id = pending[0]["id"]
+
+    r = client.post(f"/api/admin/tiles/{tile_id}/assign", headers=headers(adm),
+                    json={"user_id": operators[2]["id"], "reason": "urgent batch"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body == {"id": tile_id, "status": "in_progress",
+                    "assigned_to": operators[2]["id"]}
+
+    # op3 resumes this tile on next login.
+    tok = token(client, "op3", "secret123")
+    mine = client.get("/api/tiles/assigned", headers=headers(tok)).json()
+    assert mine["id"] == tile_id
+
+    # assign_classify is logged under the operator (not the admin) to keep
+    # dashboard avg_classify_seconds pairing assign→classify intact.
+    from backend.database import connect
+    conn = connect()
+    try:
+        row = conn.execute(
+            "SELECT user_id FROM action_log "
+            "WHERE tile_id=? AND action='assign_classify' ORDER BY id DESC LIMIT 1",
+            (tile_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row["user_id"] == operators[2]["id"]
+
+
+def test_admin_assigns_reviewer_to_classified_tile(
+    client, admin_user, operators, tiles
+):
+    import numpy as np
+    op1 = token(client, "op1", "secret123")
+    tile = client.get("/api/tiles/next", headers=headers(op1)).json()
+    client.post(f"/api/tiles/{tile['id']}/classify",
+                headers={**headers(op1), "Content-Type": "application/octet-stream"},
+                content=np.full(65536, 1, dtype=np.uint8).tobytes())
+
+    adm = token(client, "admin", "admin123")
+    r = client.post(f"/api/admin/tiles/{tile['id']}/assign", headers=headers(adm),
+                    json={"user_id": operators[1]["id"]})
+    assert r.status_code == 200
+    assert r.json()["status"] == "in_review"
+
+
+def test_admin_assign_rejects_classifier_as_reviewer(
+    client, admin_user, operators, tiles
+):
+    """The classifier of a tile must never be assigned to review it."""
+    import numpy as np
+    op1 = token(client, "op1", "secret123")
+    tile = client.get("/api/tiles/next", headers=headers(op1)).json()
+    client.post(f"/api/tiles/{tile['id']}/classify",
+                headers={**headers(op1), "Content-Type": "application/octet-stream"},
+                content=np.full(65536, 1, dtype=np.uint8).tobytes())
+    adm = token(client, "admin", "admin123")
+    r = client.post(f"/api/admin/tiles/{tile['id']}/assign", headers=headers(adm),
+                    json={"user_id": operators[0]["id"]})
+    assert r.status_code == 409
+
+
+def test_admin_assign_reviewer_must_have_can_review(
+    client, admin_user, operators, tiles
+):
+    import numpy as np
+    adm = token(client, "admin", "admin123")
+    _set_can_review(client, adm, operators[1]["id"], False)
+
+    op1 = token(client, "op1", "secret123")
+    tile = client.get("/api/tiles/next", headers=headers(op1)).json()
+    client.post(f"/api/tiles/{tile['id']}/classify",
+                headers={**headers(op1), "Content-Type": "application/octet-stream"},
+                content=np.full(65536, 1, dtype=np.uint8).tobytes())
+
+    r = client.post(f"/api/admin/tiles/{tile['id']}/assign", headers=headers(adm),
+                    json={"user_id": operators[1]["id"]})
+    assert r.status_code == 409
+
+
+def test_admin_assign_rejects_in_progress_tile(
+    client, admin_user, operators, tiles
+):
+    """Cannot re-assign a tile that is already assigned — admin must
+    unassign first. Prevents silent work loss."""
+    op1 = token(client, "op1", "secret123")
+    tile = client.get("/api/tiles/next", headers=headers(op1)).json()
+    adm = token(client, "admin", "admin123")
+    r = client.post(f"/api/admin/tiles/{tile['id']}/assign", headers=headers(adm),
+                    json={"user_id": operators[1]["id"]})
+    assert r.status_code == 409
+
+
+def test_admin_assign_rejects_inactive_user(
+    client, admin_user, operators, tiles
+):
+    adm = token(client, "admin", "admin123")
+    client.patch(f"/api/admin/users/{operators[0]['id']}/active",
+                 headers=headers(adm), json={"active": False})
+    pending_id = client.get("/api/admin/tiles?status=pending",
+                            headers=headers(adm)).json()[0]["id"]
+    r = client.post(f"/api/admin/tiles/{pending_id}/assign", headers=headers(adm),
+                    json={"user_id": operators[0]["id"]})
+    assert r.status_code == 409
+
+
+def test_admin_assign_requires_admin_role(client, admin_user, operators, tiles):
+    op1 = token(client, "op1", "secret123")
+    pending_id = client.get("/api/admin/tiles?status=pending",
+                            headers=headers(op1)).json() if False else None
+    # operators cannot list admin tiles either; hit the assign endpoint directly.
+    r = client.post(f"/api/admin/tiles/1/assign", headers=headers(op1),
+                    json={"user_id": operators[1]["id"]})
+    assert r.status_code == 403
+
+
 def test_thumbnail(client, admin_user, tiles):
     """Thumbnail must be a valid PNG of the requested size, not arbitrary bytes."""
     import io

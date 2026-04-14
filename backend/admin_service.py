@@ -244,6 +244,59 @@ def re_review_many(tile_ids: list[int], admin_id: int, strict: bool = False,
     return count
 
 
+def assign_operator(tile_id: int, user_id: int, admin_id: int,
+                    reason: str | None = None) -> dict:
+    """Admin hand-picks an operator/reviewer for a tile.
+    pending   -> in_progress, assigned to the given operator.
+    classified -> in_review, assigned to the given reviewer (must have
+                  can_review=1 and must not be the original classifier).
+    Any other status is rejected (admin should unassign first)."""
+    detail = _clean_reason(reason)
+    with transaction("IMMEDIATE") as conn:
+        tile = conn.execute(
+            "SELECT status, classified_by FROM tiles WHERE id=?", (tile_id,)
+        ).fetchone()
+        if not tile:
+            raise HTTPException(404, "tile not found")
+        user = conn.execute(
+            "SELECT id, active, role, can_review FROM users WHERE id=?", (user_id,)
+        ).fetchone()
+        if not user:
+            raise HTTPException(404, "user not found")
+        if not user["active"]:
+            raise HTTPException(409, "user is inactive")
+        if user["role"] == "admin":
+            raise HTTPException(409, "cannot assign tiles to an admin")
+
+        status = tile["status"]
+        if status == "pending":
+            new_status = "in_progress"
+            action = "assign_classify"
+        elif status == "classified":
+            if not user["can_review"]:
+                raise HTTPException(409, "user is not allowed to review")
+            if tile["classified_by"] is not None and tile["classified_by"] == user_id:
+                raise HTTPException(409, "reviewer cannot be the classifier")
+            new_status = "in_review"
+            action = "assign_review"
+        else:
+            raise HTTPException(
+                409, f"tile must be pending or classified (status={status})"
+            )
+
+        conn.execute(
+            "UPDATE tiles SET status=?, assigned_to=?, version=version+1 WHERE id=?",
+            (new_status, user_id, tile_id),
+        )
+        # Log under the assignee so dashboard avg_classify/avg_review pairs
+        # assign→classify correctly. A second audit entry under the admin
+        # records who made the manual attribution.
+        log_action(conn, user_id, tile_id, action, detail)
+        log_action(conn, admin_id, tile_id, "admin_assign",
+                   json.dumps({"user_id": user_id, "reason": detail}))
+    return {"id": tile_id, "status": new_status, "assigned_to": user_id}
+
+
 def unassign_operator(tile_id: int, admin_id: int, reason: str | None = None) -> dict:
     """Release the current operator from a tile without wiping the mask.
     in_progress -> pending; in_review -> classified. Other states are rejected."""

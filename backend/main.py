@@ -16,7 +16,7 @@ from .mask_utils import PIXELS
 from .models import (
     LoginIn, TokenOut, RefreshIn, UserOut, ClassOut, TileOut,
     ReportProblemIn, CreateUserIn, DashboardOut, BulkTileIdsIn, SetActiveIn,
-    SetCanReviewIn, ResetReasonIn,
+    SetCanReviewIn, AssignTileIn, ResetReasonIn,
 )
 
 
@@ -359,6 +359,12 @@ def admin_reset(body: ResetReasonIn | None = None, tile_id: int = Path(ge=1),
                 u: auth.CurrentUser = Depends(auth.require_admin)):
     admin_service.reset_tile(tile_id, u.id, body.reason if body else None)
     return {"ok": True}
+
+
+@app.post("/api/admin/tiles/{tile_id}/assign")
+def admin_assign(body: AssignTileIn, tile_id: int = Path(ge=1),
+                 u: auth.CurrentUser = Depends(auth.require_admin)):
+    return admin_service.assign_operator(tile_id, body.user_id, u.id, body.reason)
 
 
 @app.post("/api/admin/tiles/{tile_id}/unassign")

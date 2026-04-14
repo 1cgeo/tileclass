@@ -527,6 +527,9 @@ input[type="range"] {
 .thumb-card.selected { border-color: var(--accent); }
 .thumb-card img { width: 100%; image-rendering: pixelated; background: var(--bg-2); border-radius: 3px; }
 .thumb-card .meta { font-size: 11px; color: var(--text-muted); margin-top: 6px; }
+.thumb-card .card-action {
+    margin-top: 6px; font-size: 11px; padding: 3px 8px; width: 100%;
+}
 
 .bulk-bar {
     display: flex; gap: var(--space-2); align-items: center;

@@ -37,8 +37,13 @@ export async function initAdmin(user) {
     tileserverUrl = cfg.url_template;
     classes = cls;
     classesById = Object.fromEntries(classes.map(c => [c.id, c]));
-    document.getElementById("view-tile-close").addEventListener("click", () => {
-        document.getElementById("modal-view-tile").classList.add("hidden");
+    const vtModal = document.getElementById("modal-view-tile");
+    const closeVt = () => vtModal.classList.add("hidden");
+    document.getElementById("view-tile-close").addEventListener("click", closeVt);
+    // Click on the backdrop (outside the modal-box) closes the viewer.
+    vtModal.addEventListener("click", (ev) => { if (ev.target === vtModal) closeVt(); });
+    document.addEventListener("keydown", (ev) => {
+        if (ev.key === "Escape" && !vtModal.classList.contains("hidden")) closeVt();
     });
     wireConfirmModal();
     await selectTab("dashboard");
@@ -342,6 +347,9 @@ function renderTable(root, tiles) {
             btn("Resetar", () => resetOne(t.id)),
         );
         if (t.status === "reviewed") tdAct.append(btn("Re-revisar", () => reReviewOne(t.id)));
+        if (t.status === "pending" || t.status === "classified") {
+            tdAct.append(btn("Atribuir", () => assignOne(t)));
+        }
         if (t.status === "in_progress" || t.status === "in_review") {
             tdAct.append(btn("Liberar operador", () => unassignOne(t.id)));
         }
@@ -386,13 +394,22 @@ function renderGrid(root, tiles) {
             t.reviewed_by_username ? `revisado por ${t.reviewed_by_username}` :
             t.classified_by_username ? `classificado por ${t.classified_by_username}` :
             t.assigned_to_username ? `atribuído a ${t.assigned_to_username}` : "";
+        card.append(img, meta);
         if (whoText) {
             const who = document.createElement("div");
             who.className = "meta-dim";
             who.textContent = whoText;
-            card.append(img, meta, who);
-        } else {
-            card.append(img, meta);
+            card.append(who);
+        }
+        if (t.status === "pending" || t.status === "classified") {
+            const assignBtn = document.createElement("button");
+            assignBtn.className = "card-action";
+            assignBtn.textContent = t.status === "classified" ? "Atribuir revisor" : "Atribuir";
+            assignBtn.addEventListener("click", (ev) => {
+                ev.stopPropagation();
+                assignOne(t);
+            });
+            card.appendChild(assignBtn);
         }
         card.addEventListener("click", (ev) => {
             if (ev.shiftKey) toggleSelect(t.id, !selectedIds.has(t.id), card);
@@ -489,6 +506,65 @@ async function resetOne(id) {
     showToast("Resetado.", "success");
     loadAndRender();
 }
+async function assignOne(tile) {
+    const users = await apiGet("/api/admin/users");
+    const isReview = tile.status === "classified";
+    const eligible = users.filter(u =>
+        u.role === "operator" && u.active &&
+        (!isReview || (u.can_review && u.id !== tile.classified_by))
+    );
+    if (!eligible.length) {
+        showToast(isReview
+            ? "Sem revisores habilitados (ou todos classificaram este tile)."
+            : "Sem operadores ativos.", "error");
+        return;
+    }
+    const r = await promptAssign({
+        title: isReview ? `Atribuir revisão do tile #${tile.id}` : `Atribuir tile #${tile.id}`,
+        description: isReview
+            ? "Escolha um revisor. Revisores precisam estar habilitados e não podem revisar a própria classificação."
+            : "Escolha um operador para classificar este tile.",
+        users: eligible,
+    });
+    if (!r.confirmed) return;
+    await apiPostJson(`/api/admin/tiles/${tile.id}/assign`, {
+        user_id: r.user_id, reason: r.reason || null,
+    });
+    showToast("Tile atribuído.", "success");
+    loadAndRender();
+}
+
+function promptAssign({ title, description, users }) {
+    return new Promise((resolve) => {
+        const modal = document.getElementById("modal-assign");
+        document.getElementById("assign-title").textContent = title;
+        document.getElementById("assign-description").textContent = description;
+        const sel = document.getElementById("assign-user");
+        sel.innerHTML = "";
+        for (const u of users) {
+            const opt = document.createElement("option");
+            opt.value = String(u.id);
+            opt.textContent = u.username + (u.can_review ? " (revisor)" : "");
+            sel.appendChild(opt);
+        }
+        const reason = document.getElementById("assign-reason"); reason.value = "";
+        const ok = document.getElementById("assign-ok");
+        const cancel = document.getElementById("assign-cancel");
+        const cleanup = (result) => {
+            modal.classList.add("hidden");
+            ok.removeEventListener("click", onOk);
+            cancel.removeEventListener("click", onCancel);
+            resolve(result);
+        };
+        const onOk = () => cleanup({ confirmed: true, user_id: Number(sel.value), reason: reason.value.trim() });
+        const onCancel = () => cleanup({ confirmed: false });
+        ok.addEventListener("click", onOk);
+        cancel.addEventListener("click", onCancel);
+        modal.classList.remove("hidden");
+        setTimeout(() => sel.focus(), 50);
+    });
+}
+
 async function unassignOne(id) {
     const r = await confirmDestructive({
         title: `Liberar operador do tile #${id}`,
