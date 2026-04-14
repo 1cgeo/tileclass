@@ -45,7 +45,7 @@
     --footer-h: 56px;
 
     --sidebar-w: 240px;
-    --minimap-w: 320px;
+    --sidebar-right-w: 260px;
 
     --transition: 140ms ease;
 }
@@ -189,7 +189,7 @@ input[type="range"] {
 #view-editor { display: flex; flex-direction: column; height: 100%; }
 .editor-main {
     display: grid;
-    grid-template-columns: var(--sidebar-w) 1fr var(--minimap-w);
+    grid-template-columns: var(--sidebar-w) 1fr var(--sidebar-right-w);
     gap: var(--space-3);
     padding: var(--space-3);
     height: calc(100vh - var(--header-h) - var(--footer-h));
@@ -296,10 +296,34 @@ input[type="range"] {
 /* ---------- Canvas ---------- */
 .canvas-wrap {
     display: flex; align-items: center; justify-content: center;
-    background: #1a1d23; /* dark canvas bg for contrast with satellite imagery */
+    background: var(--bg-0);
     border-radius: var(--radius); border: 1px solid var(--border);
     overflow: hidden; position: relative;
     min-width: 0; min-height: 0;
+}
+#canvas-viewport {
+    position: relative;
+    width: 100%; height: 100%;
+    overflow: hidden;
+    display: flex; align-items: center; justify-content: center;
+    cursor: crosshair;
+}
+#canvas-viewport.space-held { cursor: grab; }
+#canvas-viewport.panning { cursor: grabbing; }
+.zoom-controls {
+    position: absolute; top: 8px; right: 8px;
+    display: flex; gap: 4px; align-items: center;
+    background: var(--bg-1); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); padding: 4px;
+    box-shadow: var(--shadow-sm); z-index: 5;
+}
+.zoom-controls button {
+    padding: 4px 9px; min-width: 28px; font-size: 14px; font-weight: 600;
+}
+.zoom-label {
+    font-size: 11px; color: var(--text-muted);
+    font-variant-numeric: tabular-nums; padding: 0 6px;
+    min-width: 42px; text-align: center;
 }
 .map-warning {
     position: absolute; top: 8px; left: 50%; transform: translateX(-50%);
@@ -308,6 +332,26 @@ input[type="range"] {
     font-size: 12px; font-weight: 600;
     box-shadow: var(--shadow); z-index: 10;
 }
+.no-tiles-screen {
+    position: absolute; inset: 0;
+    background: rgba(10, 12, 16, 0.88);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 20; backdrop-filter: blur(2px);
+}
+.no-tiles-screen.hidden { display: none; }
+.no-tiles-box {
+    background: var(--bg-1); border: 1px solid var(--bg-3);
+    border-radius: var(--radius-lg); padding: var(--space-5) var(--space-6);
+    max-width: 440px; text-align: center; box-shadow: var(--shadow-lg);
+}
+.no-tiles-icon {
+    width: 64px; height: 64px; margin: 0 auto var(--space-3);
+    border-radius: 50%; background: var(--ok); color: #fff;
+    font-size: 36px; font-weight: 700; line-height: 64px;
+}
+.no-tiles-box h2 { margin: 0 0 var(--space-2); }
+.no-tiles-box p { margin: 0 0 var(--space-4); color: var(--text-muted); }
+.no-tiles-actions { display: flex; gap: var(--space-2); justify-content: center; }
 .backup-banner {
     position: absolute; bottom: 8px; left: 50%; transform: translateX(-50%);
     background: var(--bg-1); border: 1px solid var(--accent);
@@ -317,33 +361,38 @@ input[type="range"] {
 }
 .canvas-stack {
     position: relative; width: 768px; height: 768px;
-    max-width: 100%; max-height: 100%;
-    aspect-ratio: 1 / 1;
+    flex-shrink: 0;
+    transform-origin: center center;
+    transition: transform 80ms ease-out;
+    will-change: transform;
 }
-#map-satellite { position: absolute; inset: 0; width: 100%; height: 100%; }
+.canvas-stack.panning { transition: none; }
+/* MapLibre renders 3x3 tiles (paint area in the center third). Positioned
+   at -100%/-100% so the paintable 256x256 stays at 0,0 of the stack. */
+#map-satellite {
+    position: absolute;
+    top: -100%; left: -100%;
+    width: 300%; height: 300%;
+}
 .canvas-stack canvas {
-    position: absolute; inset: 0; width: 100%; height: 100%;
+    position: absolute; top: 0; left: 0;
+    width: 100%; height: 100%;
     image-rendering: pixelated; pointer-events: none;
 }
-#canvas-cursor { cursor: crosshair; pointer-events: auto; }
+#canvas-cursor { pointer-events: auto; }
+#canvas-viewport.space-held #canvas-cursor { pointer-events: none; }
+/* Paint area highlight — bright border on the 256x256 area, plus an outer
+   dim wash so the context imagery is visibly "read-only". */
+#paint-bounds {
+    position: absolute; inset: 0;
+    pointer-events: none;
+    outline: 1px solid var(--accent);
+}
+#canvas-grid { opacity: 0.55; }
 .canvas-flash-ok { animation: flashOk 220ms ease-out; }
 .canvas-flash-err { animation: flashErr 400ms ease-out 0s 5; }
 @keyframes flashOk { from { box-shadow: 0 0 0 6px #00ff0080 inset; } to { box-shadow: none; } }
 @keyframes flashErr { 0% { box-shadow: 0 0 0 8px #ff000080 inset; } 100% { box-shadow: none; } }
-
-/* ---------- Minimap ---------- */
-.minimap-wrap {
-    background: var(--bg-1); padding: var(--space-4);
-    border-radius: var(--radius); border: 1px solid var(--border);
-    display: flex; flex-direction: column; align-items: center; gap: var(--space-2);
-    min-width: 0;
-}
-.minimap-wrap h3 { align-self: flex-start; }
-#minimap {
-    width: 100%; max-width: 300px; aspect-ratio: 1 / 1;
-    background: #1a1d23; position: relative;
-    border-radius: var(--radius-sm);
-}
 
 /* ---------- Footer ---------- */
 .footer {
@@ -602,26 +651,25 @@ input[type="range"] {
 
 /* ---------- Responsive ---------- */
 
-/* Tablet: collapse minimap width, shrink sidebar */
+/* Tablet: shrink sidebars */
 @media (max-width: 1180px) {
-    :root { --sidebar-w: 210px; --minimap-w: 260px; }
+    :root { --sidebar-w: 210px; --sidebar-right-w: 230px; }
 }
 
-/* Small laptop / large tablet: drop minimap to below */
+/* Small laptop / large tablet: single sidebar on left, right becomes compact row */
 @media (max-width: 960px) {
     :root { --header-h: 48px; --footer-h: 52px; }
     .editor-main {
         grid-template-columns: 200px 1fr;
         grid-template-rows: 1fr auto;
         grid-template-areas:
-            "sidebar canvas"
-            "sidebar minimap";
+            "sidebar-left canvas"
+            "sidebar-left sidebar-right";
     }
-    .sidebar { grid-area: sidebar; }
+    .sidebar-left { grid-area: sidebar-left; }
     .canvas-wrap { grid-area: canvas; }
-    .minimap-wrap { grid-area: minimap; flex-direction: row; align-items: center; gap: var(--space-3); padding: var(--space-2) var(--space-3); }
-    .minimap-wrap h3 { align-self: center; }
-    #minimap { width: 120px; max-width: 120px; }
+    .sidebar-right { grid-area: sidebar-right; flex-direction: row; overflow-x: auto; overflow-y: hidden; }
+    .sidebar-right section { min-width: 200px; }
 }
 
 /* Mobile: single column, sidebar as horizontal scroller */
@@ -635,9 +683,9 @@ input[type="range"] {
         grid-template-columns: 1fr;
         grid-template-rows: auto 1fr auto;
         grid-template-areas:
-            "sidebar"
+            "sidebar-left"
             "canvas"
-            "minimap";
+            "sidebar-right";
         padding: var(--space-2); gap: var(--space-2);
         height: calc(100vh - var(--header-h) - var(--footer-h));
     }
@@ -649,9 +697,6 @@ input[type="range"] {
     .sidebar section { min-width: 180px; scroll-snap-align: start; }
     .classes ul { flex-direction: row; flex-wrap: wrap; }
     .classes li { flex: 1 0 45%; }
-
-    .minimap-wrap { flex-direction: row; padding: var(--space-2); }
-    #minimap { width: 88px; }
 
     .footer { padding: var(--space-2); gap: var(--space-2); flex-wrap: wrap; }
     .footer button { padding: 8px 12px; font-size: 13px; }

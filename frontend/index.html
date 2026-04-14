@@ -39,16 +39,16 @@
         </header>
 
         <main class="editor-main">
-            <aside class="sidebar">
+            <aside class="sidebar sidebar-left">
                 <section class="classes">
                     <h3>Classes</h3>
                     <ul id="class-list"></ul>
                 </section>
                 <section class="tools">
                     <h3>Ferramentas</h3>
-                    <button id="tool-brush" class="tool active" title="Pincel (B)">Pincel <span class="kbd">B</span></button>
-                    <button id="tool-eraser" class="tool" title="Borracha (E)">Borracha <span class="kbd">E</span></button>
-                    <button id="tool-fill" class="tool" title="Balde (G)">Balde <span class="kbd">G</span></button>
+                    <button id="tool-brush" class="tool active" title="Pincel (Q)">Pincel <span class="kbd">Q</span></button>
+                    <button id="tool-eraser" class="tool" title="Borracha (W)">Borracha <span class="kbd">W</span></button>
+                    <button id="tool-fill" class="tool" title="Balde (E)">Balde <span class="kbd">E</span></button>
                     <label>Tamanho: <span id="brush-size-label">3</span>
                         <input type="range" id="brush-size" min="1" max="5" value="2">
                     </label>
@@ -58,6 +58,46 @@
                     <input type="range" id="mask-opacity" min="0" max="100" value="50"
                            title="0% esconde a máscara; 100% a deixa totalmente opaca sobre o satélite. Atalhos: [ / ]">
                 </section>
+            </aside>
+
+            <div class="canvas-wrap">
+                <div id="canvas-viewport">
+                    <div id="canvas-stack" class="canvas-stack">
+                        <div id="map-satellite"></div>
+                        <canvas id="canvas-mask" width="768" height="768"></canvas>
+                        <canvas id="canvas-grid" width="768" height="768"></canvas>
+                        <canvas id="canvas-cursor" width="768" height="768"></canvas>
+                        <div id="paint-bounds"></div>
+                    </div>
+                </div>
+                <div id="zoom-controls" class="zoom-controls">
+                    <button id="btn-zoom-in" title="Ampliar">+</button>
+                    <button id="btn-zoom-reset" title="Resetar zoom">⟲</button>
+                    <button id="btn-zoom-out" title="Reduzir">−</button>
+                    <span id="zoom-label" class="zoom-label">100%</span>
+                </div>
+                <div id="map-warning" class="map-warning hidden" role="alert">
+                    ⚠ Satélite indisponível — classifique com cuidado.
+                </div>
+                <div id="no-tiles-screen" class="no-tiles-screen hidden" role="status">
+                    <div class="no-tiles-box">
+                        <div class="no-tiles-icon">✓</div>
+                        <h2>Todos os tiles foram processados</h2>
+                        <p>Não há mais tiles disponíveis para você no momento. Obrigado pelo trabalho!</p>
+                        <div class="no-tiles-actions">
+                            <button id="no-tiles-refresh" class="primary" type="button">Verificar novamente</button>
+                            <button id="no-tiles-logout" type="button">Sair</button>
+                        </div>
+                    </div>
+                </div>
+                <div id="backup-banner" class="backup-banner hidden" role="status">
+                    <span>Há um backup local deste tile com alterações não salvas.</span>
+                    <button id="backup-apply" class="primary">Restaurar</button>
+                    <button id="backup-discard">Descartar</button>
+                </div>
+            </div>
+
+            <aside class="sidebar sidebar-right">
                 <section class="progress">
                     <h3>Progresso</h3>
                     <div id="progress-line">Pixels: <span id="pixel-count">0</span>/65536 (<span id="pixel-pct">0</span>%)</div>
@@ -68,35 +108,16 @@
                 <section class="shortcuts-quick">
                     <h3>Atalhos</h3>
                     <div class="sc-row"><span class="kbd">1</span>–<span class="kbd">6</span><span>Classe</span></div>
-                    <div class="sc-row"><span class="kbd">B</span><span class="kbd">E</span><span class="kbd">G</span><span>Pincel/Borracha/Balde</span></div>
-                    <div class="sc-row"><span class="kbd">+</span><span class="kbd">−</span><span>Tamanho</span></div>
-                    <div class="sc-row"><span class="kbd">[</span><span class="kbd">]</span><span>Opacidade</span></div>
-                    <div class="sc-row"><span class="kbd">Space</span><span>Esconder máscara</span></div>
-                    <div class="sc-row"><span class="kbd">⌃Z</span><span class="kbd">⌃⇧Z</span><span>Desfazer/Refazer</span></div>
-                    <div class="sc-row"><span class="kbd">⌃S</span><span>Submeter</span></div>
+                    <div class="sc-row"><span class="kbd">Q</span><span class="kbd">W</span><span class="kbd">E</span><span>Pincel/Borracha/Balde</span></div>
+                    <div class="sc-row"><span class="kbd">A</span><span class="kbd">S</span><span>Tamanho − / +</span></div>
+                    <div class="sc-row"><span class="kbd">D</span><span class="kbd">Z</span><span>Opacidade − / +</span></div>
+                    <div class="sc-row"><span class="kbd">X</span><span class="kbd">C</span><span>Destacar / próximo faltante</span></div>
+                    <div class="sc-row"><span class="kbd">⌃Z</span><span class="kbd">⌃Y</span><span>Desfazer/Refazer</span></div>
+                    <div class="sc-row"><span class="kbd">Roda</span><span>Zoom</span></div>
+                    <div class="sc-row">Botão direito + arrastar<span>Mover</span></div>
+                    <div class="sc-row"><span class="kbd">Space</span><span>Esconder máscara (segurando)</span></div>
                     <button id="btn-help-inline" class="link-btn" type="button">Ver todos os atalhos</button>
                 </section>
-            </aside>
-
-            <div class="canvas-wrap">
-                <div id="canvas-stack" class="canvas-stack">
-                    <div id="map-satellite"></div>
-                    <canvas id="canvas-mask" width="768" height="768"></canvas>
-                    <canvas id="canvas-cursor" width="768" height="768"></canvas>
-                </div>
-                <div id="map-warning" class="map-warning hidden" role="alert">
-                    ⚠ Satélite indisponível — classifique com cuidado.
-                </div>
-                <div id="backup-banner" class="backup-banner hidden" role="status">
-                    <span>Há um backup local deste tile com alterações não salvas.</span>
-                    <button id="backup-apply" class="primary">Restaurar</button>
-                    <button id="backup-discard">Descartar</button>
-                </div>
-            </div>
-
-            <aside class="minimap-wrap">
-                <h3>Contexto</h3>
-                <div id="minimap"></div>
             </aside>
         </main>
 
@@ -104,7 +125,7 @@
             <button id="btn-undo" title="Ctrl+Z">Desfazer <span class="kbd">⌃Z</span></button>
             <button id="btn-redo" title="Ctrl+Shift+Z">Refazer <span class="kbd">⌃⇧Z</span></button>
             <button id="btn-problem">Reportar Problema</button>
-            <button id="btn-submit" class="primary"><span id="submit-label">Submeter</span> <span class="kbd">⌃S</span></button>
+            <button id="btn-submit" class="primary"><span id="submit-label">Submeter</span></button>
         </footer>
 
         <!-- Problem modal -->

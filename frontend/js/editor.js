@@ -2,8 +2,16 @@
 // (mask + cursor) sit georeferenced on top of the tile bbox.
 import { apiGet, apiGetBlob, apiPostBytes, apiPostJson, onSessionWarning, logout as apiLogout } from "./api.js";
 import { showToast } from "./toast.js";
-import { renderMinimap } from "./minimap.js";
 import { createLockedMap, setMapBbox } from "./maplib.js";
+
+// Context view shows 3x3 tiles around the paintable center.
+const CONTEXT_FACTOR = 3;
+function expandBbox(bbox, factor) {
+    const [w, s, e, n] = bbox;
+    const cx = (w + e) / 2, cy = (s + n) / 2;
+    const hw = (e - w) * factor / 2, hh = (n - s) * factor / 2;
+    return [cx - hw, cy - hh, cx + hw, cy + hh];
+}
 import { hexToRgb, blobToImage } from "./utils.js";
 import {
     paintAt as corePaintAt,
@@ -37,6 +45,8 @@ let brushSizeIdx = 1;
 let maskOpacity = 0.5;
 let outlineOnly = false;
 let maskHidden = false;
+let missingHighlight = false;  // H: persistent highlight of unfilled (255) pixels
+let nextMissingCursor = 0;     // N: walks through missing pixels in raster order
 let tileserverUrl = "";
 let todayCount = 0;
 
@@ -67,7 +77,26 @@ offCanvas.width = TILE; offCanvas.height = TILE;
 const offCtx = offCanvas.getContext("2d");
 
 let satMap = null;
-let minimapMap = null;
+
+// Zoom/pan state for the canvas-stack. zoom=1 fits the paintable area in the
+// viewport; higher values zoom into the 256x256 tile. panX/panY are in CSS
+// pixels at the current zoom (applied AFTER scale via translate).
+let zoom = 1;
+let panX = 0, panY = 0;
+const MIN_ZOOM = 1;
+const MAX_ZOOM = 16;
+let spaceHeld = false;
+let panning = false;
+let panStart = null;  // { clientX, clientY, panX, panY }
+
+const canvasGrid = document.getElementById("canvas-grid");
+const ctxGrid = canvasGrid.getContext("2d");
+// Paint-pixel grid: one line every 2.5 m (= every paint pixel). Line thickness
+// is 0.5 m on the ground so each cell has a visible frame and the interior is
+// what gets colored. Purely visual — painting is still 256×256.
+const GRID_LINE_METERS = 0.5;
+const GRID_CELL_METERS = 2.5;
+const GRID_LINE_DISPLAY = SCALE * (GRID_LINE_METERS / GRID_CELL_METERS); // in DISPLAY units
 
 export async function initEditor(user) {
     currentUser = user;
@@ -178,8 +207,7 @@ async function loadNext() {
             const real = await apiGet("/api/tiles/next");
             if (!real) {
                 preloadedNext = null;
-                showToast("Todos os tiles foram processados!", "success", 5000);
-                document.getElementById("tile-name-label").textContent = "";
+                showNoTilesScreen();
                 return;
             }
             if (real.id === t.id) {
@@ -191,8 +219,7 @@ async function loadNext() {
         } else {
             t = await apiGet("/api/tiles/next");
             if (!t) {
-                showToast("Todos os tiles foram processados!", "success", 5000);
-                document.getElementById("tile-name-label").textContent = "";
+                showNoTilesScreen();
                 return;
             }
             await loadTile(t);
@@ -227,6 +254,7 @@ async function loadTile(t, preloadedMask = null) {
     currentTile = t;
     undoStack.length = 0; redoStack.length = 0;
     updateUndoRedoButtons();
+    hideNoTilesScreen();
     document.getElementById("tile-name-label").textContent = `Tile: ${t.name} (#${t.id})`;
     const reviewBanner = document.getElementById("review-banner");
     const modePill = document.getElementById("mode-pill");
@@ -259,7 +287,8 @@ async function loadTile(t, preloadedMask = null) {
     tryRestoreBackup();
     renderMaskFull();
     renderSatellite(t);
-    renderMinimapContext(t);
+    resetView();
+    drawGrid();
     updateProgress();
 }
 
@@ -386,7 +415,8 @@ function updateSubmitButton(missing) {
 
 let _mapErrorCount = 0;
 function renderSatellite(t) {
-    const bbox = [t.bbox_west, t.bbox_south, t.bbox_east, t.bbox_north];
+    const tileBbox = [t.bbox_west, t.bbox_south, t.bbox_east, t.bbox_north];
+    const bbox = expandBbox(tileBbox, CONTEXT_FACTOR);
     const warnEl = document.getElementById("map-warning");
     if (warnEl) warnEl.classList.add("hidden");
     _mapErrorCount = 0;
@@ -405,10 +435,6 @@ function renderSatellite(t) {
         setMapBbox(satMap, bbox);
     }
     requestAnimationFrame(() => satMap && satMap.resize());
-}
-
-function renderMinimapContext(t) {
-    minimapMap = renderMinimap(minimapMap, t, tileserverUrl);
 }
 
 function renderMaskFull() {
@@ -438,9 +464,17 @@ function blitMask() {
         ctxMask.imageSmoothingEnabled = false;
         ctxMask.drawImage(offCanvas, 0, 0, DISPLAY, DISPLAY);
         ctxMask.globalAlpha = 1;
-        // Outline overlay iterates all 65k pixels; skip during gesture and
-        // redraw once on mouseup to keep painting under 16ms/frame.
-        if (!drawing) drawOutlines(true);
+    }
+    if (missingHighlight) drawMissingOverlay();
+}
+
+function drawMissingOverlay() {
+    ctxMask.fillStyle = "rgba(255, 0, 255, 0.85)";
+    for (let y = 0; y < TILE; y++) {
+        const row = y * TILE;
+        for (let x = 0; x < TILE; x++) {
+            if (mask[row + x] === 255) ctxMask.fillRect(x*SCALE, y*SCALE, SCALE, SCALE);
+        }
     }
 }
 
@@ -557,7 +591,21 @@ function attachEvents() {
         ctxCursor.clearRect(0, 0, DISPLAY, DISPLAY);
         document.getElementById("hover-class").textContent = "—";
     });
-    canvasCursor.addEventListener("wheel", onWheel, { passive: false });
+    const viewport = document.getElementById("canvas-viewport");
+    viewport.addEventListener("wheel", onWheel, { passive: false });
+    viewport.addEventListener("mousedown", onViewportMouseDown);
+    window.addEventListener("mousemove", onViewportMouseMove);
+    window.addEventListener("mouseup", onViewportMouseUp);
+    viewport.addEventListener("contextmenu", (e) => e.preventDefault());
+
+    document.getElementById("btn-zoom-in").addEventListener("click", () => zoomBy(1.5));
+    document.getElementById("btn-zoom-out").addEventListener("click", () => zoomBy(1 / 1.5));
+    document.getElementById("btn-zoom-reset").addEventListener("click", resetView);
+
+    const ntRefresh = document.getElementById("no-tiles-refresh");
+    if (ntRefresh) ntRefresh.addEventListener("click", loadNext);
+    const ntLogout = document.getElementById("no-tiles-logout");
+    if (ntLogout) ntLogout.addEventListener("click", async () => { await apiLogout(); location.reload(); });
 
     document.getElementById("tool-brush").addEventListener("click", () => setTool("brush"));
     document.getElementById("tool-eraser").addEventListener("click", () => setTool("eraser"));
@@ -629,6 +677,7 @@ function isModalOpen() {
 
 function onMouseDown(ev) {
     if (!currentTile) return;
+    if (ev.button === 2) return; // right-click is pan — handled on viewport
     const [x, y] = screenToLogical(ev);
     if (tool === "fill") { floodFill(x, y); return; }
     drawing = true;
@@ -671,10 +720,133 @@ function onMouseUp() {
 }
 
 function onWheel(ev) {
-    if (!ev.ctrlKey) return;
     ev.preventDefault();
-    const delta = ev.deltaY < 0 ? 0.05 : -0.05;
-    adjustOpacity(delta);
+    if (ev.ctrlKey) {
+        // Ctrl+wheel adjusts mask opacity (preserved from previous UX).
+        const delta = ev.deltaY < 0 ? 0.05 : -0.05;
+        adjustOpacity(delta);
+        return;
+    }
+    // Plain wheel → zoom, centered on the cursor position.
+    const factor = ev.deltaY < 0 ? 1.15 : 1 / 1.15;
+    zoomAt(factor, ev.clientX, ev.clientY);
+}
+
+function onViewportMouseDown(ev) {
+    // Pan only via right mouse button (any tool). Space is reserved for
+    // hiding the mask while held, per UX spec.
+    if (ev.button !== 2) return;
+    ev.preventDefault();
+    panning = true;
+    panStart = { clientX: ev.clientX, clientY: ev.clientY, panX, panY };
+    document.getElementById("canvas-viewport").classList.add("panning");
+    document.getElementById("canvas-stack").classList.add("panning");
+}
+function onViewportMouseMove(ev) {
+    if (!panning || !panStart) return;
+    panX = panStart.panX + (ev.clientX - panStart.clientX);
+    panY = panStart.panY + (ev.clientY - panStart.clientY);
+    applyTransform();
+}
+function onViewportMouseUp() {
+    if (!panning) return;
+    panning = false;
+    panStart = null;
+    document.getElementById("canvas-viewport").classList.remove("panning");
+    document.getElementById("canvas-stack").classList.remove("panning");
+}
+
+function applyTransform() {
+    const stack = document.getElementById("canvas-stack");
+    stack.style.transform = `translate(${panX}px, ${panY}px) scale(${zoom})`;
+    const label = document.getElementById("zoom-label");
+    if (label) label.textContent = `${Math.round(zoom * 100)}%`;
+}
+
+function zoomBy(factor) {
+    const viewport = document.getElementById("canvas-viewport");
+    const r = viewport.getBoundingClientRect();
+    zoomAt(factor, r.left + r.width / 2, r.top + r.height / 2);
+}
+
+function zoomAt(factor, clientX, clientY) {
+    const prev = zoom;
+    const next = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, zoom * factor));
+    if (next === prev) return;
+    // Keep the point under the cursor stationary: compute current offset of
+    // that client point relative to the stack center, then scale it.
+    const stack = document.getElementById("canvas-stack");
+    const r = stack.getBoundingClientRect();
+    const cx = r.left + r.width / 2;
+    const cy = r.top + r.height / 2;
+    const ratio = next / prev;
+    // Keep (clientX, clientY) fixed: pan' = pan + (client - r.center) * (1 - ratio).
+    panX = panX + (clientX - cx) * (1 - ratio);
+    panY = panY + (clientY - cy) * (1 - ratio);
+    zoom = next;
+    applyTransform();
+    drawGrid();
+}
+
+// Center the viewport on a specific logical pixel (px, py) at targetZoom,
+// recomputing pan so that pixel lands at viewport center. Used by "jump to
+// next missing pixel" so the operator doesn't have to hunt for stragglers.
+function focusPixel(px, py, targetZoom) {
+    zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, targetZoom));
+    const localX = (px + 0.5) * SCALE;
+    const localY = (py + 0.5) * SCALE;
+    // At pan=0 the stack is centered in its viewport; offset from stack center
+    // is (local - DISPLAY/2). Multiplied by zoom gives the on-screen offset;
+    // negate to pull that point to center.
+    panX = -(localX - DISPLAY / 2) * zoom;
+    panY = -(localY - DISPLAY / 2) * zoom;
+    applyTransform();
+    drawGrid();
+}
+
+function jumpToNextMissing() {
+    if (filledCount === PIXELS) {
+        showToast("Máscara completa.", "success");
+        return;
+    }
+    let i = nextMissingCursor % PIXELS;
+    for (let k = 0; k < PIXELS; k++) {
+        if (mask[i] === 255) break;
+        i = (i + 1) % PIXELS;
+    }
+    nextMissingCursor = (i + 1) % PIXELS;
+    const px = i % TILE, py = (i / TILE) | 0;
+    focusPixel(px, py, Math.max(zoom, 8));
+    if (!missingHighlight) {
+        missingHighlight = true;
+        blitMask();
+    }
+}
+
+function resetView() {
+    zoom = 1; panX = 0; panY = 0;
+    applyTransform();
+    drawGrid();
+}
+
+// --- 256×256 grid overlay ---
+// The grid canvas lives inside the transformed stack at DISPLAY resolution
+// (768×768). Lines are drawn with width scaled by 1/zoom so they remain 1 CSS
+// pixel thick on screen regardless of zoom level.
+function drawGrid() {
+    ctxGrid.clearRect(0, 0, DISPLAY, DISPLAY);
+    ctxGrid.save();
+    // 2.5 m cell grid with 0.5 m thick borders — always visible.
+    ctxGrid.lineWidth = GRID_LINE_DISPLAY;
+    ctxGrid.strokeStyle = "rgba(0, 0, 0, 0.85)";
+    ctxGrid.beginPath();
+    for (let i = 0; i <= TILE; i++) {
+        const p = i * SCALE;
+        ctxGrid.moveTo(p, 0); ctxGrid.lineTo(p, DISPLAY);
+        ctxGrid.moveTo(0, p); ctxGrid.lineTo(DISPLAY, p);
+    }
+    ctxGrid.stroke();
+    ctxGrid.restore();
 }
 
 function drawCursor(x, y) {
@@ -683,12 +855,17 @@ function drawCursor(x, y) {
     const sx = (x - r) * SCALE;
     const sy = (y - r) * SCALE;
     const sz = (2 * r + 1) * SCALE;
-    ctxCursor.strokeStyle = "rgba(255,255,255,0.9)";
-    ctxCursor.lineWidth = 1.5;
-    ctxCursor.strokeRect(sx, sy, sz, sz);
-    ctxCursor.strokeStyle = "rgba(0,0,0,0.6)";
-    ctxCursor.lineWidth = 1;
-    ctxCursor.strokeRect(sx+1, sy+1, sz-2, sz-2);
+    // Stroke scaled by 1/zoom so the cursor box stays exactly 1 CSS pixel
+    // thick on screen regardless of zoom — otherwise at high zoom a 1.5px
+    // line bleeds into adjacent grid cells and hides which pixel will paint.
+    const lw = 1 / zoom;
+    const inset = lw / 2;
+    ctxCursor.strokeStyle = "rgba(0,0,0,0.8)";
+    ctxCursor.lineWidth = lw;
+    ctxCursor.strokeRect(sx + inset, sy + inset, sz - lw, sz - lw);
+    ctxCursor.strokeStyle = "rgba(255,255,255,0.95)";
+    ctxCursor.lineWidth = lw;
+    ctxCursor.strokeRect(sx - inset, sy - inset, sz + lw, sz + lw);
 }
 
 function setTool(t) {
@@ -713,26 +890,41 @@ function onKeyDown(ev) {
         return;
     }
     if (ev.ctrlKey && (k === "y" || k === "Y")) { ev.preventDefault(); redo(); return; }
-    if (ev.ctrlKey && (k === "s" || k === "S")) { ev.preventDefault(); submit(); return; }
     if (k >= "1" && k <= "6") {
         const idx = Number(k) - 1;
         if (classes[idx]) setActiveClass(classes[idx].id);
         return;
     }
-    if (k === "b" || k === "B") { setTool("brush"); return; }
-    if (k === "e" || k === "E") { setTool(tool === "eraser" ? "brush" : "eraser"); return; }
-    if (k === "g" || k === "G") { setTool("fill"); return; }
-    if (k === "+" || k === "=") { adjustBrushSize(1); return; }
-    if (k === "-" || k === "_") { adjustBrushSize(-1); return; }
-    if (k === "[") { adjustOpacity(-0.1); return; }
-    if (k === "]") { adjustOpacity(0.1); return; }
-    if (k === "o" || k === "O") { outlineOnly = !outlineOnly; blitMask(); return; }
-    if (k === " ") { ev.preventDefault(); if (!maskHidden) { maskHidden = true; blitMask(); } return; }
+    // Left-hand ergonomic layout on QWE / ASD / ZXC.
+    const low = k.toLowerCase();
+    if (low === "q") { setTool("brush"); return; }
+    if (low === "w") { setTool("eraser"); return; }
+    if (low === "e") { setTool("fill"); return; }
+    if (low === "a") { adjustBrushSize(-1); return; }
+    if (low === "s") { adjustBrushSize(1); return; }
+    if (low === "d") { adjustOpacity(-0.1); return; }
+    if (low === "z") { adjustOpacity(0.1); return; }
+    if (low === "x") { missingHighlight = !missingHighlight; blitMask(); return; }
+    if (low === "c") { jumpToNextMissing(); return; }
+    if (k === " ") {
+        ev.preventDefault();
+        if (!spaceHeld) {
+            spaceHeld = true;
+            document.getElementById("canvas-viewport").classList.add("space-held");
+        }
+        if (!maskHidden) { maskHidden = true; blitMask(); }
+        return;
+    }
     if (k === "?") { document.getElementById("modal-help").classList.remove("hidden"); return; }
 }
 
 function onKeyUp(ev) {
-    if (ev.key === " ") { maskHidden = false; blitMask(); }
+    if (ev.key === " ") {
+        spaceHeld = false;
+        document.getElementById("canvas-viewport").classList.remove("space-held");
+        maskHidden = false;
+        blitMask();
+    }
 }
 
 function adjustBrushSize(delta) {
@@ -815,6 +1007,24 @@ function flashMissing() {
         else ctxCursor.clearRect(0, 0, DISPLAY, DISPLAY);
     };
     step();
+}
+
+function showNoTilesScreen() {
+    const el = document.getElementById("no-tiles-screen");
+    if (el) el.classList.remove("hidden");
+    currentTile = null;
+    document.getElementById("tile-name-label").textContent = "";
+    // Wipe the canvas so the operator can't keep painting on a stale tile.
+    mask.fill(255);
+    filledCount = 0;
+    writeMaskPixels(0, 0, TILE, TILE);
+    blitMask();
+    updateProgress();
+}
+
+function hideNoTilesScreen() {
+    const el = document.getElementById("no-tiles-screen");
+    if (el) el.classList.add("hidden");
 }
 
 function flashSuccess() {

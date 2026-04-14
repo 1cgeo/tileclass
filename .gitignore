@@ -32,3 +32,5 @@ data/
 exports/
 *.tif
 *.tiff
+
+.env

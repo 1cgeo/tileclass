@@ -619,8 +619,8 @@ async function renderUsers(root) {
     root.innerHTML = `
         <h3>Criar usuário</h3>
         <form id="form-user" style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;">
-            <input type="text" id="nu-username" placeholder="username" required>
-            <input type="password" id="nu-password" placeholder="senha (>= 6)" required minlength="6">
+            <input type="text" id="nu-username" placeholder="username" autocomplete="username" required>
+            <input type="password" id="nu-password" placeholder="senha (>= 6)" autocomplete="new-password" required minlength="6">
             <select id="nu-role"><option value="operator">operator</option><option value="admin">admin</option></select>
             <button type="submit" class="primary">Criar</button>
         </form>

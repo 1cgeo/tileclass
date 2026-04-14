@@ -94,9 +94,12 @@ async def security_headers(request: Request, call_next):
     # Intranet deployment: all assets served from same origin.
     response.headers.setdefault(
         "Content-Security-Policy",
-        "default-src 'self'; img-src 'self' data: blob:; "
-        "style-src 'self' 'unsafe-inline'; script-src 'self'; "
-        "worker-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'",
+        "default-src 'self'; img-src 'self' data: blob: https://server.arcgisonline.com; "
+        "style-src 'self' 'unsafe-inline' https://unpkg.com; "
+        "script-src 'self' https://unpkg.com; "
+        "worker-src 'self' blob:; "
+        "connect-src 'self' https://server.arcgisonline.com; "
+        "frame-ancestors 'none'",
     )
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
