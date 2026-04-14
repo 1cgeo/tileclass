@@ -970,7 +970,9 @@ async function submit() {
         document.getElementById("today-count").textContent = todayCount;
         loadQueueStats();
         flashSuccess();
-        setTimeout(loadNext, 220);
+        setTimeout(() => {
+            if (confirm("Tile enviado. Carregar próximo?")) loadNext();
+        }, 220);
     } catch (e) {
         const err = e.body?.detail?.error;
         if (err === "unfilled_pixels") {
