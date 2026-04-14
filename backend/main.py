@@ -371,6 +371,10 @@ def admin_set_user_active(body: SetActiveIn, user_id: int = Path(ge=1),
 
 # ---------- Static frontend ----------
 
+XYZ_DIR = FsPath(__file__).resolve().parent / "static_xyz"
+if XYZ_DIR.exists():
+    app.mount("/xyz", StaticFiles(directory=XYZ_DIR), name="xyz")
+
 if FRONTEND_DIR.exists():
     app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
 

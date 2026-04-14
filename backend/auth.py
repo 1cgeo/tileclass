@@ -17,15 +17,12 @@ _DEFAULT_SECRETS = {"trocar-em-producao-por-secret-forte", "", "changeme", "secr
 
 
 def _secret() -> str:
-    env = os.environ.get("TILECLASS_JWT_SECRET")
-    if env:
-        return env
     s = get_config()["auth"]["jwt_secret"]
     # Fail closed: the YAML placeholder must never be used in production.
     if s in _DEFAULT_SECRETS and os.environ.get("TILECLASS_ALLOW_DEFAULT_SECRET") != "1":
         raise RuntimeError(
-            "refusing to use default jwt_secret; set TILECLASS_JWT_SECRET env var "
-            "or override config.yaml (set TILECLASS_ALLOW_DEFAULT_SECRET=1 only for tests)"
+            "refusing to use default jwt_secret; set a strong value in config.yaml "
+            "(set TILECLASS_ALLOW_DEFAULT_SECRET=1 only for tests)"
         )
     return s
 

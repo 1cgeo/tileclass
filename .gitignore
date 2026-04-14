@@ -32,5 +32,6 @@ data/
 exports/
 *.tif
 *.tiff
+backend/static_xyz/
 
 .env
