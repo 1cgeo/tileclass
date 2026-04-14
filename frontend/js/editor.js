@@ -2,7 +2,7 @@
 // (mask + cursor) sit georeferenced on top of the tile bbox.
 import { apiGet, apiGetBlob, apiPostBytes, apiPostJson, onSessionWarning, logout as apiLogout } from "./api.js";
 import { showToast } from "./toast.js";
-import { createLockedMap, setMapBbox } from "./maplib.js";
+import { createLockedMap, setMapBbox, updateMapSource } from "./maplib.js";
 
 // Context view shows 3x3 tiles around the paintable center.
 const CONTEXT_FACTOR = 3;
@@ -48,6 +48,8 @@ let maskHidden = false;
 let missingHighlight = false;  // H: persistent highlight of unfilled (255) pixels
 let nextMissingCursor = 0;     // N: walks through missing pixels in raster order
 let tileserverUrl = "";
+let tileserverUrlSecondary = null;
+let activeSource = "primary"; // "primary" | "secondary"
 let todayCount = 0;
 
 // Preload cache for the "next" tile while user paints
@@ -123,13 +125,24 @@ export async function initEditor(user) {
         apiGet("/api/config/classes"),
     ]);
     tileserverUrl = cfg.url_template;
+    tileserverUrlSecondary = cfg.secondary_url_template || null;
     classes = cls;
     classesById = Object.fromEntries(classes.map(c => [c.id, c]));
     buildClassPanel();
     buildColorLut();
     attachEvents();
     await Promise.all([loadTodayCount(), loadQueueStats()]);
-    await loadNext();
+    // If the operator already has an assigned tile (resume after F5/logout/
+    // admin re-review), open it directly — skipping the idle screen.
+    try {
+        const resume = await apiGet("/api/tiles/assigned");
+        if (resume) {
+            await loadTile(resume);
+            preloadNext();
+            return;
+        }
+    } catch {}
+    showIdleScreen("Pronto para começar", "Clique para receber um tile.");
 }
 
 async function loadTodayCount() {
@@ -255,6 +268,7 @@ async function loadTile(t, preloadedMask = null) {
     undoStack.length = 0; redoStack.length = 0;
     updateUndoRedoButtons();
     hideNoTilesScreen();
+    hideIdleScreen();
     document.getElementById("tile-name-label").textContent = `Tile: ${t.name} (#${t.id})`;
     const reviewBanner = document.getElementById("review-banner");
     const modePill = document.getElementById("mode-pill");
@@ -412,6 +426,20 @@ function updateSubmitButton(missing) {
 }
 
 // --- Rendering ---
+
+function toggleSecondarySource() {
+    if (!tileserverUrlSecondary) {
+        showToast("Imagem secundária não configurada.", "warn", 2500);
+        return;
+    }
+    if (!satMap) return;
+    activeSource = activeSource === "primary" ? "secondary" : "primary";
+    const url = activeSource === "primary" ? tileserverUrl : tileserverUrlSecondary;
+    _mapErrorCount = 0;
+    document.getElementById("map-warning")?.classList.add("hidden");
+    updateMapSource(satMap, url);
+    showToast(`Imagem: ${activeSource === "primary" ? "principal" : "secundária"}`, "info", 1200);
+}
 
 let _mapErrorCount = 0;
 function renderSatellite(t) {
@@ -630,6 +658,14 @@ function attachEvents() {
     document.getElementById("btn-redo").addEventListener("click", redo);
     document.getElementById("btn-submit").addEventListener("click", submit);
     document.getElementById("btn-problem").addEventListener("click", openProblemModal);
+
+    document.getElementById("idle-start").addEventListener("click", () => {
+        hideIdleScreen();
+        loadNext();
+    });
+    document.getElementById("idle-logout").addEventListener("click", () => {
+        document.getElementById("btn-logout").click();
+    });
 
     document.getElementById("problem-cancel").addEventListener("click", closeProblemModal);
     document.getElementById("problem-confirm").addEventListener("click", confirmProblem);
@@ -902,10 +938,11 @@ function onKeyDown(ev) {
     if (low === "e") { setTool("fill"); return; }
     if (low === "a") { adjustBrushSize(-1); return; }
     if (low === "s") { adjustBrushSize(1); return; }
-    if (low === "d") { adjustOpacity(-0.1); return; }
     if (low === "z") { adjustOpacity(0.1); return; }
-    if (low === "x") { missingHighlight = !missingHighlight; blitMask(); return; }
+    if (low === "x") { adjustOpacity(-0.1); return; }
     if (low === "c") { jumpToNextMissing(); return; }
+    if (low === "d") { toggleSecondarySource(); return; }
+    if (low === "f") { missingHighlight = !missingHighlight; blitMask(); return; }
     if (k === " ") {
         ev.preventDefault();
         if (!spaceHeld) {
@@ -971,7 +1008,7 @@ async function submit() {
         loadQueueStats();
         flashSuccess();
         setTimeout(() => {
-            if (confirm("Tile enviado. Carregar próximo?")) loadNext();
+            showIdleScreen("Tile enviado ✓", "Clique para iniciar o próximo tile.");
         }, 220);
     } catch (e) {
         const err = e.body?.detail?.error;
@@ -1009,6 +1046,24 @@ function flashMissing() {
         else ctxCursor.clearRect(0, 0, DISPLAY, DISPLAY);
     };
     step();
+}
+
+function showIdleScreen(title, message) {
+    document.getElementById("idle-title").textContent = title;
+    document.getElementById("idle-message").textContent = message;
+    document.getElementById("idle-screen").classList.remove("hidden");
+    setTimeout(() => document.getElementById("idle-start").focus(), 0);
+    currentTile = null;
+    document.getElementById("tile-name-label").textContent = "";
+    mask.fill(255);
+    filledCount = 0;
+    writeMaskPixels(0, 0, TILE, TILE);
+    blitMask();
+    updateProgress();
+}
+
+function hideIdleScreen() {
+    document.getElementById("idle-screen").classList.add("hidden");
 }
 
 function showNoTilesScreen() {

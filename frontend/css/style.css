@@ -497,7 +497,10 @@ input[type="range"] {
     height: 100%; background: linear-gradient(90deg, var(--accent-lo), var(--accent));
     border-radius: 2px; min-width: 2px;
 }
-.bar-row .count { font-size: 12px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.bar-row .count {
+    font-size: 12px; color: var(--text-muted); font-variant-numeric: tabular-nums;
+    min-width: 48px; text-align: right;
+}
 
 .filter-bar {
     display: flex; gap: var(--space-3); align-items: flex-end; flex-wrap: wrap;

@@ -41,6 +41,23 @@ def _row_to_tile_dict(row) -> dict:
     return d
 
 
+def get_resume_tile(user_id: int) -> dict | None:
+    """Return the tile currently assigned to the user (in_progress or in_review),
+    or None. Read-only: does NOT assign from the queue. Used by the editor to
+    decide whether to skip the idle screen on login."""
+    conn = connect()
+    try:
+        row = conn.execute(
+            """SELECT * FROM tiles
+               WHERE assigned_to=? AND status IN ('in_progress','in_review')
+               ORDER BY id LIMIT 1""",
+            (user_id,),
+        ).fetchone()
+        return _row_to_tile_dict(row) if row else None
+    finally:
+        conn.close()
+
+
 def peek_next_tile(user_id: int) -> dict | None:
     """Read-only look-ahead: returns the tile the user would get next, without assigning.
     Used by the frontend to pre-load the next image while the current one is being painted."""

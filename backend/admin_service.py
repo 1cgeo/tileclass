@@ -133,12 +133,14 @@ def list_tiles(status: str | None = None, user_id: int | None = None,
     try:
         rows = conn.execute(
             "SELECT t.id, t.name, t.status, t.classified_by, t.reviewed_by, "
-            "t.classified_at, t.reviewed_at, t.problem_note, "
+            "t.assigned_to, t.classified_at, t.reviewed_at, t.problem_note, "
             "uc.username AS classified_by_username, "
-            "ur.username AS reviewed_by_username "
+            "ur.username AS reviewed_by_username, "
+            "ua.username AS assigned_to_username "
             "FROM tiles t "
             "LEFT JOIN users uc ON uc.id=t.classified_by "
-            "LEFT JOIN users ur ON ur.id=t.reviewed_by"
+            "LEFT JOIN users ur ON ur.id=t.reviewed_by "
+            "LEFT JOIN users ua ON ua.id=t.assigned_to"
             + where_sql
             + " ORDER BY t.id LIMIT ? OFFSET ?",
             args + [limit, offset],
@@ -240,6 +242,33 @@ def re_review_many(tile_ids: list[int], admin_id: int, strict: bool = False,
             log_action(conn, admin_id, tid, "re_review", detail)
             count += 1
     return count
+
+
+def unassign_operator(tile_id: int, admin_id: int, reason: str | None = None) -> dict:
+    """Release the current operator from a tile without wiping the mask.
+    in_progress -> pending; in_review -> classified. Other states are rejected."""
+    detail = _clean_reason(reason)
+    with transaction("IMMEDIATE") as conn:
+        row = conn.execute(
+            "SELECT status, assigned_to FROM tiles WHERE id=?", (tile_id,)
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "tile not found")
+        status = row["status"]
+        if status == "in_progress":
+            new_status = "pending"
+        elif status == "in_review":
+            new_status = "classified"
+        else:
+            raise HTTPException(
+                409, f"tile is not assigned (status={status})"
+            )
+        conn.execute(
+            "UPDATE tiles SET status=?, assigned_to=NULL, version=version+1 WHERE id=?",
+            (new_status, tile_id),
+        )
+        log_action(conn, admin_id, tile_id, "unassign", detail)
+    return {"id": tile_id, "status": new_status}
 
 
 def re_review_tile(tile_id: int, admin_id: int, reason: str | None = None) -> None:

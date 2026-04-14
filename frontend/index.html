@@ -79,6 +79,17 @@
                 <div id="map-warning" class="map-warning hidden" role="alert">
                     ⚠ Satélite indisponível — classifique com cuidado.
                 </div>
+                <div id="idle-screen" class="no-tiles-screen hidden" role="status">
+                    <div class="no-tiles-box">
+                        <div class="no-tiles-icon">▶</div>
+                        <h2 id="idle-title">Pronto para começar</h2>
+                        <p id="idle-message">Clique para receber um tile.</p>
+                        <div class="no-tiles-actions">
+                            <button id="idle-start" class="primary" type="button" autofocus>Iniciar tile</button>
+                            <button id="idle-logout" type="button">Sair</button>
+                        </div>
+                    </div>
+                </div>
                 <div id="no-tiles-screen" class="no-tiles-screen hidden" role="status">
                     <div class="no-tiles-box">
                         <div class="no-tiles-icon">✓</div>
@@ -157,8 +168,11 @@
                     <tr><td>Ctrl+Z / Ctrl+Shift+Z</td><td>Desfazer / Refazer</td></tr>
                     <tr><td>Espaço (segurar)</td><td>Esconder máscara</td></tr>
                     <tr><td>O</td><td>Modo só contornos</td></tr>
-                    <tr><td>[ / ]</td><td>Opacidade da máscara</td></tr>
+                    <tr><td>[ / ]  ou  Z / X</td><td>Opacidade da máscara (Z aumenta, X diminui)</td></tr>
                     <tr><td>Ctrl+roda do mouse</td><td>Ajustar opacidade</td></tr>
+                    <tr><td>C</td><td>Ir para próximo pixel faltante</td></tr>
+                    <tr><td>F</td><td>Destacar pixels faltantes</td></tr>
+                    <tr><td>D</td><td>Alternar imagem secundária (referência)</td></tr>
                     <tr><td>Ctrl+S</td><td>Submeter</td></tr>
                 </table>
                 <div class="modal-actions"><button id="help-close" class="primary">Fechar</button></div>

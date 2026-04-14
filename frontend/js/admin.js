@@ -2,7 +2,7 @@
 import { apiGet, apiGetBlob, apiGetWithHeaders, apiPostJson, apiJson, logout as apiLogout } from "./api.js";
 import { showToast } from "./toast.js";
 import { createLockedMap } from "./maplib.js";
-import { hexToRgb, blobToImage, escapeHtml as escape } from "./utils.js";
+import { hexToRgb, blobToImage, escapeHtml as escape, fmtDate } from "./utils.js";
 
 let tileserverUrl = "";
 let classes = [];
@@ -98,9 +98,12 @@ async function renderDashboard(root) {
         const row = document.createElement("div");
         row.className = "bar-row";
         const name = document.createElement("span"); name.className = "name"; name.textContent = k;
-        const bar = document.createElement("span"); bar.className = "bar"; bar.style.width = `${(v/total)*400}px`;
+        const wrap = document.createElement("span"); wrap.className = "bar-wrap";
+        const bar = document.createElement("span"); bar.className = "bar";
+        bar.style.width = `${(v / total) * 100}%`;
+        wrap.appendChild(bar);
         const count = document.createElement("span"); count.className = "count"; count.textContent = v;
-        row.append(name, bar, count);
+        row.append(name, wrap, count);
         root.appendChild(row);
     }
 
@@ -119,9 +122,12 @@ async function renderDashboard(root) {
         const row = document.createElement("div");
         row.className = "bar-row";
         const name = document.createElement("span"); name.className = "name"; name.textContent = r.date;
-        const bar = document.createElement("span"); bar.className = "bar"; bar.style.width = `${(r.count/maxDaily)*300}px`;
+        const wrap = document.createElement("span"); wrap.className = "bar-wrap";
+        const bar = document.createElement("span"); bar.className = "bar";
+        bar.style.width = `${(r.count / maxDaily) * 100}%`;
+        wrap.appendChild(bar);
         const count = document.createElement("span"); count.className = "count"; count.textContent = r.count;
-        row.append(name, bar, count);
+        row.append(name, wrap, count);
         root.appendChild(row);
     }
 }
@@ -336,9 +342,14 @@ function renderTable(root, tiles) {
             btn("Resetar", () => resetOne(t.id)),
         );
         if (t.status === "reviewed") tdAct.append(btn("Re-revisar", () => reReviewOne(t.id)));
+        if (t.status === "in_progress" || t.status === "in_review") {
+            tdAct.append(btn("Liberar operador", () => unassignOne(t.id)));
+        }
         tr.append(tdCb, td(t.id), td(t.name), tdStatus,
-                  td(t.classified_by_username || ""), td(t.reviewed_by_username || ""),
-                  td(t.classified_at || ""), td(t.reviewed_at || ""), tdAct);
+                  td(classifierCell(t)), td(reviewerCell(t)),
+                  td(finishedCell(t.classified_at, t.status === "in_progress")),
+                  td(finishedCell(t.reviewed_at, t.status === "in_review")),
+                  tdAct);
         tbody.appendChild(tr);
     }
     table.appendChild(tbody);
@@ -371,10 +382,14 @@ function renderGrid(root, tiles) {
         const meta = document.createElement("div");
         meta.className = "meta";
         meta.textContent = `#${t.id} · ${t.status}`;
-        if (t.classified_by_username) {
+        const whoText =
+            t.reviewed_by_username ? `revisado por ${t.reviewed_by_username}` :
+            t.classified_by_username ? `classificado por ${t.classified_by_username}` :
+            t.assigned_to_username ? `atribuído a ${t.assigned_to_username}` : "";
+        if (whoText) {
             const who = document.createElement("div");
             who.className = "meta-dim";
-            who.textContent = `por ${t.classified_by_username}`;
+            who.textContent = whoText;
             card.append(img, meta, who);
         } else {
             card.append(img, meta);
@@ -395,6 +410,22 @@ function toggleSelect(id, on, el) {
 }
 
 function td(v) { const el = document.createElement("td"); el.textContent = v ?? ""; return el; }
+
+function classifierCell(t) {
+    return t.classified_by_username
+        || (t.status === "in_progress" ? (t.assigned_to_username || "") : "");
+}
+
+function reviewerCell(t) {
+    return t.reviewed_by_username
+        || (t.status === "in_review" ? (t.assigned_to_username || "") : "");
+}
+
+function finishedCell(timestamp, inProgress) {
+    if (timestamp) return `✓ ${fmtDate(timestamp)}`;
+    if (inProgress) return "em andamento";
+    return "";
+}
 function btn(label, fn, cls) {
     const b = document.createElement("button"); b.textContent = label;
     if (cls) b.className = cls;
@@ -456,6 +487,17 @@ async function resetOne(id) {
     if (!r.confirmed) return;
     await apiPostJson(`/api/admin/tiles/${id}/reset`, { reason: r.reason });
     showToast("Resetado.", "success");
+    loadAndRender();
+}
+async function unassignOne(id) {
+    const r = await confirmDestructive({
+        title: `Liberar operador do tile #${id}`,
+        description: "O operador atual é removido e o tile volta para a fila. A máscara já pintada é preservada.",
+        ids: [id], confirmLabel: "Liberar", danger: false,
+    });
+    if (!r.confirmed) return;
+    await apiPostJson(`/api/admin/tiles/${id}/unassign`, { reason: r.reason });
+    showToast("Operador liberado.", "success");
     loadAndRender();
 }
 async function reReviewOne(id) {
@@ -541,7 +583,7 @@ async function openViewer(tileId) {
                 const li = document.createElement("li");
                 const act = document.createElement("span"); act.className = "act"; act.textContent = ev.action;
                 const by = document.createTextNode(`por ${ev.username || "?"}`);
-                const when = document.createElement("div"); when.className = "when"; when.textContent = ev.created_at;
+                const when = document.createElement("div"); when.className = "when"; when.textContent = fmtDate(ev.created_at);
                 li.append(act, by);
                 if (ev.detail) li.append(document.createTextNode(` — ${ev.detail}`));
                 li.append(when);
@@ -607,7 +649,7 @@ async function renderProblems(root) {
         const tr = document.createElement("tr");
         const tdAct = document.createElement("td");
         tdAct.append(btn("Ver", () => openViewer(p.id)), btn("Resetar", () => resetOne(p.id)));
-        tr.append(td(p.id), td(p.name), td(p.problem_note || ""), td(p.reported_at || ""), tdAct);
+        tr.append(td(p.id), td(p.name), td(p.problem_note || ""), td(fmtDate(p.reported_at)), tdAct);
         tbody.appendChild(tr);
     }
     table.appendChild(tbody);
@@ -652,7 +694,7 @@ async function renderUsers(root) {
         const tdAct = document.createElement("td");
         const actLabel = u.active ? "Desativar" : "Ativar";
         tdAct.append(btn(actLabel, () => toggleActive(u.id, !u.active)));
-        tr.append(td(u.id), td(u.username), td(u.role), td(u.active ? "sim" : "não"), td(u.created_at), tdAct);
+        tr.append(td(u.id), td(u.username), td(u.role), td(u.active ? "sim" : "não"), td(fmtDate(u.created_at)), tdAct);
         tbody.appendChild(tr);
     }
     table.appendChild(tbody);

@@ -96,10 +96,21 @@ async function login(page, user, pass, waitForTile = true) {
     await page.evaluate(() => document.querySelector("#login-form").requestSubmit());
     await page.waitForSelector("#view-editor:not(.hidden)", { timeout: 10000 });
     if (waitForTile) {
+        // Either the editor resumes an already-assigned tile (skipping idle),
+        // or lands on the idle screen which must be dismissed with a click.
         await page.waitForFunction(
-            () => window.__tcTest__?.currentTile != null,
-            { timeout: 10000 },
+            () => window.__tcTest__?.currentTile != null
+               || !document.getElementById("idle-screen").classList.contains("hidden"),
+            { timeout: 5000 },
         );
+        const hasTile = await page.evaluate(() => window.__tcTest__?.currentTile != null);
+        if (!hasTile) {
+            await page.click("#idle-start");
+            await page.waitForFunction(
+                () => window.__tcTest__?.currentTile != null,
+                { timeout: 10000 },
+            );
+        }
     }
 }
 
@@ -173,7 +184,7 @@ try {
         await page.close(); await page._tcContext?.close();
     });
 
-    await test("paint full canvas via flood fill → submit → flash + next tile", async () => {
+    await test("paint full canvas → submit → idle screen → click → next tile", async () => {
         const page = await newPageBlocked();
         await login(page, "op1", "secret123");
         const tileBefore = await page.evaluate(() => window.__tcTest__.currentTile.id);
@@ -182,18 +193,64 @@ try {
         const filled = await page.evaluate(() => window.__tcTest__.filledCount);
         assert(filled === 65536, `filledCount=${filled}, expected 65536`);
 
-        // Submit via Ctrl+S
-        await page.keyboard.down("Control");
-        await page.keyboard.press("s");
-        await page.keyboard.up("Control");
+        await page.click("#btn-submit");
 
-        // Wait for next tile
+        // Idle screen must appear after submit; tile must NOT auto-advance.
+        await page.waitForSelector("#idle-screen:not(.hidden)", { timeout: 5000 });
+        const auto = await page.evaluate(() => window.__tcTest__?.currentTile?.id ?? null);
+        assert(auto === null, `submit should not auto-load next (currentTile=${auto})`);
+
+        // Click "Iniciar tile" -> next tile loads
+        await page.click("#idle-start");
         await page.waitForFunction(
             (before) => window.__tcTest__?.currentTile?.id && window.__tcTest__.currentTile.id !== before,
             { timeout: 5000 }, tileBefore,
         );
         const tileAfter = await page.evaluate(() => window.__tcTest__.currentTile.id);
-        assert(tileAfter !== tileBefore, "next tile did not auto-load");
+        assert(tileAfter !== tileBefore, "next tile did not load after clicking start");
+        await page.close(); await page._tcContext?.close();
+    });
+
+    await test("re-login with an assigned tile skips idle and opens it directly", async () => {
+        // First session: pick up a tile but don't submit.
+        const page1 = await newPageBlocked();
+        await login(page1, "op3", "secret123");
+        const tileId = await page1.evaluate(() => window.__tcTest__.currentTile.id);
+        await page1.close(); await page1._tcContext?.close();
+
+        // Second session: fresh incognito context — on login, the editor should
+        // resume the same tile without showing the idle screen.
+        const page2 = await newPageBlocked();
+        await page2.goto(`${BASE}/?test=1`);
+        await page2.waitForSelector("#login-form", { timeout: 10000 });
+        await page2.type("#login-username", "op3");
+        await page2.type("#login-password", "secret123");
+        await page2.evaluate(() => document.querySelector("#login-form").requestSubmit());
+        await page2.waitForSelector("#view-editor:not(.hidden)", { timeout: 10000 });
+        // currentTile should be populated without any manual click.
+        await page2.waitForFunction(
+            () => window.__tcTest__?.currentTile?.id != null,
+            { timeout: 5000 },
+        );
+        const idleVisible = await page2.$eval("#idle-screen", el => !el.classList.contains("hidden"));
+        assert(!idleVisible, "idle screen should NOT appear when a tile is already assigned");
+        const resumed = await page2.evaluate(() => window.__tcTest__.currentTile.id);
+        assert(resumed === tileId, `expected resume of tile ${tileId}, got ${resumed}`);
+        await page2.close(); await page2._tcContext?.close();
+    });
+
+    await test("post-login shows idle screen; no tile assigned until click", async () => {
+        const page = await newPageBlocked();
+        await page.goto(`${BASE}/?test=1`);
+        await page.waitForSelector("#login-form", { timeout: 10000 });
+        await page.type("#login-username", "op2");
+        await page.type("#login-password", "secret123");
+        await page.evaluate(() => document.querySelector("#login-form").requestSubmit());
+        await page.waitForSelector("#view-editor:not(.hidden)", { timeout: 10000 });
+        // Idle must be visible and no tile assigned on the client.
+        await page.waitForSelector("#idle-screen:not(.hidden)", { timeout: 5000 });
+        const t = await page.evaluate(() => window.__tcTest__?.currentTile ?? null);
+        assert(t === null, `expected no currentTile before clicking start, got ${JSON.stringify(t)}`);
         await page.close(); await page._tcContext?.close();
     });
 

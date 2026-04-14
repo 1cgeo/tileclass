@@ -200,7 +200,12 @@ def config_classes():
 
 @app.get("/api/config/tileserver")
 def config_tileserver():
-    return {"url_template": get_config()["tileserver"]["url_template"]}
+    cfg = get_config()
+    secondary = (cfg.get("tileserver_secondary") or {}).get("url_template")
+    return {
+        "url_template": cfg["tileserver"]["url_template"],
+        "secondary_url_template": secondary,
+    }
 
 
 # ---------- Tiles (operator) ----------
@@ -208,6 +213,16 @@ def config_tileserver():
 @app.get("/api/tiles/next")
 def next_tile(user: auth.CurrentUser = Depends(auth.get_current_user)):
     t = tile_service.get_next_tile(user.id)
+    if not t:
+        return Response(status_code=204)
+    return t
+
+
+@app.get("/api/tiles/assigned")
+def my_assigned_tile(user: auth.CurrentUser = Depends(auth.get_current_user)):
+    """Return the tile currently assigned to this user (resume target), or 204.
+    Does NOT assign a new tile from the queue."""
+    t = tile_service.get_resume_tile(user.id)
     if not t:
         return Response(status_code=204)
     return t
@@ -344,6 +359,12 @@ def admin_reset(body: ResetReasonIn | None = None, tile_id: int = Path(ge=1),
                 u: auth.CurrentUser = Depends(auth.require_admin)):
     admin_service.reset_tile(tile_id, u.id, body.reason if body else None)
     return {"ok": True}
+
+
+@app.post("/api/admin/tiles/{tile_id}/unassign")
+def admin_unassign(body: ResetReasonIn | None = None, tile_id: int = Path(ge=1),
+                   u: auth.CurrentUser = Depends(auth.require_admin)):
+    return admin_service.unassign_operator(tile_id, u.id, body.reason if body else None)
 
 
 @app.post("/api/admin/tiles/{tile_id}/re-review")

@@ -5,6 +5,40 @@ from tests.conftest import token
 def headers(t): return {"Authorization": f"Bearer {t}"}
 
 
+def test_assigned_returns_204_when_nothing_assigned(client, operators, tiles):
+    tok = token(client, "op1", "secret123")
+    r = client.get("/api/tiles/assigned", headers=headers(tok))
+    assert r.status_code == 204
+    assert r.content == b""
+
+
+def test_assigned_returns_resume_tile_without_pulling_from_queue(
+    client, operators, tiles
+):
+    """When the user has an in_progress tile, /assigned returns it AND
+    does not pull a new tile from the queue. This is what the editor uses
+    to skip the idle screen on login."""
+    tok = token(client, "op1", "secret123")
+    assigned = client.get("/api/tiles/next", headers=headers(tok)).json()
+    r = client.get("/api/tiles/assigned", headers=headers(tok))
+    assert r.status_code == 200
+    body = r.json()
+    assert body["id"] == assigned["id"]
+    assert body["status"] == "in_progress"
+    # Idempotent.
+    r2 = client.get("/api/tiles/assigned", headers=headers(tok))
+    assert r2.json()["id"] == assigned["id"]
+
+
+def test_assigned_does_not_leak_across_users(client, operators, tiles):
+    op1 = token(client, "op1", "secret123")
+    op2 = token(client, "op2", "secret123")
+    client.get("/api/tiles/next", headers=headers(op1))
+    r = client.get("/api/tiles/assigned", headers=headers(op2))
+    assert r.status_code == 204
+
+
+
 def test_next_assigns_and_resumes(client, operators, tiles):
     t = token(client, "op1", "secret123")
     r = client.get("/api/tiles/next", headers=headers(t))
