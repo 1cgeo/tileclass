@@ -38,13 +38,18 @@ def empty_mask_png() -> bytes:
     return buf.getvalue()
 
 
-def validate_submission(raw: bytes) -> tuple[bool, int]:
-    """Validate size and values. Returns (ok, missing_count). Missing = pixels with value 255."""
+def validate_partial(raw: bytes) -> int:
+    """Validate size and value range only (255 allowed). Returns missing count."""
     if len(raw) != PIXELS:
         raise ValueError(f"expected {PIXELS} bytes, got {len(raw)}")
     arr = np.frombuffer(raw, dtype=np.uint8)
     valid = np.isin(arr, [1, 2, 3, 4, 5, 6, 255])
     if not valid.all():
         raise ValueError("invalid class values present")
-    missing = int((arr == 255).sum())
+    return int((arr == 255).sum())
+
+
+def validate_submission(raw: bytes) -> tuple[bool, int]:
+    """Validate size and values. Returns (ok, missing_count). Missing = pixels with value 255."""
+    missing = validate_partial(raw)
     return missing == 0, missing

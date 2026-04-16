@@ -56,6 +56,9 @@ let todayCount = 0;
 let preloadedNext = null;
 let _pendingBackup = null;
 
+// Test hook only — never gate production logic on this.
+let _tileReady = false;
+
 // Undo/redo
 const undoStack = [];
 const redoStack = [];
@@ -114,6 +117,11 @@ export async function initEditor(user) {
             get redoStackLen() { return redoStack.length; },
             get maskHidden() { return maskHidden; },
             get preloadedNextId() { return preloadedNext?.tile?.id ?? null; },
+            get pausedPromptVisible() {
+                const el = document.getElementById("paused-resume-screen");
+                return !!el && !el.classList.contains("hidden");
+            },
+            get tileReady() { return _tileReady; },
         };
     }
     document.getElementById("user-label").textContent = user.username;
@@ -131,17 +139,24 @@ export async function initEditor(user) {
     buildClassPanel();
     buildColorLut();
     attachEvents();
-    await Promise.all([loadTodayCount(), loadQueueStats()]);
-    // If the operator already has an assigned tile (resume after F5/logout/
-    // admin re-review), open it directly — skipping the idle screen.
+    // Paused tiles need an explicit confirmation before /resume restarts the timer.
+    let resume = null;
     try {
-        const resume = await apiGet("/api/tiles/assigned");
-        if (resume) {
-            await loadTile(resume);
-            preloadNext();
+        [, , resume] = await Promise.all([
+            loadTodayCount(),
+            loadQueueStats(),
+            apiGet("/api/tiles/assigned").catch(() => null),
+        ]);
+    } catch {}
+    if (resume) {
+        if (resume.paused_at) {
+            showPausedResumeScreen(resume);
             return;
         }
-    } catch {}
+        await loadTile(resume);
+        preloadNext();
+        return;
+    }
     showIdleScreen("Pronto para começar", "Clique para receber um tile.");
 }
 
@@ -264,11 +279,13 @@ async function preloadNext() {
 }
 
 async function loadTile(t, preloadedMask = null) {
+    _tileReady = false;
     currentTile = t;
     undoStack.length = 0; redoStack.length = 0;
     updateUndoRedoButtons();
     hideNoTilesScreen();
     hideIdleScreen();
+    hidePausedResumeScreen();
     document.getElementById("tile-name-label").textContent = `Tile: ${t.name} (#${t.id})`;
     const reviewBanner = document.getElementById("review-banner");
     const modePill = document.getElementById("mode-pill");
@@ -304,6 +321,7 @@ async function loadTile(t, preloadedMask = null) {
     resetView();
     drawGrid();
     updateProgress();
+    _tileReady = true;
 }
 
 async function loadMaskFromServer(tileId) {
@@ -658,6 +676,15 @@ function attachEvents() {
     document.getElementById("btn-redo").addEventListener("click", redo);
     document.getElementById("btn-submit").addEventListener("click", submit);
     document.getElementById("btn-problem").addEventListener("click", openProblemModal);
+    const btnPause = document.getElementById("btn-pause");
+    if (btnPause) btnPause.addEventListener("click", pauseTile);
+
+    const resumeContinue = document.getElementById("paused-resume-continue");
+    if (resumeContinue) resumeContinue.addEventListener("click", continuePausedTile);
+    const resumeLogout = document.getElementById("paused-resume-logout");
+    if (resumeLogout) resumeLogout.addEventListener("click", () => {
+        document.getElementById("btn-logout").click();
+    });
 
     document.getElementById("idle-start").addEventListener("click", () => {
         hideIdleScreen();
@@ -1049,6 +1076,7 @@ function flashMissing() {
 }
 
 function showIdleScreen(title, message) {
+    hidePausedResumeScreen();
     document.getElementById("idle-title").textContent = title;
     document.getElementById("idle-message").textContent = message;
     document.getElementById("idle-screen").classList.remove("hidden");
@@ -1112,5 +1140,83 @@ async function confirmProblem() {
         await loadNext();
     } catch (e) {
         showToast(`Erro: ${e.message}`, "error");
+    }
+}
+
+// --- Pause / Resume ---
+
+async function pauseTile() {
+    const btn = document.getElementById("btn-pause");
+    if (btn?.disabled) return;
+    if (!currentTile) {
+        showToast("Nenhum tile aberto para pausar.", "warn");
+        return;
+    }
+    if (btn) btn.disabled = true;
+    try {
+        const version = currentTile.version != null ? String(currentTile.version) : "";
+        await apiPostBytes(
+            `/api/tiles/${currentTile.id}/pause`, mask,
+            version ? { "X-Tile-Version": version } : {},
+        );
+        clearBackup();
+        showToast("Tile pausado. Suas alterações foram salvas no servidor.", "success");
+        showIdleScreen("Tile pausado ⏸", "Faça login depois para continuar de onde parou.");
+    } catch (e) {
+        const err = e.body?.detail?.error;
+        if (err === "tile_modified") {
+            showToast("Outro dispositivo modificou este tile. Recarregando...", "warn");
+            setTimeout(() => location.reload(), 1500);
+        } else {
+            showToast(`Erro ao pausar: ${e.message}`, "error");
+        }
+    } finally {
+        if (btn) btn.disabled = false;
+    }
+}
+
+function showPausedResumeScreen(tile) {
+    const msg = document.getElementById("paused-resume-message");
+    if (msg) {
+        msg.textContent = `Tile: ${tile.name} (#${tile.id}). Deseja continuar de onde parou?`;
+    }
+    const btn = document.getElementById("paused-resume-continue");
+    if (btn) btn.dataset.tileId = String(tile.id);
+    const el = document.getElementById("paused-resume-screen");
+    if (el) el.classList.remove("hidden");
+    setTimeout(() => btn?.focus(), 0);
+}
+
+function hidePausedResumeScreen() {
+    const el = document.getElementById("paused-resume-screen");
+    if (el) el.classList.add("hidden");
+    const btn = document.getElementById("paused-resume-continue");
+    if (btn) delete btn.dataset.tileId;
+}
+
+async function continuePausedTile() {
+    const btn = document.getElementById("paused-resume-continue");
+    const id = Number(btn?.dataset.tileId);
+    if (!id) return;
+    btn.disabled = true;
+    try {
+        // Fetch the saved mask in parallel with /resume to halve resume latency.
+        const [refreshed, maskBlob] = await Promise.all([
+            apiPostJson(`/api/tiles/${id}/resume`, {}),
+            apiGetBlob(`/api/tiles/${id}/image`, { retries: 1 }),
+        ]);
+        const img = await blobToImage(maskBlob);
+        const tmp = document.createElement("canvas");
+        tmp.width = TILE; tmp.height = TILE;
+        tmp.getContext("2d").drawImage(img, 0, 0, TILE, TILE);
+        const data = tmp.getContext("2d").getImageData(0, 0, TILE, TILE).data;
+        const preloaded = new Uint8Array(PIXELS);
+        for (let i = 0; i < PIXELS; i++) preloaded[i] = data[i * 4];
+        hidePausedResumeScreen();
+        await loadTile(refreshed, preloaded);
+        preloadNext();
+    } catch (e) {
+        showToast(`Erro ao retomar: ${e.message}`, "error");
+        btn.disabled = false;
     }
 }

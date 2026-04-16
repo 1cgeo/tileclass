@@ -11,6 +11,47 @@ from .mask_utils import empty_mask_png, decode_mask, TILE_SIZE
 from .auth import hash_password
 
 
+def _cycle_durations(conn, assign_action: str, done_action: str):
+    """Per (user, tile) cycle duration in seconds, with pause→resume intervals
+    inside the cycle subtracted. Pauses from previous (reset+reassigned) cycles
+    are excluded by scoping to the latest assign timestamp."""
+    return conn.execute(
+        """WITH cycles AS (
+             SELECT user_id, tile_id,
+               MAX(CASE WHEN action=? THEN created_at END) AS assign_at,
+               MAX(CASE WHEN action=? THEN created_at END) AS done_at
+             FROM action_log
+             WHERE action IN (?, ?)
+             GROUP BY user_id, tile_id
+             HAVING done_at IS NOT NULL AND assign_at IS NOT NULL AND done_at > assign_at
+           ),
+           paired AS (
+             SELECT user_id, tile_id, action, created_at,
+               LEAD(action)     OVER (PARTITION BY user_id, tile_id ORDER BY created_at) AS na,
+               LEAD(created_at) OVER (PARTITION BY user_id, tile_id ORDER BY created_at) AS nat
+             FROM action_log
+             WHERE action IN ('pause','resume')
+           ),
+           pause_in_cycle AS (
+             SELECT p.user_id, p.tile_id,
+               SUM((julianday(p.nat) - julianday(p.created_at))*86400) AS pause_secs
+             FROM paired p
+             JOIN cycles c ON c.user_id=p.user_id AND c.tile_id=p.tile_id
+             WHERE p.action='pause' AND p.na='resume'
+               AND p.created_at >= c.assign_at AND p.nat <= c.done_at
+             GROUP BY p.user_id, p.tile_id
+           )
+           SELECT c.user_id, c.tile_id,
+             (julianday(c.done_at) - julianday(c.assign_at))*86400
+               - COALESCE(p.pause_secs, 0) AS dur
+           FROM cycles c
+           LEFT JOIN pause_in_cycle p USING (user_id, tile_id)
+           WHERE (julianday(c.done_at) - julianday(c.assign_at))*86400
+                 - COALESCE(p.pause_secs, 0) > 0""",
+        (assign_action, done_action, assign_action, done_action),
+    ).fetchall()
+
+
 def dashboard() -> dict:
     conn = connect()
     try:
@@ -19,6 +60,9 @@ def dashboard() -> dict:
         total = sum(totals.values())
         reviewed = totals.get("reviewed", 0)
         pct = round(100.0 * reviewed / total, 2) if total else 0.0
+        paused_count = conn.execute(
+            "SELECT COUNT(*) c FROM tiles WHERE paused_at IS NOT NULL"
+        ).fetchone()["c"]
 
         daily = conn.execute(
             """SELECT substr(reviewed_at,1,10) d, COUNT(*) c
@@ -36,27 +80,8 @@ def dashboard() -> dict:
                GROUP BY u.id ORDER BY u.username"""
         ).fetchall()
 
-        # Duration per (user, tile, kind): diff between the latest assign_* and the
-        # latest classify/review of the same kind. Split into classify vs review so
-        # admins can see both averages separately (global and per-operator).
-        classify_rows = conn.execute(
-            """SELECT user_id, tile_id,
-                 (julianday(MAX(CASE WHEN action='classify' THEN created_at END))
-                - julianday(MAX(CASE WHEN action='assign_classify' THEN created_at END)))*86400 AS dur
-               FROM action_log
-               WHERE action IN ('assign_classify','classify')
-               GROUP BY user_id, tile_id
-               HAVING dur IS NOT NULL AND dur > 0"""
-        ).fetchall()
-        review_rows = conn.execute(
-            """SELECT user_id, tile_id,
-                 (julianday(MAX(CASE WHEN action='review' THEN created_at END))
-                - julianday(MAX(CASE WHEN action='assign_review' THEN created_at END)))*86400 AS dur
-               FROM action_log
-               WHERE action IN ('assign_review','review')
-               GROUP BY user_id, tile_id
-               HAVING dur IS NOT NULL AND dur > 0"""
-        ).fetchall()
+        classify_rows = _cycle_durations(conn, "assign_classify", "classify")
+        review_rows = _cycle_durations(conn, "assign_review", "review")
 
         def _avg_by_user(rows):
             agg: dict[int, list[float]] = {}
@@ -107,11 +132,13 @@ def dashboard() -> dict:
         "avg_review_seconds": avg_review_seconds,
         "rate_per_day": round(rate_per_day, 2),
         "eta_days": eta_days,
+        "paused_count": paused_count,
     }
 
 
 def list_tiles(status: str | None = None, user_id: int | None = None,
                date_from: str | None = None, date_to: str | None = None,
+               paused: bool | None = None,
                limit: int = 200, offset: int = 0) -> list[dict]:
     where = []
     args: list = []
@@ -128,12 +155,17 @@ def list_tiles(status: str | None = None, user_id: int | None = None,
         to_end = date_to + "T23:59:59"
         where.append("(t.classified_at <= ? OR t.reviewed_at <= ?)")
         args.extend([to_end, to_end])
+    if paused is True:
+        where.append("t.paused_at IS NOT NULL")
+    elif paused is False:
+        where.append("t.paused_at IS NULL")
     where_sql = (" WHERE " + " AND ".join(where)) if where else ""
     conn = connect()
     try:
         rows = conn.execute(
             "SELECT t.id, t.name, t.status, t.classified_by, t.reviewed_by, "
             "t.assigned_to, t.classified_at, t.reviewed_at, t.problem_note, "
+            "t.paused_at, "
             "uc.username AS classified_by_username, "
             "ur.username AS reviewed_by_username, "
             "ua.username AS assigned_to_username "
@@ -151,7 +183,8 @@ def list_tiles(status: str | None = None, user_id: int | None = None,
 
 
 def count_tiles(status: str | None = None, user_id: int | None = None,
-                date_from: str | None = None, date_to: str | None = None) -> int:
+                date_from: str | None = None, date_to: str | None = None,
+                paused: bool | None = None) -> int:
     where = []
     args: list = []
     if status: where.append("status=?"); args.append(status)
@@ -162,6 +195,10 @@ def count_tiles(status: str | None = None, user_id: int | None = None,
     if date_to:
         to_end = date_to + "T23:59:59"
         where.append("(classified_at <= ? OR reviewed_at <= ?)"); args.extend([to_end, to_end])
+    if paused is True:
+        where.append("paused_at IS NOT NULL")
+    elif paused is False:
+        where.append("paused_at IS NULL")
     where_sql = (" WHERE " + " AND ".join(where)) if where else ""
     conn = connect()
     try:
@@ -206,7 +243,8 @@ def reset_many(tile_ids: list[int], admin_id: int, reason: str | None = None) ->
             conn.execute(
                 """UPDATE tiles SET status='pending', data_png=?, assigned_to=NULL,
                    classified_by=NULL, reviewed_by=NULL, classified_at=NULL,
-                   reviewed_at=NULL, problem_note=NULL, version=version+1 WHERE id=?""",
+                   reviewed_at=NULL, problem_note=NULL, paused_at=NULL,
+                   version=version+1 WHERE id=?""",
                 (empty, tid),
             )
             log_action(conn, admin_id, tid, "reset", detail)
@@ -236,7 +274,7 @@ def re_review_many(tile_ids: list[int], admin_id: int, strict: bool = False,
                 continue
             conn.execute(
                 """UPDATE tiles SET status='classified', reviewed_by=NULL, reviewed_at=NULL,
-                   assigned_to=NULL, version=version+1 WHERE id=?""",
+                   assigned_to=NULL, paused_at=NULL, version=version+1 WHERE id=?""",
                 (tid,),
             )
             log_action(conn, admin_id, tid, "re_review", detail)
@@ -317,7 +355,7 @@ def unassign_operator(tile_id: int, admin_id: int, reason: str | None = None) ->
                 409, f"tile is not assigned (status={status})"
             )
         conn.execute(
-            "UPDATE tiles SET status=?, assigned_to=NULL, version=version+1 WHERE id=?",
+            "UPDATE tiles SET status=?, assigned_to=NULL, paused_at=NULL, version=version+1 WHERE id=?",
             (new_status, tile_id),
         )
         log_action(conn, admin_id, tile_id, "unassign", detail)

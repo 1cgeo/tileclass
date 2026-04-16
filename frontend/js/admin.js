@@ -87,6 +87,7 @@ async function renderDashboard(root) {
         statCard("Revisados", d.totals_by_status.reviewed || 0),
         statCard("Pendentes", d.totals_by_status.pending || 0),
         statCard("Em andamento", (d.totals_by_status.in_progress || 0) + (d.totals_by_status.in_review || 0)),
+        statCard("Pausados", d.paused_count || 0),
         statCard("Problemas", d.totals_by_status.problem || 0),
         statCard("Ritmo (tiles/dia)", d.rate_per_day),
         statCard("ETA (dias)", d.eta_days ?? "—"),
@@ -339,7 +340,14 @@ function renderTable(root, tiles) {
         const tdCb = document.createElement("td"); tdCb.appendChild(cb);
         const tdStatus = document.createElement("td");
         const chip = document.createElement("span");
-        chip.className = `chip ${t.status}`; chip.textContent = t.status;
+        if (t.paused_at) {
+            chip.className = "chip paused";
+            chip.textContent = t.status === "in_review" ? "pausado (revisão)" : "pausado";
+            chip.title = `Pausado em ${t.paused_at}`;
+        } else {
+            chip.className = `chip ${t.status}`;
+            chip.textContent = t.status;
+        }
         tdStatus.appendChild(chip);
         const tdAct = document.createElement("td");
         tdAct.append(
@@ -636,7 +644,14 @@ async function openViewer(tileId) {
         const statusLine = document.createElement("p");
         statusLine.innerHTML = `<b>Status:</b> `;
         const chip = document.createElement("span");
-        chip.className = `chip ${t.status}`; chip.textContent = t.status;
+        if (t.paused_at) {
+            chip.className = "chip paused";
+            chip.textContent = t.status === "in_review" ? "pausado (revisão)" : "pausado";
+            chip.title = `Pausado em ${t.paused_at}`;
+        } else {
+            chip.className = `chip ${t.status}`;
+            chip.textContent = t.status;
+        }
         statusLine.appendChild(chip);
         if (t.classified_by_username) {
             statusLine.append(document.createTextNode(" · classificado por "));

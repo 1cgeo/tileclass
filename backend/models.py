@@ -44,6 +44,7 @@ class TileOut(BaseModel):
     reviewed_by: Optional[int]
     version: int = 1
     filled_pixels: int = 0
+    paused_at: Optional[str] = None
 
 
 class ReportProblemIn(BaseModel):
@@ -75,6 +76,7 @@ class DashboardOut(BaseModel):
     avg_review_seconds: float = 0.0
     rate_per_day: float
     eta_days: Optional[float]
+    paused_count: int = 0
 
 
 class SetActiveIn(BaseModel):

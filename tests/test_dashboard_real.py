@@ -177,3 +177,143 @@ def test_dashboard_avg_durations_split_by_action(client, admin_user, operators, 
     assert by_user["op1"]["avg_review_seconds"] == 0.0
     assert by_user["op2"]["avg_classify_seconds"] == 0.0
     assert 43 <= by_user["op2"]["avg_review_seconds"] <= 47
+
+
+# ---------- Pause subtraction ----------
+
+def _set_log_ts(conn, log_id, ts):
+    conn.execute("UPDATE action_log SET created_at=? WHERE id=?", (ts, log_id))
+
+
+def _log_id(conn, user_id, tile_id, action):
+    row = conn.execute(
+        "SELECT id FROM action_log WHERE user_id=? AND tile_id=? AND action=? ORDER BY id DESC LIMIT 1",
+        (user_id, tile_id, action),
+    ).fetchone()
+    return row["id"] if row else None
+
+
+def test_dashboard_subtracts_pause_intervals(client, admin_user, operators, tiles):
+    """Pause→resume intervals inside an assign→classify cycle must be
+    subtracted from the measured classify duration. Otherwise an operator
+    that pauses overnight would inflate the avg by 12+ hours."""
+    from datetime import datetime, timedelta, timezone
+    from backend.database import connect, log_action
+
+    t1 = token(client, "op1", "secret123")
+    tile = client.get("/api/tiles/next", headers=h(t1)).json()
+    # Insert pause/resume log entries before classifying
+    conn = connect()
+    try:
+        log_action(conn, operators[0]["id"], tile["id"], "pause")
+        log_action(conn, operators[0]["id"], tile["id"], "resume")
+    finally:
+        conn.close()
+    _classify(client, t1, tile["id"])
+
+    # Backdate so total span = 80min, pause interval = 60min → net = 20min
+    base = datetime.now(timezone.utc)
+    conn = connect()
+    try:
+        assign_id = _log_id(conn, operators[0]["id"], tile["id"], "assign_classify")
+        pause_id  = _log_id(conn, operators[0]["id"], tile["id"], "pause")
+        resume_id = _log_id(conn, operators[0]["id"], tile["id"], "resume")
+        classify_id = _log_id(conn, operators[0]["id"], tile["id"], "classify")
+        _set_log_ts(conn, assign_id,   (base - timedelta(minutes=80)).isoformat())
+        _set_log_ts(conn, pause_id,    (base - timedelta(minutes=70)).isoformat())
+        _set_log_ts(conn, resume_id,   (base - timedelta(minutes=10)).isoformat())
+        _set_log_ts(conn, classify_id,  base.isoformat())
+    finally:
+        conn.close()
+
+    adm = token(client, "admin", "admin123")
+    d = client.get("/api/admin/dashboard", headers=h(adm)).json()
+    # Expect ~20 min = 1200s (±2s slack for julianday rounding)
+    assert 1198 <= d["avg_classify_seconds"] <= 1202, d["avg_classify_seconds"]
+
+
+def test_dashboard_handles_orphan_pause(client, admin_user, operators, tiles):
+    """Pause without a matching resume (operator never returned) must not
+    break the SQL nor subtract any time. Cycle without classify is ignored."""
+    from datetime import datetime, timedelta, timezone
+    from backend.database import connect, log_action
+
+    t1 = token(client, "op1", "secret123")
+    tile = client.get("/api/tiles/next", headers=h(t1)).json()
+    # Pause but never resume nor classify — cycle is incomplete, dashboard ignores it.
+    conn = connect()
+    try:
+        log_action(conn, operators[0]["id"], tile["id"], "pause")
+    finally:
+        conn.close()
+
+    # Now classify a SECOND tile normally so there IS a measurable cycle.
+    tile2 = client.get("/api/tiles/next", headers=h(t1)).json()
+    _classify(client, t1, tile2["id"])
+
+    base = datetime.now(timezone.utc)
+    conn = connect()
+    try:
+        a2 = _log_id(conn, operators[0]["id"], tile2["id"], "assign_classify")
+        c2 = _log_id(conn, operators[0]["id"], tile2["id"], "classify")
+        _set_log_ts(conn, a2, (base - timedelta(seconds=100)).isoformat())
+        _set_log_ts(conn, c2, base.isoformat())
+    finally:
+        conn.close()
+
+    adm = token(client, "admin", "admin123")
+    d = client.get("/api/admin/dashboard", headers=h(adm)).json()
+    # Only the second tile contributes; orphan pause didn't crash anything.
+    assert 98 <= d["avg_classify_seconds"] <= 102
+
+
+def test_dashboard_pause_scoped_to_latest_cycle(client, admin_user, operators, tiles):
+    """Pauses from a previous (reset, re-assigned) cycle must NOT be subtracted
+    from a fresh assign→classify cycle."""
+    from datetime import datetime, timedelta, timezone
+    from backend.database import connect, log_action
+
+    t1 = token(client, "op1", "secret123")
+    tile = client.get("/api/tiles/next", headers=h(t1)).json()
+    # First cycle: pause+resume+classify (we'll wipe via admin reset).
+    conn = connect()
+    try:
+        log_action(conn, operators[0]["id"], tile["id"], "pause")
+        log_action(conn, operators[0]["id"], tile["id"], "resume")
+    finally:
+        conn.close()
+    _classify(client, t1, tile["id"])
+
+    adm = token(client, "admin", "admin123")
+    client.post(f"/api/admin/tiles/{tile['id']}/reset", headers=h(adm))
+
+    # Second cycle: same operator, same tile, no pauses this time.
+    tile_again = client.get("/api/tiles/next", headers=h(t1)).json()
+    assert tile_again["id"] == tile["id"]
+    _classify(client, t1, tile_again["id"])
+
+    # Backdate so the OLD cycle had a 60-min pause and the NEW cycle is 100s flat.
+    base = datetime.now(timezone.utc)
+    conn = connect()
+    try:
+        rows = conn.execute(
+            "SELECT id, action FROM action_log WHERE tile_id=? AND user_id=? ORDER BY id",
+            (tile["id"], operators[0]["id"]),
+        ).fetchall()
+        # rows order: assign_classify, pause, resume, classify, reset(?), assign_classify, classify
+        # reset is logged under admin_id, so it doesn't appear here.
+        # Old cycle backdating
+        _set_log_ts(conn, rows[0]["id"], (base - timedelta(hours=24, minutes=80)).isoformat())
+        _set_log_ts(conn, rows[1]["id"], (base - timedelta(hours=24, minutes=70)).isoformat())
+        _set_log_ts(conn, rows[2]["id"], (base - timedelta(hours=24, minutes=10)).isoformat())
+        _set_log_ts(conn, rows[3]["id"], (base - timedelta(hours=24)).isoformat())
+        # New cycle backdating: 100s span, no pause
+        _set_log_ts(conn, rows[4]["id"], (base - timedelta(seconds=100)).isoformat())
+        _set_log_ts(conn, rows[5]["id"], base.isoformat())
+    finally:
+        conn.close()
+
+    d = client.get("/api/admin/dashboard", headers=h(adm)).json()
+    # Latest cycle wins (MAX(assign_classify), MAX(classify)) → 100s, with no
+    # pause to subtract (the old pause is OUTSIDE the new cycle).
+    assert 98 <= d["avg_classify_seconds"] <= 102, d["avg_classify_seconds"]

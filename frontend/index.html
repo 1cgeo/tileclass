@@ -90,6 +90,17 @@
                         </div>
                     </div>
                 </div>
+                <div id="paused-resume-screen" class="no-tiles-screen hidden" role="status">
+                    <div class="no-tiles-box">
+                        <div class="no-tiles-icon">⏸</div>
+                        <h2>Você tem um tile pausado</h2>
+                        <p id="paused-resume-message">Deseja continuar?</p>
+                        <div class="no-tiles-actions">
+                            <button id="paused-resume-continue" class="primary" type="button" autofocus>Continuar tile pausado</button>
+                            <button id="paused-resume-logout" type="button">Sair</button>
+                        </div>
+                    </div>
+                </div>
                 <div id="no-tiles-screen" class="no-tiles-screen hidden" role="status">
                     <div class="no-tiles-box">
                         <div class="no-tiles-icon">✓</div>
@@ -135,6 +146,7 @@
         <footer class="footer">
             <button id="btn-undo" title="Ctrl+Z">Desfazer <span class="kbd">⌃Z</span></button>
             <button id="btn-redo" title="Ctrl+Shift+Z">Refazer <span class="kbd">⌃⇧Z</span></button>
+            <button id="btn-pause" title="Pausa salva o trabalho parcial no servidor e congela o tempo">Pausar</button>
             <button id="btn-problem">Reportar Problema</button>
             <button id="btn-submit" class="primary"><span id="submit-label">Submeter</span></button>
         </footer>

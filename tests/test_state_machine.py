@@ -172,6 +172,23 @@ def test_rereview_on_non_reviewed_tile_is_rejected(client, admin_user, operators
     assert r.status_code == 409
 
 
+def test_pause_does_not_change_status(client, operators, tiles):
+    """Pause is orthogonal to the state machine: status stays in_progress/in_review."""
+    t = token(client, "op1", "secret123")
+    tile = client.get("/api/tiles/next", headers=h(t)).json()
+    body = _mask(fill=255)  # totally empty mask is allowed by pause
+    r = client.post(f"/api/tiles/{tile['id']}/pause",
+                    headers={**h(t), "Content-Type": "application/octet-stream",
+                             "X-Tile-Version": str(tile["version"])},
+                    content=body)
+    assert r.status_code == 200
+    assert _status(client, t, tile["id"]) == "in_progress"
+    # Resume also keeps status the same
+    r = client.post(f"/api/tiles/{tile['id']}/resume", headers=h(t))
+    assert r.status_code == 200
+    assert _status(client, t, tile["id"]) == "in_progress"
+
+
 def test_reset_of_reviewed_tile_wipes_all_user_fks(client, admin_user, operators, tiles):
     from backend.database import connect
     t1 = token(client, "op1", "secret123")

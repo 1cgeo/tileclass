@@ -553,6 +553,7 @@ input[type="range"] {
 .chip.in_review   { background: #fff1dc; color: var(--warn); border-color: #f0c07a; }
 .chip.reviewed    { background: #dff3e3; color: var(--ok); border-color: #86c79a; }
 .chip.problem     { background: #fdecea; color: var(--err); border-color: #f0b4af; }
+.chip.paused      { background: #ede5f7; color: #5b3a9b; border-color: #b59ce0; }
 
 /* ---------- Toast ---------- */
 .toast {

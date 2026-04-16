@@ -96,18 +96,17 @@ async function login(page, user, pass, waitForTile = true) {
     await page.evaluate(() => document.querySelector("#login-form").requestSubmit());
     await page.waitForSelector("#view-editor:not(.hidden)", { timeout: 10000 });
     if (waitForTile) {
-        // Either the editor resumes an already-assigned tile (skipping idle),
-        // or lands on the idle screen which must be dismissed with a click.
+        // tileReady — async mask load can race with subsequent mouse events.
         await page.waitForFunction(
-            () => window.__tcTest__?.currentTile != null
+            () => window.__tcTest__?.tileReady === true
                || !document.getElementById("idle-screen").classList.contains("hidden"),
             { timeout: 5000 },
         );
-        const hasTile = await page.evaluate(() => window.__tcTest__?.currentTile != null);
+        const hasTile = await page.evaluate(() => window.__tcTest__?.tileReady === true);
         if (!hasTile) {
             await page.click("#idle-start");
             await page.waitForFunction(
-                () => window.__tcTest__?.currentTile != null,
+                () => window.__tcTest__?.tileReady === true,
                 { timeout: 10000 },
             );
         }
@@ -354,6 +353,77 @@ try {
         // The tile should NOT be in_progress from the peek alone
         // (it can be in_progress from a prior test's assignment, though — we only
         //  assert that preview doesn't itself advance state).
+    });
+
+    await test("pause: partial mask saved server-side, resume prompt on re-login, mask preserved", async () => {
+        // Session 1: paint partially, then pause.
+        const page1 = await newPageBlocked();
+        await login(page1, "op2", "secret123");
+        const tileId = await page1.evaluate(() => window.__tcTest__.currentTile.id);
+
+        // Paint a short line — partial mask, NOT 65536 filled.
+        const box = await page1.$eval("#canvas-cursor", el => {
+            const r = el.getBoundingClientRect();
+            return { x: r.left + 100, y: r.top + 100 };
+        });
+        await page1.keyboard.press("1");
+        await page1.mouse.move(box.x, box.y);
+        await page1.mouse.down();
+        await page1.mouse.move(box.x + 50, box.y + 50);
+        await page1.mouse.up();
+        const painted = await page1.evaluate(() => window.__tcTest__.filledCount);
+        assert(painted > 0 && painted < 65536, `partial paint expected, got ${painted}`);
+
+        // Snapshot the mask before pause.
+        const maskBefore = await getMask(page1);
+
+        await page1.click("#btn-pause");
+        // After pause: idle screen visible, currentTile cleared.
+        await page1.waitForSelector("#idle-screen:not(.hidden)", { timeout: 5000 });
+        const cleared = await page1.evaluate(() => window.__tcTest__?.currentTile);
+        assert(cleared === null, `pause should clear currentTile, got ${JSON.stringify(cleared)}`);
+        await page1.close(); await page1._tcContext?.close();
+
+        // Session 2: fresh incognito — login should land on the resume prompt,
+        // NOT directly in the editor (because the tile is paused).
+        const page2 = await newPageBlocked();
+        await page2.goto(`${BASE}/?test=1`);
+        await page2.waitForSelector("#login-form", { timeout: 10000 });
+        await page2.type("#login-username", "op2");
+        await page2.type("#login-password", "secret123");
+        await page2.evaluate(() => document.querySelector("#login-form").requestSubmit());
+        await page2.waitForSelector("#view-editor:not(.hidden)", { timeout: 10000 });
+        await page2.waitForFunction(
+            () => window.__tcTest__?.pausedPromptVisible === true,
+            { timeout: 5000 },
+        );
+        const noTileYet = await page2.evaluate(() => window.__tcTest__?.currentTile);
+        assert(noTileYet === null, "currentTile must stay null until user clicks Continuar");
+
+        // Click Continuar → editor opens with mask preserved. tileReady
+        // guarantees loadMaskFromServer finished before we read filledCount.
+        await page2.click("#paused-resume-continue");
+        await page2.waitForFunction(
+            () => window.__tcTest__?.tileReady === true
+              && window.__tcTest__.pausedPromptVisible === false,
+            { timeout: 5000 },
+        );
+        const resumed = await page2.evaluate(() => window.__tcTest__.currentTile);
+        assert(resumed.id === tileId, `expected resume of tile ${tileId}, got ${resumed.id}`);
+        assert(resumed.paused_at === null, `paused_at should be cleared after resume, got ${resumed.paused_at}`);
+
+        // The mask painted in session 1 must be intact in session 2.
+        const maskAfter = await getMask(page2);
+        const filledAfter = await page2.evaluate(() => window.__tcTest__.filledCount);
+        assert(filledAfter === painted,
+            `mask not preserved across pause: filled was ${painted}, now ${filledAfter}`);
+        // Spot-check a handful of pixels match exactly.
+        let mismatches = 0;
+        for (let i = 0; i < maskBefore.length; i++) {
+            if (maskBefore[i] !== maskAfter[i]) mismatches++;
+        }
+        assert(mismatches === 0, `mask bytes diverged after pause/resume: ${mismatches} mismatches`);
+        await page2.close(); await page2._tcContext?.close();
     });
 
     await test("invalid login shows error, valid login succeeds", async () => {

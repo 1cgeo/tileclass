@@ -301,6 +301,19 @@ def report_problem(body: ReportProblemIn, tile_id: int = Path(ge=1),
     return tile_service.report_problem(tile_id, user.id, body.note)
 
 
+@app.post("/api/tiles/{tile_id}/pause")
+async def pause_tile(tile_id: int = Path(ge=1), *, request: Request,
+                     user: auth.CurrentUser = Depends(auth.get_current_user)):
+    raw = await _read_mask_body(request)
+    return tile_service.pause_tile(tile_id, user.id, raw, _expected_version(request))
+
+
+@app.post("/api/tiles/{tile_id}/resume")
+def resume_tile(tile_id: int = Path(ge=1),
+                user: auth.CurrentUser = Depends(auth.get_current_user)):
+    return tile_service.resume_tile(tile_id, user.id)
+
+
 # ---------- Admin ----------
 
 @app.get("/api/admin/dashboard", response_model=DashboardOut)
@@ -312,6 +325,7 @@ def admin_dashboard(_: auth.CurrentUser = Depends(auth.require_admin)):
 def admin_tiles(status: TileStatus | None = None,
                 user_id: int | None = Query(default=None, ge=1),
                 date_from: str | None = None, date_to: str | None = None,
+                paused: bool | None = None,
                 limit: int = Query(default=200, ge=1, le=1000),
                 offset: int = Query(default=0, ge=0),
                 _: auth.CurrentUser = Depends(auth.require_admin)):
@@ -320,8 +334,14 @@ def admin_tiles(status: TileStatus | None = None,
     if date_to:
         date_to = _parse_iso_date(date_to, "date_to")
     status_v = status.value if status else None
-    items = admin_service.list_tiles(status_v, user_id, date_from, date_to, limit, offset)
-    total = admin_service.count_tiles(status_v, user_id, date_from, date_to)
+    items = admin_service.list_tiles(
+        status=status_v, user_id=user_id, date_from=date_from, date_to=date_to,
+        paused=paused, limit=limit, offset=offset,
+    )
+    total = admin_service.count_tiles(
+        status=status_v, user_id=user_id, date_from=date_from, date_to=date_to,
+        paused=paused,
+    )
     # Pagination metadata in headers keeps the JSON body a plain list so
     # existing clients/tests that index into it keep working.
     return JSONResponse(content=items, headers={"X-Total-Count": str(total)})

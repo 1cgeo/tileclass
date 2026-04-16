@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 import json
 from fastapi import HTTPException
 from .database import connect, transaction, log_action
-from .mask_utils import encode_mask, decode_mask, empty_mask_png, validate_submission
+from .mask_utils import encode_mask, decode_mask, empty_mask_png, validate_submission, validate_partial
 
 
 def _now() -> str:
@@ -23,6 +23,7 @@ def _row_to_tile_dict(row) -> dict:
         "classified_by": row["classified_by"],
         "reviewed_by": row["reviewed_by"],
         "version": row["version"],
+        "paused_at": row["paused_at"],
     }
     # If the row includes the mask blob, enrich with filled_pixels so the
     # client doesn't need a follow-up /api/tiles/{id} round-trip.
@@ -258,14 +259,16 @@ def submit_classification(tile_id: int, user_id: int, raw_mask: bytes,
         if status == "in_progress":
             conn.execute(
                 """UPDATE tiles SET status='classified', data_png=?, classified_by=?,
-                   classified_at=?, assigned_to=NULL, version=version+1 WHERE id=?""",
+                   classified_at=?, assigned_to=NULL, paused_at=NULL, version=version+1
+                   WHERE id=?""",
                 (png, user_id, _now(), tile_id),
             )
             log_action(conn, user_id, tile_id, "classify")
         elif status == "in_review":
             conn.execute(
                 """UPDATE tiles SET status='reviewed', data_png=?, reviewed_by=?,
-                   reviewed_at=?, assigned_to=NULL, version=version+1 WHERE id=?""",
+                   reviewed_at=?, assigned_to=NULL, paused_at=NULL, version=version+1
+                   WHERE id=?""",
                 (png, user_id, _now(), tile_id),
             )
             log_action(conn, user_id, tile_id, "review")
@@ -289,9 +292,71 @@ def report_problem(tile_id: int, user_id: int, note: str) -> dict:
         if row["assigned_to"] != user_id:
             raise HTTPException(403, "not assigned to you")
         conn.execute(
-            """UPDATE tiles SET status='problem', problem_note=?, data_png=?, assigned_to=NULL
-               WHERE id=?""",
+            """UPDATE tiles SET status='problem', problem_note=?, data_png=?,
+               assigned_to=NULL, paused_at=NULL WHERE id=?""",
             (note, empty_mask_png(), tile_id),
         )
         log_action(conn, user_id, tile_id, "report_problem", note)
     return {"ok": True}
+
+
+def pause_tile(tile_id: int, user_id: int, raw_mask: bytes,
+               expected_version: int | None = None) -> dict:
+    """Save partial mask and freeze the timer (dashboard subtracts pause→resume)."""
+    try:
+        validate_partial(raw_mask)
+    except ValueError as e:
+        raise HTTPException(400, detail={"error": "invalid_mask", "message": str(e)})
+    png = encode_mask(raw_mask)
+    if len(png) > 200_000:
+        raise HTTPException(413, detail={"error": "mask_too_large"})
+
+    with transaction("IMMEDIATE") as conn:
+        row = conn.execute(
+            "SELECT status, assigned_to, version FROM tiles WHERE id=?", (tile_id,)
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "tile not found")
+        if expected_version is not None and row["version"] != expected_version:
+            raise HTTPException(
+                409,
+                detail={
+                    "error": "tile_modified",
+                    "message": "Este tile foi alterado por um admin enquanto você trabalhava.",
+                    "current_version": row["version"],
+                },
+            )
+        if row["assigned_to"] != user_id:
+            raise HTTPException(403, "not assigned to you")
+        if row["status"] not in ("in_progress", "in_review"):
+            raise HTTPException(409, f"cannot pause from state: {row['status']}")
+        conn.execute(
+            "UPDATE tiles SET data_png=?, paused_at=?, version=version+1 WHERE id=?",
+            (png, _now(), tile_id),
+        )
+        log_action(conn, user_id, tile_id, "pause")
+        row = conn.execute("SELECT * FROM tiles WHERE id=?", (tile_id,)).fetchone()
+    return _row_to_tile_dict(row)
+
+
+def resume_tile(tile_id: int, user_id: int) -> dict:
+    """Clear pause flag so the dashboard timer counts active time again."""
+    with transaction("IMMEDIATE") as conn:
+        row = conn.execute(
+            "SELECT status, assigned_to, paused_at FROM tiles WHERE id=?", (tile_id,)
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "tile not found")
+        if row["assigned_to"] != user_id:
+            raise HTTPException(403, "not assigned to you")
+        if row["status"] not in ("in_progress", "in_review"):
+            raise HTTPException(409, f"cannot resume from state: {row['status']}")
+        if row["paused_at"] is None:
+            raise HTTPException(409, "tile is not paused")
+        conn.execute(
+            "UPDATE tiles SET paused_at=NULL, version=version+1 WHERE id=?",
+            (tile_id,),
+        )
+        log_action(conn, user_id, tile_id, "resume")
+        row = conn.execute("SELECT * FROM tiles WHERE id=?", (tile_id,)).fetchone()
+    return _row_to_tile_dict(row)
