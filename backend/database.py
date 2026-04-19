@@ -15,8 +15,10 @@ def _db_path() -> Path:
     return _DB_PATH
 
 
-def connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(_db_path(), isolation_level=None, check_same_thread=False)
+def connect(path: Path | None = None) -> sqlite3.Connection:
+    """Open a connection. Defaults to the configured DB; pass `path` for scripts
+    that operate on an arbitrary database file (backup, merge, migration)."""
+    conn = sqlite3.connect(path or _db_path(), isolation_level=None, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
@@ -25,8 +27,8 @@ def connect() -> sqlite3.Connection:
 
 
 @contextmanager
-def transaction(mode: str = "IMMEDIATE"):
-    conn = connect()
+def transaction(mode: str = "IMMEDIATE", path: Path | None = None):
+    conn = connect(path)
     try:
         conn.execute(f"BEGIN {mode}")
         yield conn
