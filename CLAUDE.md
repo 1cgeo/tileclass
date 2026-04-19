@@ -121,6 +121,7 @@ tileclass/
 - **Helpers compartilhados:** `hexToRgb`, `blobToImage`, `escapeHtml` vivem em `utils.js`. Não redefinir.
 - **Paleta de classes:** contrastante entre si e visível sobre imagens de satélite. Evitar verde e tons escuros.
 - **Sem `innerHTML` com dados de usuário.** Usar `textContent` ou `escapeHtml` de `utils.js`.
+- **404 de `maplibre-gl.js.map` é benigno.** O vendor (`frontend/vendor/maplibre/`) inclui apenas `.js` e `.css`, não o `.map`. A diretiva `//# sourceMappingURL=maplibre-gl.js.map` no fim do `.js` faz o Chrome DevTools buscar o source map automaticamente (só quando DevTools está aberto). Chrome às vezes duplica o prefixo (`/static/static/…`) ao tentar caminhos alternativos — ruído do browser, não bug do server. Ignorar no log; ou baixar o `.map` ao lado do `.js` se incomodar.
 
 ## UX — inegociáveis
 

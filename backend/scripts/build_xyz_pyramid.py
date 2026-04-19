@@ -8,7 +8,6 @@ Uso:
 """
 from __future__ import annotations
 import argparse
-import math
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
@@ -19,35 +18,13 @@ from PIL import Image
 from rasterio.enums import Resampling
 from rasterio.warp import reproject
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from backend.tile_grid import TILE, tile_bounds_3857, tiles_for_bbox
+
 try:
     sys.stdout.reconfigure(encoding="utf-8")
 except Exception:
     pass
-
-TILE = 256
-EARTH = 20037508.342789244  # meia circunferência em Web Mercator (m)
-
-
-def tile_bounds_3857(z: int, x: int, y: int) -> tuple[float, float, float, float]:
-    """Retorna (west, south, east, north) em metros Web Mercator."""
-    n = 2 ** z
-    res = (2 * EARTH) / n
-    west = -EARTH + x * res
-    east = west + res
-    north = EARTH - y * res
-    south = north - res
-    return west, south, east, north
-
-
-def tiles_for_bbox(z: int, w: float, s: float, e: float, n: float) -> tuple[int, int, int, int]:
-    """Range XYZ (xmin,ymin,xmax,ymax) cobrindo bbox em metros 3857."""
-    nt = 2 ** z
-    res = (2 * EARTH) / nt
-    xmin = max(0, int((w + EARTH) / res))
-    xmax = min(nt - 1, int((e + EARTH) / res))
-    ymin = max(0, int((EARTH - n) / res))
-    ymax = min(nt - 1, int((EARTH - s) / res))
-    return xmin, ymin, xmax, ymax
 
 
 def render_tile(args) -> tuple[int, str]:

@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.gzip import GZipMiddleware
 
-from . import auth, tile_service, admin_service
+from . import auth, tile_service, admin_service, mbtiles_service
 from .config import get_config
 from .database import init_db
 from .mask_utils import PIXELS
@@ -66,7 +66,18 @@ FRONTEND_DIR = FsPath(__file__).parent.parent / "frontend"
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
-    yield
+    # Optional MBTiles tile source
+    mbtiles_path = (get_config().get("tileserver") or {}).get("mbtiles_path")
+    if mbtiles_path:
+        p = FsPath(mbtiles_path)
+        if not p.is_absolute():
+            p = FsPath(__file__).resolve().parent / p
+        if p.exists():
+            mbtiles_service.open_mbtiles(p)
+    try:
+        yield
+    finally:
+        mbtiles_service.close_mbtiles()
 
 
 app = FastAPI(title="TileClass", version="1.0.0", lifespan=lifespan)
@@ -201,11 +212,40 @@ def config_classes():
 @app.get("/api/config/tileserver")
 def config_tileserver():
     cfg = get_config()
-    secondary = (cfg.get("tileserver_secondary") or {}).get("url_template")
+    ts = cfg.get("tileserver") or {}
+    ts2 = cfg.get("tileserver_secondary") or {}
+    min_zoom = max_zoom = None
+    if mbtiles_service.is_open():
+        fmt = mbtiles_service.tile_format()
+        url = f"/api/xyz/{{z}}/{{x}}/{{y}}.{fmt}"
+        min_zoom, max_zoom = mbtiles_service.zoom_range()
+    else:
+        url = ts.get("url_template", "")
     return {
-        "url_template": cfg["tileserver"]["url_template"],
-        "secondary_url_template": secondary,
+        "url_template": url,
+        "secondary_url_template": ts2.get("url_template"),
+        "min_zoom": min_zoom,
+        "max_zoom": max_zoom,
+        "secondary_max_zoom": ts2.get("max_zoom", 22),
     }
+
+
+@app.get("/api/xyz/{z}/{x}/{y}.{ext}")
+def mbtiles_xyz(z: int, x: int, y: int, ext: str):
+    """Serve MBTiles tiles by XYZ (TMS conversion internal)."""
+    if not mbtiles_service.is_open():
+        raise HTTPException(status_code=404, detail="mbtiles not configured")
+    if ext.lower() != mbtiles_service.tile_format():
+        raise HTTPException(status_code=404, detail="wrong extension")
+    data = mbtiles_service.get_tile(z, x, y)
+    if data is None:
+        return Response(status_code=204)
+    media = "image/webp" if ext.lower() == "webp" else f"image/{ext.lower()}"
+    return Response(
+        content=data,
+        media_type=media,
+        headers={"Cache-Control": "public, max-age=86400, immutable"},
+    )
 
 
 # ---------- Tiles (operator) ----------

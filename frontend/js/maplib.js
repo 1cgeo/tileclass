@@ -1,5 +1,8 @@
 // MapLibre helpers: create a locked raster map fit to a bbox.
 // The global `maplibregl` is loaded via the CDN <script> tag in index.html.
+// `maxZoom` is the highest zoom level the *source* has tiles for; MapLibre
+// overzooms (scales tiles from this level) when the viewport zooms beyond it,
+// so we avoid 204 requests for zoom levels the tileserver does not serve.
 
 export function makeRasterStyle(tileserverUrlTemplate, maxZoom = 22) {
     return {
@@ -17,11 +20,11 @@ export function makeRasterStyle(tileserverUrlTemplate, maxZoom = 22) {
     };
 }
 
-export function createLockedMap(containerId, tileserverUrlTemplate, bbox) {
+export function createLockedMap(containerId, tileserverUrlTemplate, bbox, maxZoom = 22) {
     const [w, s, e, n] = bbox;
     const map = new maplibregl.Map({
         container: containerId,
-        style: makeRasterStyle(tileserverUrlTemplate),
+        style: makeRasterStyle(tileserverUrlTemplate, maxZoom),
         bounds: [[w, s], [e, n]],
         fitBoundsOptions: { padding: 0, animate: false, linear: true },
         interactive: false,
@@ -36,9 +39,9 @@ export function setMapBbox(map, bbox) {
     map.fitBounds([[w, s], [e, n]], { padding: 0, animate: false, duration: 0, linear: true });
 }
 
-export function updateMapSource(map, tileserverUrlTemplate) {
-    // Replace raster source tiles (e.g. when config changes)
+export function updateMapSource(map, tileserverUrlTemplate, maxZoom = 22) {
     const style = map.getStyle();
     style.sources.sat.tiles = [tileserverUrlTemplate];
+    style.sources.sat.maxzoom = maxZoom;
     map.setStyle(style);
 }

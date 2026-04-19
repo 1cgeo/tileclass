@@ -5,6 +5,7 @@ import { createLockedMap } from "./maplib.js";
 import { hexToRgb, blobToImage, escapeHtml as escape, fmtDate } from "./utils.js";
 
 let tileserverUrl = "";
+let tileserverMaxZoom = 22;
 let classes = [];
 let classesById = {};
 let selectedIds = new Set();
@@ -35,6 +36,7 @@ export async function initAdmin(user) {
         apiGet("/api/config/classes"),
     ]);
     tileserverUrl = cfg.url_template;
+    tileserverMaxZoom = cfg.max_zoom ?? 22;
     classes = cls;
     classesById = Object.fromEntries(classes.map(c => [c.id, c]));
     const vtModal = document.getElementById("modal-view-tile");
@@ -693,7 +695,7 @@ async function openViewer(tileId) {
         body.appendChild(stack);
         setTimeout(() => {
             createLockedMap(`viewer-map-${tileId}`, tileserverUrl,
-                [t.bbox_west, t.bbox_south, t.bbox_east, t.bbox_north]);
+                [t.bbox_west, t.bbox_south, t.bbox_east, t.bbox_north], tileserverMaxZoom);
         }, 0);
         const tmp = document.createElement("canvas");
         tmp.width = 256; tmp.height = 256;

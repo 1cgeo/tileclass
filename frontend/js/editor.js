@@ -49,6 +49,8 @@ let missingHighlight = false;  // H: persistent highlight of unfilled (255) pixe
 let nextMissingCursor = 0;     // N: walks through missing pixels in raster order
 let tileserverUrl = "";
 let tileserverUrlSecondary = null;
+let tileserverMaxZoom = 22;
+let tileserverMaxZoomSecondary = 22;
 let activeSource = "primary"; // "primary" | "secondary"
 let todayCount = 0;
 
@@ -134,6 +136,8 @@ export async function initEditor(user) {
     ]);
     tileserverUrl = cfg.url_template;
     tileserverUrlSecondary = cfg.secondary_url_template || null;
+    tileserverMaxZoom = cfg.max_zoom ?? 22;
+    tileserverMaxZoomSecondary = cfg.secondary_max_zoom ?? 22;
     classes = cls;
     classesById = Object.fromEntries(classes.map(c => [c.id, c]));
     buildClassPanel();
@@ -453,9 +457,10 @@ function toggleSecondarySource() {
     if (!satMap) return;
     activeSource = activeSource === "primary" ? "secondary" : "primary";
     const url = activeSource === "primary" ? tileserverUrl : tileserverUrlSecondary;
+    const mz = activeSource === "primary" ? tileserverMaxZoom : tileserverMaxZoomSecondary;
     _mapErrorCount = 0;
     document.getElementById("map-warning")?.classList.add("hidden");
-    updateMapSource(satMap, url);
+    updateMapSource(satMap, url, mz);
     showToast(`Imagem: ${activeSource === "primary" ? "principal" : "secundária"}`, "info", 1200);
 }
 
@@ -467,7 +472,7 @@ function renderSatellite(t) {
     if (warnEl) warnEl.classList.add("hidden");
     _mapErrorCount = 0;
     if (!satMap) {
-        satMap = createLockedMap("map-satellite", tileserverUrl, bbox);
+        satMap = createLockedMap("map-satellite", tileserverUrl, bbox, tileserverMaxZoom);
         satMap.on("error", (e) => {
             // Multiple consecutive tile errors → surface a banner so the
             // operator knows the satellite background is missing (pure
