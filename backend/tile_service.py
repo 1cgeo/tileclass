@@ -44,14 +44,17 @@ def _row_to_tile_dict(row) -> dict:
 
 def get_resume_tile(user_id: int) -> dict | None:
     """Return the tile currently assigned to the user (in_progress or in_review),
-    or None. Read-only: does NOT assign from the queue. Used by the editor to
-    decide whether to skip the idle screen on login."""
+    or None. Read-only: does NOT assign from the queue and does NOT unpause.
+    Used by the editor to decide whether to skip the idle screen on login.
+
+    When the user has multiple tiles assigned (admin bulk-assign pre-loaded a
+    personal queue), the non-paused one wins; ties broken by id ascending."""
     conn = connect()
     try:
         row = conn.execute(
             """SELECT * FROM tiles
                WHERE assigned_to=? AND status IN ('in_progress','in_review')
-               ORDER BY id LIMIT 1""",
+               ORDER BY (paused_at IS NULL) DESC, id ASC LIMIT 1""",
             (user_id,),
         ).fetchone()
         return _row_to_tile_dict(row) if row else None
@@ -67,7 +70,7 @@ def peek_next_tile(user_id: int) -> dict | None:
         row = conn.execute(
             """SELECT * FROM tiles
                WHERE assigned_to=? AND status IN ('in_progress','in_review')
-               ORDER BY id LIMIT 1""",
+               ORDER BY (paused_at IS NULL) DESC, id ASC LIMIT 1""",
             (user_id,),
         ).fetchone()
         if row:
@@ -148,16 +151,41 @@ def _user_can_review(conn, user_id: int) -> bool:
 
 
 def get_next_tile(user_id: int) -> dict | None:
-    """Atomically assign next tile to user. Review > pending. Never own classification."""
+    """Atomically assign next tile to user. Review > pending. Never own classification.
+
+    Personal queue: if admin pre-assigned tiles to the user (all stored with
+    `paused_at` set), `/next` picks the non-paused one first; when only paused
+    ones remain, the oldest is unpaused (auto-resume + `resume` log entry so
+    the dashboard's assign→done pairing subtracts the queue-wait time)."""
     with transaction("IMMEDIATE") as conn:
         # 1) Resume: if user already has a tile assigned and in-progress/in-review, return it.
         row = conn.execute(
             """SELECT * FROM tiles
                WHERE assigned_to=? AND status IN ('in_progress','in_review')
-               ORDER BY id LIMIT 1""",
+               ORDER BY (paused_at IS NULL) DESC, id ASC LIMIT 1""",
             (user_id,),
         ).fetchone()
         if row:
+            # Auto-resume only if the last pause was from an admin bulk-assign
+            # (`detail='queue'`). Manual pauses from the operator must survive
+            # `/next` calls — hitting "Próximo" should never silently reset
+            # the user's own paused timer.
+            if row["paused_at"] is not None:
+                last_pause = conn.execute(
+                    """SELECT detail FROM action_log
+                       WHERE tile_id=? AND user_id=? AND action='pause'
+                       ORDER BY id DESC LIMIT 1""",
+                    (row["id"], user_id),
+                ).fetchone()
+                if last_pause and last_pause["detail"] == "queue":
+                    conn.execute(
+                        "UPDATE tiles SET paused_at=NULL, version=version+1 WHERE id=?",
+                        (row["id"],),
+                    )
+                    log_action(conn, user_id, row["id"], "resume")
+                    row = conn.execute(
+                        "SELECT * FROM tiles WHERE id=?", (row["id"],)
+                    ).fetchone()
             return _row_to_tile_dict(row)
 
         # 2) Review queue — only operators explicitly opted-in by an admin.

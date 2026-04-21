@@ -230,6 +230,7 @@ async function renderTiles(root) {
         </div>
         <div id="bulk-bar" class="bulk-bar hidden">
             <span><span id="bulk-count">0</span> selecionados</span>
+            <button id="bulk-assign">Atribuir a operador…</button>
             <button id="bulk-reset">Resetar</button>
             <button id="bulk-rereview">Re-revisar</button>
             <button id="bulk-clear">Limpar seleção</button>
@@ -240,6 +241,7 @@ async function renderTiles(root) {
     document.getElementById("view-table").addEventListener("click", () => { listView = "table"; loadAndRender(); });
     document.getElementById("view-grid").addEventListener("click", () => { listView = "grid"; loadAndRender(); });
     document.getElementById("btn-filter").addEventListener("click", () => { page = 0; loadAndRender(); });
+    document.getElementById("bulk-assign").addEventListener("click", bulkAssign);
     document.getElementById("bulk-reset").addEventListener("click", bulkReset);
     document.getElementById("bulk-rereview").addEventListener("click", bulkReReview);
     document.getElementById("bulk-clear").addEventListener("click", () => { selectedIds.clear(); loadAndRender(); });
@@ -622,6 +624,54 @@ async function bulkReReview() {
     if (!r.confirmed) return;
     const resp = await apiPostJson("/api/admin/tiles/bulk/re-review", { ids, reason: r.reason });
     showToast(`${resp.affected} enviados.`, "success");
+    selectedIds.clear();
+    loadAndRender();
+}
+
+async function bulkAssign() {
+    if (selectedIds.size === 0) return;
+    const ids = [...selectedIds];
+    const [users, tileRows] = await Promise.all([
+        apiGet("/api/admin/users"),
+        Promise.all(ids.map(id => apiGet(`/api/tiles/${id}`))),
+    ]);
+    // Backend rejects any tile that isn't pending or classified — filter up
+    // front so we can build the eligible-reviewers list and give a clean error.
+    const bad = tileRows.filter(t => t.status !== "pending" && t.status !== "classified");
+    if (bad.length) {
+        showToast(
+            `Seleção inválida: ${bad.length} tile(s) não estão em pending/classified.`,
+            "error",
+        );
+        return;
+    }
+    const hasReview = tileRows.some(t => t.status === "classified");
+    const classifierIds = new Set(
+        tileRows.filter(t => t.status === "classified" && t.classified_by)
+                .map(t => t.classified_by),
+    );
+    const eligible = users.filter(u =>
+        u.role === "operator" && u.active &&
+        (!hasReview || (u.can_review && !classifierIds.has(u.id)))
+    );
+    if (!eligible.length) {
+        showToast(hasReview
+            ? "Sem revisores habilitados (ou todos já classificaram algum tile do lote)."
+            : "Sem operadores ativos.", "error");
+        return;
+    }
+    const r = await promptAssign({
+        title: `Atribuir ${ids.length} tile(s) a um operador`,
+        description: hasReview
+            ? "Os tiles vão para a fila pessoal do usuário como pausados. Ao terminar o atual, ele recebe o próximo automaticamente. Tiles classified exigem revisor habilitado, e o revisor não pode ter classificado o tile."
+            : "Os tiles vão para a fila pessoal do usuário como pausados. Ao terminar o atual, ele recebe o próximo automaticamente.",
+        users: eligible,
+    });
+    if (!r.confirmed) return;
+    const resp = await apiPostJson("/api/admin/tiles/assign", {
+        tile_ids: ids, user_id: r.user_id, reason: r.reason || null,
+    });
+    showToast(`${resp.affected} tile(s) atribuídos (pausados).`, "success");
     selectedIds.clear();
     loadAndRender();
 }

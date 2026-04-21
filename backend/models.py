@@ -90,3 +90,9 @@ class SetCanReviewIn(BaseModel):
 class AssignTileIn(BaseModel):
     user_id: int
     reason: str | None = None
+
+
+class BulkAssignIn(BaseModel):
+    tile_ids: list[int] = Field(min_length=1)
+    user_id: int
+    reason: Optional[str] = Field(default=None, max_length=500)

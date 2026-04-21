@@ -16,7 +16,7 @@ from .mask_utils import PIXELS
 from .models import (
     LoginIn, TokenOut, RefreshIn, UserOut, ClassOut, TileOut,
     ReportProblemIn, CreateUserIn, DashboardOut, BulkTileIdsIn, SetActiveIn,
-    SetCanReviewIn, AssignTileIn, ResetReasonIn,
+    SetCanReviewIn, AssignTileIn, BulkAssignIn, ResetReasonIn,
 )
 
 
@@ -419,6 +419,14 @@ def admin_reset(body: ResetReasonIn | None = None, tile_id: int = Path(ge=1),
                 u: auth.CurrentUser = Depends(auth.require_admin)):
     admin_service.reset_tile(tile_id, u.id, body.reason if body else None)
     return {"ok": True}
+
+
+@app.post("/api/admin/tiles/assign")
+def admin_bulk_assign(body: BulkAssignIn, u: auth.CurrentUser = Depends(auth.require_admin)):
+    """Pre-load a user's personal queue with many tiles. Every assigned tile
+    enters `paused_at=now()`, so /api/tiles/next serves them FIFO when the
+    user asks for more work."""
+    return admin_service.assign_many(body.tile_ids, body.user_id, u.id, body.reason)
 
 
 @app.post("/api/admin/tiles/{tile_id}/assign")

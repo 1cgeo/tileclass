@@ -233,6 +233,10 @@ def _clean_reason(reason: str | None) -> str | None:
     return ((reason or "").strip()[:_MAX_REASON_LEN]) or None
 
 
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 def reset_many(tile_ids: list[int], admin_id: int, reason: str | None = None) -> int:
     if not tile_ids:
         return 0
@@ -282,20 +286,22 @@ def re_review_many(tile_ids: list[int], admin_id: int, strict: bool = False,
     return count
 
 
-def assign_operator(tile_id: int, user_id: int, admin_id: int,
-                    reason: str | None = None) -> dict:
-    """Admin hand-picks an operator/reviewer for a tile.
-    pending   -> in_progress, assigned to the given operator.
-    classified -> in_review, assigned to the given reviewer (must have
-                  can_review=1 and must not be the original classifier).
-    Any other status is rejected (admin should unassign first)."""
+def assign_many(tile_ids: list[int], user_id: int, admin_id: int,
+                reason: str | None = None) -> dict:
+    """Admin hand-picks an operator/reviewer for one or many tiles. Each tile
+    is assigned in `paused_at=now()` state so it queues on the user's personal
+    fifo without disturbing whatever they're currently working on; `/api/tiles/next`
+    picks the oldest paused tile and auto-resumes it when the user asks for
+    more work.
+
+    Atomic: if any tile fails validation (wrong status, already assigned to
+    someone else, reviewer==classifier, etc.), nothing is written.
+    """
+    if not tile_ids:
+        return {"affected": 0, "ids": []}
     detail = _clean_reason(reason)
+    now = _now_iso()
     with transaction("IMMEDIATE") as conn:
-        tile = conn.execute(
-            "SELECT status, classified_by FROM tiles WHERE id=?", (tile_id,)
-        ).fetchone()
-        if not tile:
-            raise HTTPException(404, "tile not found")
         user = conn.execute(
             "SELECT id, active, role, can_review FROM users WHERE id=?", (user_id,)
         ).fetchone()
@@ -306,33 +312,62 @@ def assign_operator(tile_id: int, user_id: int, admin_id: int,
         if user["role"] == "admin":
             raise HTTPException(409, "cannot assign tiles to an admin")
 
-        status = tile["status"]
-        if status == "pending":
-            new_status = "in_progress"
-            action = "assign_classify"
-        elif status == "classified":
-            if not user["can_review"]:
-                raise HTTPException(409, "user is not allowed to review")
-            if tile["classified_by"] is not None and tile["classified_by"] == user_id:
-                raise HTTPException(409, "reviewer cannot be the classifier")
-            new_status = "in_review"
-            action = "assign_review"
-        else:
-            raise HTTPException(
-                409, f"tile must be pending or classified (status={status})"
-            )
+        # Validate every tile up-front so a bad one doesn't half-assign the lot.
+        plans: list[tuple[int, str, str]] = []  # (tile_id, new_status, assign_action)
+        for tid in tile_ids:
+            tile = conn.execute(
+                "SELECT id, status, classified_by FROM tiles WHERE id=?", (tid,)
+            ).fetchone()
+            if not tile:
+                raise HTTPException(404, f"tile {tid} not found")
+            status = tile["status"]
+            if status == "pending":
+                plans.append((tid, "in_progress", "assign_classify"))
+            elif status == "classified":
+                if not user["can_review"]:
+                    raise HTTPException(
+                        409, f"tile {tid} needs a reviewer (user lacks can_review)"
+                    )
+                if tile["classified_by"] is not None and tile["classified_by"] == user_id:
+                    raise HTTPException(
+                        409, f"tile {tid}: reviewer cannot be the classifier"
+                    )
+                plans.append((tid, "in_review", "assign_review"))
+            else:
+                raise HTTPException(
+                    409,
+                    f"tile {tid} must be pending or classified (status={status})",
+                )
 
-        conn.execute(
-            "UPDATE tiles SET status=?, assigned_to=?, version=version+1 WHERE id=?",
-            (new_status, user_id, tile_id),
-        )
-        # Log under the assignee so dashboard avg_classify/avg_review pairs
-        # assign→classify correctly. A second audit entry under the admin
-        # records who made the manual attribution.
-        log_action(conn, user_id, tile_id, action, detail)
-        log_action(conn, admin_id, tile_id, "admin_assign",
-                   json.dumps({"user_id": user_id, "reason": detail}))
-    return {"id": tile_id, "status": new_status, "assigned_to": user_id}
+        items = []
+        for tid, new_status, action in plans:
+            conn.execute(
+                """UPDATE tiles SET status=?, assigned_to=?, paused_at=?,
+                   version=version+1 WHERE id=?""",
+                (new_status, user_id, now, tid),
+            )
+            # Log under the assignee so dashboard avg_classify/avg_review pairs
+            # assign→classify correctly. We also immediately log `pause` so the
+            # time spent waiting in the user's personal queue is subtracted
+            # from the cycle duration (closed by a `resume` when /next picks it up).
+            # The `"queue"` detail distinguishes this from a manual pause so
+            # `/api/tiles/next` only auto-resumes queued pauses — an operator's
+            # explicit pause must stay paused until they hit resume themselves.
+            log_action(conn, user_id, tid, action, detail)
+            log_action(conn, user_id, tid, "pause", "queue")
+            log_action(
+                conn, admin_id, tid, "admin_assign",
+                json.dumps({"user_id": user_id, "reason": detail}),
+            )
+            items.append({"id": tid, "status": new_status, "assigned_to": user_id})
+    return {"affected": len(items), "items": items}
+
+
+def assign_operator(tile_id: int, user_id: int, admin_id: int,
+                    reason: str | None = None) -> dict:
+    """Single-tile wrapper over assign_many (kept for the legacy per-tile route)."""
+    result = assign_many([tile_id], user_id, admin_id, reason)
+    return result["items"][0]
 
 
 def unassign_operator(tile_id: int, admin_id: int, reason: str | None = None) -> dict:
