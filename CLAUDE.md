@@ -90,7 +90,7 @@ tileclass/
 - **PNG do backend:** banda única (grayscale "L"), 8 bits, 256×256, sem compressão com perda. Pillow faz a conversão `bytes ↔ PNG`.
 - **Protocolo wire:** frontend envia **raw bytes** (Uint8Array, 65536 bytes) no body do classify/review; nunca PNG. Backend converte.
 - **Submissão:** rejeitar se houver `255` no array. Resposta de erro traz a contagem.
-- **Máquina de estados de tile:** `pending → in_progress → classified → in_review → reviewed`; qualquer estado `→ problem`; `problem → pending` e `reviewed → in_review` são transições de admin.
+- **Máquina de estados de tile:** `pending → in_progress → classified → in_review → reviewed`; qualquer estado `→ problem`; `problem → pending` e `reviewed → in_review` são transições de admin. Admin pode também bloquear via `pending|classified|reviewed → blocked` (guardando o status original em `blocked_from`) e desbloquear via `blocked → <blocked_from>`. `in_progress`/`in_review`/`problem` **não podem** ser bloqueados. Tiles bloqueados são naturalmente excluídos das filas porque os SELECTs de `/next` filtram por `status='pending'` ou `'classified'`.
 - **Export GeoTIFF:** `export_tiles.py` usa `rasterio.transform.from_bounds(west, south, east, north, 256, 256)` com `crs=EPSG:4326`. Combinado com a bbox de `bbox_from_center`, o pixel resultante é exatamente 2.5 m na latitude do centro (validado para 20 pontos mundiais em `test_raster_worldwide.py`).
 
 ## Regras críticas de backend

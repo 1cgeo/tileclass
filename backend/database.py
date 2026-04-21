@@ -67,7 +67,8 @@ CREATE TABLE IF NOT EXISTS tiles (
     data_png BLOB,
     problem_note TEXT,
     version INTEGER NOT NULL DEFAULT 1,
-    paused_at TEXT
+    paused_at TEXT,
+    blocked_from TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_tiles_status ON tiles(status);
@@ -115,6 +116,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE tiles ADD COLUMN version INTEGER NOT NULL DEFAULT 1")
     if "paused_at" not in cols:
         conn.execute("ALTER TABLE tiles ADD COLUMN paused_at TEXT")
+    if "blocked_from" not in cols:
+        # Remembers which status to restore on unblock. Set only when status='blocked'.
+        conn.execute("ALTER TABLE tiles ADD COLUMN blocked_from TEXT")
     # Indices on migrated columns must run after the ALTER above (cannot live
     # in SCHEMA because executescript runs before this fn on existing DBs).
     conn.execute(

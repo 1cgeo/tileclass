@@ -432,6 +432,90 @@ def re_review_tile(tile_id: int, admin_id: int, reason: str | None = None) -> No
     re_review_many([tile_id], admin_id, strict=True, reason=reason)
 
 
+# Blockable source states: anything that isn't mid-work or already an exception.
+# `in_progress`/`in_review` are rejected because blocking would strand the operator;
+# `problem` is rejected per product decision (reset/delete is the problem flow);
+# `blocked` is rejected because it's already blocked.
+_BLOCKABLE_STATES = {"pending", "classified", "reviewed"}
+
+
+def block_many(tile_ids: list[int], admin_id: int, reason: str | None = None) -> int:
+    """Flip tiles to status='blocked' so they stop being distributed. The
+    prior status is saved in `blocked_from` so `unblock_many` can restore it.
+
+    Atomic: any tile failing the state gate aborts the whole batch, matching
+    the behaviour of `assign_many` — admins see one error and retry rather
+    than getting a partial result they can't reason about."""
+    if not tile_ids:
+        return 0
+    detail = _clean_reason(reason)
+    with transaction("IMMEDIATE") as conn:
+        rows = conn.execute(
+            f"SELECT id, status FROM tiles WHERE id IN ({','.join(['?']*len(tile_ids))})",
+            tile_ids,
+        ).fetchall()
+        found = {r["id"]: r["status"] for r in rows}
+        for tid in tile_ids:
+            if tid not in found:
+                raise HTTPException(404, f"tile {tid} not found")
+            status = found[tid]
+            if status not in _BLOCKABLE_STATES:
+                if status == "blocked":
+                    raise HTTPException(409, f"tile {tid} is already blocked")
+                if status in ("in_progress", "in_review"):
+                    raise HTTPException(
+                        409, f"tile {tid} is in execution ({status}) — cannot block"
+                    )
+                raise HTTPException(
+                    409, f"tile {tid} cannot be blocked from status={status}"
+                )
+        for tid in tile_ids:
+            conn.execute(
+                """UPDATE tiles SET blocked_from=status, status='blocked',
+                   version=version+1 WHERE id=?""",
+                (tid,),
+            )
+            log_action(conn, admin_id, tid, "block", detail)
+    return len(tile_ids)
+
+
+def unblock_many(tile_ids: list[int], admin_id: int, reason: str | None = None) -> int:
+    """Restore each tile's status from `blocked_from`. Reject anything not
+    currently blocked. `blocked_from` is guaranteed set by `block_many` so
+    we read it directly."""
+    if not tile_ids:
+        return 0
+    detail = _clean_reason(reason)
+    with transaction("IMMEDIATE") as conn:
+        rows = conn.execute(
+            f"SELECT id, status, blocked_from FROM tiles "
+            f"WHERE id IN ({','.join(['?']*len(tile_ids))})",
+            tile_ids,
+        ).fetchall()
+        found = {r["id"]: r for r in rows}
+        for tid in tile_ids:
+            if tid not in found:
+                raise HTTPException(404, f"tile {tid} not found")
+            if found[tid]["status"] != "blocked":
+                raise HTTPException(409, f"tile {tid} is not blocked")
+        for tid in tile_ids:
+            conn.execute(
+                """UPDATE tiles SET status=?, blocked_from=NULL,
+                   version=version+1 WHERE id=?""",
+                (found[tid]["blocked_from"], tid),
+            )
+            log_action(conn, admin_id, tid, "unblock", detail)
+    return len(tile_ids)
+
+
+def block_tile(tile_id: int, admin_id: int, reason: str | None = None) -> None:
+    block_many([tile_id], admin_id, reason)
+
+
+def unblock_tile(tile_id: int, admin_id: int, reason: str | None = None) -> None:
+    unblock_many([tile_id], admin_id, reason)
+
+
 def list_users() -> list[dict]:
     conn = connect()
     try:

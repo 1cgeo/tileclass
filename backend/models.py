@@ -45,6 +45,7 @@ class TileOut(BaseModel):
     version: int = 1
     filled_pixels: int = 0
     paused_at: Optional[str] = None
+    blocked_from: Optional[str] = None
 
 
 class ReportProblemIn(BaseModel):

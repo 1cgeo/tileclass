@@ -24,6 +24,7 @@ def _row_to_tile_dict(row) -> dict:
         "reviewed_by": row["reviewed_by"],
         "version": row["version"],
         "paused_at": row["paused_at"],
+        "blocked_from": row["blocked_from"],
     }
     # If the row includes the mask blob, enrich with filled_pixels so the
     # client doesn't need a follow-up /api/tiles/{id} round-trip.

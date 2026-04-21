@@ -50,6 +50,7 @@ class TileStatus(str, Enum):
     in_review = "in_review"
     reviewed = "reviewed"
     problem = "problem"
+    blocked = "blocked"
 
 
 def _parse_iso_date(value: str, field: str) -> str:
@@ -453,6 +454,32 @@ def admin_delete_tile(body: ResetReasonIn | None = None, tile_id: int = Path(ge=
 def admin_re_review(body: ResetReasonIn | None = None, tile_id: int = Path(ge=1),
                      u: auth.CurrentUser = Depends(auth.require_admin)):
     admin_service.re_review_tile(tile_id, u.id, body.reason if body else None)
+    return {"ok": True}
+
+
+@app.post("/api/admin/tiles/bulk/block")
+def admin_bulk_block(body: BulkTileIdsIn, u: auth.CurrentUser = Depends(auth.require_admin)):
+    n = admin_service.block_many(body.ids, u.id, body.reason)
+    return {"affected": n}
+
+
+@app.post("/api/admin/tiles/bulk/unblock")
+def admin_bulk_unblock(body: BulkTileIdsIn, u: auth.CurrentUser = Depends(auth.require_admin)):
+    n = admin_service.unblock_many(body.ids, u.id, body.reason)
+    return {"affected": n}
+
+
+@app.post("/api/admin/tiles/{tile_id}/block")
+def admin_block(body: ResetReasonIn | None = None, tile_id: int = Path(ge=1),
+                u: auth.CurrentUser = Depends(auth.require_admin)):
+    admin_service.block_tile(tile_id, u.id, body.reason if body else None)
+    return {"ok": True}
+
+
+@app.post("/api/admin/tiles/{tile_id}/unblock")
+def admin_unblock(body: ResetReasonIn | None = None, tile_id: int = Path(ge=1),
+                  u: auth.CurrentUser = Depends(auth.require_admin)):
+    admin_service.unblock_tile(tile_id, u.id, body.reason if body else None)
     return {"ok": True}
 
 

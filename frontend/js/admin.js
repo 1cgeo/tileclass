@@ -23,6 +23,9 @@ let totalTiles = 0;
 let opSortKey = "username";
 let opSortDir = "asc";
 
+const BLOCKABLE_STATES = new Set(["pending", "classified", "reviewed"]);
+const isBlockable = t => BLOCKABLE_STATES.has(t.status);
+
 export async function initAdmin(user) {
     document.getElementById("admin-user-label").textContent = `${user.username} (admin)`;
     document.getElementById("btn-admin-logout").addEventListener("click", async () => {
@@ -219,6 +222,7 @@ async function renderTiles(root) {
                 <option value="">(todos)</option>
                 <option>pending</option><option>in_progress</option><option>classified</option>
                 <option>in_review</option><option>reviewed</option><option>problem</option>
+                <option>blocked</option>
             </select></label>
             <label>De <input type="date" id="filter-from"></label>
             <label>Até <input type="date" id="filter-to"></label>
@@ -233,6 +237,8 @@ async function renderTiles(root) {
             <button id="bulk-assign">Atribuir a operador…</button>
             <button id="bulk-reset">Resetar</button>
             <button id="bulk-rereview">Re-revisar</button>
+            <button id="bulk-block">Bloquear</button>
+            <button id="bulk-unblock">Desbloquear</button>
             <button id="bulk-clear">Limpar seleção</button>
         </div>
         <div id="tiles-list"></div>
@@ -244,6 +250,8 @@ async function renderTiles(root) {
     document.getElementById("bulk-assign").addEventListener("click", bulkAssign);
     document.getElementById("bulk-reset").addEventListener("click", bulkReset);
     document.getElementById("bulk-rereview").addEventListener("click", bulkReReview);
+    document.getElementById("bulk-block").addEventListener("click", bulkBlock);
+    document.getElementById("bulk-unblock").addEventListener("click", bulkUnblock);
     document.getElementById("bulk-clear").addEventListener("click", () => { selectedIds.clear(); loadAndRender(); });
     await loadAndRender();
 }
@@ -351,6 +359,7 @@ function renderTable(root, tiles) {
         } else {
             chip.className = `chip ${t.status}`;
             chip.textContent = t.status;
+            if (t.status === "blocked" && t.blocked_from) chip.title = `Antes: ${t.blocked_from}`;
         }
         tdStatus.appendChild(chip);
         const tdAct = document.createElement("td");
@@ -364,6 +373,12 @@ function renderTable(root, tiles) {
         }
         if (t.status === "in_progress" || t.status === "in_review") {
             tdAct.append(btn("Liberar operador", () => unassignOne(t.id)));
+        }
+        if (isBlockable(t)) {
+            tdAct.append(btn("Bloquear", () => blockAction([t.id])));
+        }
+        if (t.status === "blocked") {
+            tdAct.append(btn("Desbloquear", () => blockAction([t.id], { unblock: true })));
         }
         tr.append(tdCb, td(t.id), td(t.name), tdStatus,
                   td(classifierCell(t)), td(reviewerCell(t)),
@@ -422,6 +437,11 @@ function renderGrid(root, tiles) {
                 assignOne(t);
             });
             card.appendChild(assignBtn);
+        }
+        if (isBlockable(t)) {
+            card.appendChild(btn("Bloquear", () => blockAction([t.id]), "card-action"));
+        } else if (t.status === "blocked") {
+            card.appendChild(btn("Desbloquear", () => blockAction([t.id], { unblock: true }), "card-action"));
         }
         card.addEventListener("click", (ev) => {
             if (ev.shiftKey) toggleSelect(t.id, !selectedIds.has(t.id), card);
@@ -615,6 +635,38 @@ async function reReviewOne(id) {
     showToast("Enviado para nova revisão.", "success");
     loadAndRender();
 }
+// Unified block/unblock for single-id and multi-id batches. Returns true on
+// success so viewer callers can re-render the tile without the default
+// full-list reload (reload=false).
+async function blockAction(ids, { unblock = false, reload = true } = {}) {
+    if (!ids.length) return false;
+    const verb = unblock ? "Desbloquear" : "Bloquear";
+    const one = ids.length === 1;
+    const title = one ? `${verb} tile #${ids[0]}` : `${verb} ${ids.length} tile(s)`;
+    const description = unblock
+        ? "Cada tile volta ao status anterior ao bloqueio. Tiles não bloqueados serão rejeitados."
+        : "O tile deixa de ser distribuído até ser desbloqueado. A classificação atual é preservada. Tiles em execução (in_progress/in_review) ou em problema são rejeitados.";
+    const r = await confirmDestructive({ title, description, ids, confirmLabel: verb, danger: false });
+    if (!r.confirmed) return false;
+    const resp = await apiPostJson(
+        `/api/admin/tiles/bulk/${unblock ? "unblock" : "block"}`,
+        { ids, reason: r.reason },
+    );
+    showToast(`${resp.affected} ${unblock ? "desbloqueado(s)" : "bloqueado(s)"}.`, "success");
+    if (reload) loadAndRender();
+    return true;
+}
+
+async function bulkBlock() {
+    if (!selectedIds.size) return;
+    if (await blockAction([...selectedIds])) selectedIds.clear();
+}
+
+async function bulkUnblock() {
+    if (!selectedIds.size) return;
+    if (await blockAction([...selectedIds], { unblock: true })) selectedIds.clear();
+}
+
 async function bulkReset() {
     if (selectedIds.size === 0) return;
     const ids = [...selectedIds];
@@ -721,12 +773,27 @@ async function openViewer(tileId) {
             chip.textContent = t.status;
         }
         statusLine.appendChild(chip);
+        if (t.status === "blocked" && t.blocked_from) {
+            statusLine.append(document.createTextNode(` (antes: ${t.blocked_from})`));
+        }
         if (t.classified_by_username) {
             statusLine.append(document.createTextNode(" · classificado por "));
             const b = document.createElement("b"); b.textContent = t.classified_by_username;
             statusLine.append(b);
         }
         meta.appendChild(statusLine);
+        const viewerActions = document.createElement("div");
+        viewerActions.className = "viewer-actions";
+        if (isBlockable(t)) {
+            viewerActions.appendChild(btn("Bloquear", async () => {
+                if (await blockAction([t.id], { reload: false })) openViewer(t.id);
+            }));
+        } else if (t.status === "blocked") {
+            viewerActions.appendChild(btn("Desbloquear", async () => {
+                if (await blockAction([t.id], { unblock: true, reload: false })) openViewer(t.id);
+            }));
+        }
+        if (viewerActions.children.length) meta.appendChild(viewerActions);
         body.appendChild(meta);
 
         if (history.length) {
