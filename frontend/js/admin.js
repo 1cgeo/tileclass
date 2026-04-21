@@ -577,6 +577,22 @@ function promptAssign({ title, description, users }) {
     });
 }
 
+async function deleteOne(id, name) {
+    const r = await confirmDestructive({
+        title: `Excluir tile #${id}`,
+        description: `Ação irreversível. O tile "${name}" e todo o seu histórico serão apagados permanentemente.`,
+        ids: [id], confirmLabel: "Excluir permanentemente",
+    });
+    if (!r.confirmed) return;
+    await apiJson(`/api/admin/tiles/${id}`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: r.reason }),
+    });
+    showToast("Tile excluído.", "success");
+    selectTab("problems");
+}
+
 async function unassignOne(id) {
     const r = await confirmDestructive({
         title: `Liberar operador do tile #${id}`,
@@ -791,7 +807,11 @@ async function renderProblems(root) {
     for (const p of problems) {
         const tr = document.createElement("tr");
         const tdAct = document.createElement("td");
-        tdAct.append(btn("Ver", () => openViewer(p.id)), btn("Resetar", () => resetOne(p.id)));
+        tdAct.append(
+            btn("Ver", () => openViewer(p.id)),
+            btn("Resetar", () => resetOne(p.id)),
+            btn("Excluir", () => deleteOne(p.id, p.name), "danger"),
+        );
         tr.append(td(p.id), td(p.name), td(p.problem_note || ""), td(fmtDate(p.reported_at)), tdAct);
         tbody.appendChild(tr);
     }

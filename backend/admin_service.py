@@ -370,6 +370,37 @@ def assign_operator(tile_id: int, user_id: int, admin_id: int,
     return result["items"][0]
 
 
+def delete_tile(tile_id: int, admin_id: int, reason: str | None = None) -> dict:
+    """Permanently remove a tile flagged as `problem`. The status gate makes
+    this a two-step process: an operator must first report the tile as
+    problematic, then the admin reviews and deletes it. This avoids an admin
+    clicking the wrong row and wiping a tile in active use.
+
+    Side effects: the tile's rows in `action_log` are also deleted (no
+    ON DELETE CASCADE in the schema; an orphaned tile_id would violate the
+    FK). A single audit entry is written against the admin with
+    `tile_id=NULL` and a JSON detail so the deletion is traceable."""
+    clean = _clean_reason(reason)
+    with transaction("IMMEDIATE") as conn:
+        row = conn.execute(
+            "SELECT id, name, status FROM tiles WHERE id=?", (tile_id,)
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "tile not found")
+        if row["status"] != "problem":
+            raise HTTPException(
+                409,
+                f"tile must be in problem status to be deleted (status={row['status']})",
+            )
+        conn.execute("DELETE FROM action_log WHERE tile_id=?", (tile_id,))
+        conn.execute("DELETE FROM tiles WHERE id=?", (tile_id,))
+        log_action(
+            conn, admin_id, None, "delete_tile",
+            json.dumps({"tile_id": tile_id, "name": row["name"], "reason": clean}),
+        )
+    return {"id": tile_id, "deleted": True}
+
+
 def unassign_operator(tile_id: int, admin_id: int, reason: str | None = None) -> dict:
     """Release the current operator from a tile without wiping the mask.
     in_progress -> pending; in_review -> classified. Other states are rejected."""

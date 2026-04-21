@@ -441,6 +441,14 @@ def admin_unassign(body: ResetReasonIn | None = None, tile_id: int = Path(ge=1),
     return admin_service.unassign_operator(tile_id, u.id, body.reason if body else None)
 
 
+@app.delete("/api/admin/tiles/{tile_id}")
+def admin_delete_tile(body: ResetReasonIn | None = None, tile_id: int = Path(ge=1),
+                      u: auth.CurrentUser = Depends(auth.require_admin)):
+    """Permanent delete. Only allowed for tiles already flagged as `problem`
+    so an operator's report always precedes the admin's removal."""
+    return admin_service.delete_tile(tile_id, u.id, body.reason if body else None)
+
+
 @app.post("/api/admin/tiles/{tile_id}/re-review")
 def admin_re_review(body: ResetReasonIn | None = None, tile_id: int = Path(ge=1),
                      u: auth.CurrentUser = Depends(auth.require_admin)):

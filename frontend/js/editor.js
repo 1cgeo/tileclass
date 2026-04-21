@@ -93,6 +93,10 @@ let panX = 0, panY = 0;
 const MIN_ZOOM = 1;
 const MAX_ZOOM = 16;
 let spaceHeld = false;
+// Tracks that Z is physically still down after a Ctrl+Z chord. Without this,
+// the OS autorepeat on Z (after Ctrl is released first) would fire keydowns
+// with ctrlKey=false and trip the opacity shortcut.
+let zSuppressed = false;
 let panning = false;
 let panStart = null;  // { clientX, clientY, panX, panY }
 
@@ -732,6 +736,9 @@ function attachEvents() {
 
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("keyup", onKeyUp);
+    // Losing focus mid-chord (e.g. Alt+Tab during Ctrl+Z) drops the keyup,
+    // leaving zSuppressed stuck. Reset on blur so the next session is clean.
+    window.addEventListener("blur", () => { zSuppressed = false; spaceHeld = false; });
 }
 
 function isTextFocused() {
@@ -954,10 +961,17 @@ function onKeyDown(ev) {
     const k = ev.key;
     if (ev.ctrlKey && (k === "z" || k === "Z")) {
         ev.preventDefault();
-        if (ev.shiftKey) redo(); else undo();
+        zSuppressed = true;
+        if (!ev.repeat) {
+            if (ev.shiftKey) redo(); else undo();
+        }
         return;
     }
-    if (ev.ctrlKey && (k === "y" || k === "Y")) { ev.preventDefault(); redo(); return; }
+    if (ev.ctrlKey && (k === "y" || k === "Y")) {
+        ev.preventDefault();
+        if (!ev.repeat) redo();
+        return;
+    }
     if (k >= "1" && k <= "6") {
         const idx = Number(k) - 1;
         if (classes[idx]) setActiveClass(classes[idx].id);
@@ -970,7 +984,13 @@ function onKeyDown(ev) {
     if (low === "e") { setTool("fill"); return; }
     if (low === "a") { adjustBrushSize(-1); return; }
     if (low === "s") { adjustBrushSize(1); return; }
-    if (low === "z") { adjustOpacity(0.1); return; }
+    if (low === "z") {
+        // Ignore if Z is still held down from a prior Ctrl+Z chord — otherwise
+        // the autorepeat that fires after Ctrl is released would shift opacity.
+        if (zSuppressed) return;
+        adjustOpacity(0.1);
+        return;
+    }
     if (low === "x") { adjustOpacity(-0.1); return; }
     if (low === "c") { jumpToNextMissing(); return; }
     if (low === "d") { toggleSecondarySource(); return; }
@@ -994,6 +1014,7 @@ function onKeyUp(ev) {
         maskHidden = false;
         blitMask();
     }
+    if (ev.key === "z" || ev.key === "Z") zSuppressed = false;
 }
 
 function adjustBrushSize(delta) {
