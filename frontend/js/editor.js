@@ -687,6 +687,8 @@ function attachEvents() {
     document.getElementById("btn-problem").addEventListener("click", openProblemModal);
     const btnPause = document.getElementById("btn-pause");
     if (btnPause) btnPause.addEventListener("click", pauseTile);
+    const btnGmaps = document.getElementById("btn-gmaps");
+    if (btnGmaps) btnGmaps.addEventListener("click", openInGoogleMaps);
 
     const resumeContinue = document.getElementById("paused-resume-continue");
     if (resumeContinue) resumeContinue.addEventListener("click", continuePausedTile);
@@ -1167,6 +1169,18 @@ async function confirmProblem() {
     } catch (e) {
         showToast(`Erro: ${e.message}`, "error");
     }
+}
+
+function openInGoogleMaps() {
+    if (!currentTile) {
+        showToast("Nenhum tile aberto.", "warn");
+        return;
+    }
+    const lat = (currentTile.bbox_south + currentTile.bbox_north) / 2;
+    const lon = (currentTile.bbox_west + currentTile.bbox_east) / 2;
+    // data=!3m1!1e3 forces the satellite/earth layer; zoom 18 frames a 640m tile.
+    const url = `https://www.google.com/maps/@${lat},${lon},18z/data=!3m1!1e3`;
+    window.open(url, "_blank", "noopener,noreferrer");
 }
 
 // --- Pause / Resume ---
