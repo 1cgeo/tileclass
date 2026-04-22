@@ -449,6 +449,44 @@ input[type="range"] {
     height: calc(100vh - var(--header-h) - 48px);
 }
 
+/* Admin "Mapa" tab — MapLibre overview of tile distribution by status */
+.map-tab {
+    display: flex; flex-direction: column; gap: var(--space-3);
+    height: 100%;
+}
+.map-tab-legend {
+    display: flex; flex-wrap: wrap; gap: var(--space-3) var(--space-4);
+    padding: var(--space-2) var(--space-3);
+    background: var(--bg-1); border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    font-size: 13px; color: var(--text-muted);
+}
+.map-legend-item {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 10px;
+    background: var(--bg-2); color: var(--text-muted);
+    border: 1px solid var(--border); border-radius: 999px;
+    cursor: pointer; user-select: none;
+    font-size: 13px;
+    transition: opacity 120ms, background 120ms;
+}
+.map-legend-item:hover { background: var(--bg-3); }
+.map-legend-item.active { color: var(--text); }
+.map-legend-item:not(.active) {
+    opacity: 0.45;
+    text-decoration: line-through;
+}
+.map-legend-swatch {
+    display: inline-block; width: 14px; height: 14px;
+    border-radius: 3px; border: 1px solid rgba(0, 0, 0, 0.25);
+}
+.map-tab-container {
+    flex: 1; min-height: 500px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm); overflow: hidden;
+}
+.map-tab-container .maplibregl-canvas { outline: none; }
+
 .admin-table {
     width: 100%; border-collapse: collapse; margin-top: var(--space-3);
     background: var(--bg-1); border-radius: var(--radius); overflow: hidden;

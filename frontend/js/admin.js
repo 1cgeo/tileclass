@@ -23,6 +23,9 @@ let totalTiles = 0;
 let opSortKey = "username";
 let opSortDir = "asc";
 
+// Active MapLibre instance for the "Mapa" tab, disposed on tab change.
+let mapView = null;
+
 const BLOCKABLE_STATES = new Set(["pending", "classified", "reviewed"]);
 const isBlockable = t => BLOCKABLE_STATES.has(t.status);
 
@@ -58,6 +61,7 @@ async function selectTab(tab) {
     currentTab = tab;
     selectedIds.clear();
     page = 0;
+    if (mapView) { mapView.remove(); mapView = null; }
     document.querySelectorAll(".admin-nav button").forEach(b => {
         b.classList.toggle("active", b.dataset.tab === tab);
     });
@@ -66,6 +70,7 @@ async function selectTab(tab) {
     try {
         if (tab === "dashboard") await renderDashboard(content);
         else if (tab === "tiles") await renderTiles(content);
+        else if (tab === "map") await renderMap(content);
         else if (tab === "problems") await renderProblems(content);
         else if (tab === "users") await renderUsers(content);
     } catch (e) {
@@ -851,6 +856,184 @@ async function openViewer(tileId) {
         mctx.drawImage(off, 0, 0, 512, 512);
     } catch (e) {
         renderError(body, e);
+    }
+}
+
+
+// Status → fill color for the map polygons. Kept in sync with the chip colors
+// in style.css so the map legend matches the tiles-tab status chips.
+const MAP_STATUS_COLORS = {
+    pending:     "#9ca3af",
+    in_progress: "#3b82f6",
+    classified:  "#eab308",
+    in_review:   "#f97316",
+    reviewed:    "#22c55e",
+    problem:     "#ef4444",
+    blocked:     "#4b5563",
+};
+
+async function renderMap(root) {
+    const tiles = await apiGet("/api/admin/tiles/map");
+    root.innerHTML = `
+        <div class="map-tab">
+            <div class="map-tab-legend" id="map-legend"></div>
+            <div class="map-tab-container" id="admin-map"></div>
+        </div>
+    `;
+    // All statuses enabled by default. Clicking a legend item toggles — the
+    // filter on the three tile layers is recomputed from this set.
+    const enabledStatuses = new Set(Object.keys(MAP_STATUS_COLORS));
+    const legend = document.getElementById("map-legend");
+    const legendButtons = new Map();
+    for (const [status, color] of Object.entries(MAP_STATUS_COLORS)) {
+        const item = document.createElement("button");
+        item.type = "button";
+        item.className = "map-legend-item active";
+        item.dataset.status = status;
+        const sw = document.createElement("span");
+        sw.className = "map-legend-swatch";
+        sw.style.background = color;
+        const lbl = document.createElement("span");
+        lbl.textContent = status;
+        item.append(sw, lbl);
+        item.addEventListener("click", () => toggleStatus(status));
+        legend.appendChild(item);
+        legendButtons.set(status, item);
+    }
+
+    const applyFilter = () => {
+        if (!mapView) return;
+        const allowed = [...enabledStatuses];
+        const filter = ["in", ["get", "status"], ["literal", allowed]];
+        for (const id of ["tiles-fill", "tiles-outline", "tiles-dot"]) {
+            mapView.setFilter(id, filter);
+        }
+    };
+    const toggleStatus = (status) => {
+        if (enabledStatuses.has(status)) enabledStatuses.delete(status);
+        else enabledStatuses.add(status);
+        legendButtons.get(status).classList.toggle("active", enabledStatuses.has(status));
+        applyFilter();
+    };
+
+    if (!tiles.length) {
+        document.getElementById("admin-map").innerHTML =
+            `<p class="empty-state">Nenhum tile cadastrado.</p>`;
+        return;
+    }
+
+    const polyFeatures = [];
+    const pointFeatures = [];
+    for (const t of tiles) {
+        const props = {
+            id: t.id,
+            name: t.name,
+            status: t.status,
+            paused: !!t.paused_at,
+            blocked_from: t.blocked_from,
+        };
+        polyFeatures.push({
+            type: "Feature",
+            properties: props,
+            geometry: {
+                type: "Polygon",
+                coordinates: [[
+                    [t.bbox_west, t.bbox_south],
+                    [t.bbox_east, t.bbox_south],
+                    [t.bbox_east, t.bbox_north],
+                    [t.bbox_west, t.bbox_north],
+                    [t.bbox_west, t.bbox_south],
+                ]],
+            },
+        });
+        pointFeatures.push({
+            type: "Feature",
+            properties: props,
+            geometry: {
+                type: "Point",
+                coordinates: [
+                    (t.bbox_west + t.bbox_east) / 2,
+                    (t.bbox_south + t.bbox_north) / 2,
+                ],
+            },
+        });
+    }
+    const polyGeojson = { type: "FeatureCollection", features: polyFeatures };
+    const pointGeojson = { type: "FeatureCollection", features: pointFeatures };
+    console.log(`[admin/map] rendering ${tiles.length} tiles`);
+
+    // Overall extent for fitBounds.
+    let w = Infinity, s = Infinity, e = -Infinity, n = -Infinity;
+    for (const t of tiles) {
+        if (t.bbox_west  < w) w = t.bbox_west;
+        if (t.bbox_south < s) s = t.bbox_south;
+        if (t.bbox_east  > e) e = t.bbox_east;
+        if (t.bbox_north > n) n = t.bbox_north;
+    }
+
+    const matchExpr = ["match", ["get", "status"]];
+    for (const [status, color] of Object.entries(MAP_STATUS_COLORS)) {
+        matchExpr.push(status, color);
+    }
+    matchExpr.push("#888");
+
+    mapView = new maplibregl.Map({
+        container: "admin-map",
+        style: {
+            version: 8,
+            sources: {
+                basemap: {
+                    type: "raster",
+                    tiles: [
+                        "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
+                    ],
+                    tileSize: 256,
+                    attribution: "Tiles © Esri",
+                    maxzoom: 19,
+                },
+                tiles: { type: "geojson", data: polyGeojson },
+                "tile-points": { type: "geojson", data: pointGeojson },
+            },
+            layers: [
+                { id: "basemap-layer", type: "raster", source: "basemap" },
+                {
+                    id: "tiles-fill", type: "fill", source: "tiles",
+                    paint: { "fill-color": matchExpr, "fill-opacity": 0.55 },
+                },
+                {
+                    id: "tiles-outline", type: "line", source: "tiles",
+                    paint: { "line-color": matchExpr, "line-width": 2 },
+                },
+                {
+                    // Circle marker per tile so they stay visible when the
+                    // polygon is sub-pixel at wide zoom levels.
+                    id: "tiles-dot", type: "circle", source: "tile-points",
+                    paint: {
+                        "circle-color": matchExpr,
+                        "circle-radius": 5,
+                        "circle-stroke-color": "#111",
+                        "circle-stroke-width": 1,
+                    },
+                },
+            ],
+        },
+        bounds: [[w, s], [e, n]],
+        fitBoundsOptions: { padding: 40, animate: false, maxZoom: 14 },
+    });
+    mapView.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
+
+    for (const layer of ["tiles-fill", "tiles-dot"]) {
+        mapView.on("mouseenter", layer, () => {
+            mapView.getCanvas().style.cursor = "pointer";
+        });
+        mapView.on("mouseleave", layer, () => {
+            mapView.getCanvas().style.cursor = "";
+        });
+        mapView.on("click", layer, (ev) => {
+            const f = ev.features && ev.features[0];
+            if (!f) return;
+            openViewer(f.properties.id);
+        });
     }
 }
 

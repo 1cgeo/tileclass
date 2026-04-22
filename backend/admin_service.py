@@ -208,6 +208,21 @@ def count_tiles(status: str | None = None, user_id: int | None = None,
     return int(row["c"])
 
 
+def list_tiles_map() -> list[dict]:
+    """Compact tile list for the admin map view: id, name, status and bbox.
+    No pagination — the map renders the full dataset as polygons."""
+    conn = connect()
+    try:
+        rows = conn.execute(
+            "SELECT id, name, status, bbox_west, bbox_south, bbox_east, bbox_north, "
+            "paused_at, blocked_from "
+            "FROM tiles ORDER BY id"
+        ).fetchall()
+    finally:
+        conn.close()
+    return [dict(r) for r in rows]
+
+
 def list_problems() -> list[dict]:
     conn = connect()
     try:

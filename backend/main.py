@@ -403,6 +403,11 @@ def admin_problems(_: auth.CurrentUser = Depends(auth.require_admin)):
     return admin_service.list_problems()
 
 
+@app.get("/api/admin/tiles/map")
+def admin_tiles_map(_: auth.CurrentUser = Depends(auth.require_admin)):
+    return admin_service.list_tiles_map()
+
+
 @app.post("/api/admin/tiles/bulk/reset")
 def admin_bulk_reset(body: BulkTileIdsIn, u: auth.CurrentUser = Depends(auth.require_admin)):
     n = admin_service.reset_many(body.ids, u.id, body.reason)
