@@ -447,6 +447,14 @@ def admin_unassign(body: ResetReasonIn | None = None, tile_id: int = Path(ge=1),
     return admin_service.unassign_operator(tile_id, u.id, body.reason if body else None)
 
 
+@app.post("/api/admin/tiles/{tile_id}/admin-pause")
+def admin_pause(body: ResetReasonIn | None = None, tile_id: int = Path(ge=1),
+                u: auth.CurrentUser = Depends(auth.require_admin)):
+    """Pause an in-progress/in-review tile on behalf of an absent operator so
+    the dashboard cycle timer stops. Keeps the assignment intact."""
+    return admin_service.admin_pause_tile(tile_id, u.id, body.reason if body else None)
+
+
 @app.delete("/api/admin/tiles/{tile_id}")
 def admin_delete_tile(body: ResetReasonIn | None = None, tile_id: int = Path(ge=1),
                       u: auth.CurrentUser = Depends(auth.require_admin)):

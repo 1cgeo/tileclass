@@ -7,7 +7,7 @@ from PIL import Image
 import numpy as np
 
 from .database import connect, transaction, log_action
-from .mask_utils import empty_mask_png, decode_mask, TILE_SIZE
+from .mask_utils import empty_mask_png, decode_mask, TILE_SIZE, PIXELS
 from .auth import hash_password
 
 
@@ -430,6 +430,47 @@ def delete_tile(tile_id: int, admin_id: int, reason: str | None = None) -> dict:
     return {"id": tile_id, "deleted": True}
 
 
+def admin_pause_tile(tile_id: int, admin_id: int, reason: str | None = None) -> dict:
+    """Pause a tile that's mid-work when the operator forgot to pause before leaving.
+    Keeps the tile assigned so the operator resumes their own work when they return;
+    `paused_at=now()` stops the dashboard cycle-duration timer from ticking while
+    they're away.
+
+    Logs `pause` under the operator (detail='admin') so `_cycle_durations` pairs
+    it against the assign→classify/review cycle the same way a self-pause does.
+    A separate `admin_pause` entry is logged under the admin for audit. We avoid
+    detail='queue' because `/api/tiles/next` auto-resumes queue pauses — an
+    operator returning after an admin pause should explicitly resume the tile,
+    not be silently put back on the clock.
+    """
+    detail = _clean_reason(reason)
+    with transaction("IMMEDIATE") as conn:
+        row = conn.execute(
+            "SELECT status, assigned_to, paused_at FROM tiles WHERE id=?", (tile_id,)
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "tile not found")
+        if row["status"] not in ("in_progress", "in_review"):
+            raise HTTPException(
+                409, f"tile is not in execution (status={row['status']})"
+            )
+        if row["assigned_to"] is None:
+            raise HTTPException(409, "tile has no assignee to pause")
+        if row["paused_at"] is not None:
+            raise HTTPException(409, "tile is already paused")
+        operator_id = row["assigned_to"]
+        conn.execute(
+            "UPDATE tiles SET paused_at=?, version=version+1 WHERE id=?",
+            (_now_iso(), tile_id),
+        )
+        log_action(conn, operator_id, tile_id, "pause", "admin")
+        log_action(
+            conn, admin_id, tile_id, "admin_pause",
+            json.dumps({"operator_id": operator_id, "reason": detail}),
+        )
+    return {"id": tile_id, "status": row["status"], "paused": True}
+
+
 def unassign_operator(tile_id: int, admin_id: int, reason: str | None = None) -> dict:
     """Release the current operator from a tile without wiping the mask.
     in_progress -> pending; in_review -> classified. Other states are rejected."""
@@ -601,10 +642,18 @@ def tile_thumbnail(tile_id: int, size: int = 128) -> bytes:
         conn.close()
     if not row:
         raise HTTPException(404, "tile not found")
-    try:
-        raw = decode_mask(row["data_png"])
-    except (ValueError, OSError) as e:
-        raise HTTPException(422, f"corrupted mask in db: {e}")
+    # Missing or corrupt blob renders as the empty (all-255) mask — lut[255]
+    # is transparent, so the admin grid shows a blank cell instead of a
+    # broken image. Fail-open is the right call: a bad thumbnail is UI noise,
+    # not a data-integrity signal the admin needs to act on.
+    png = row["data_png"]
+    if not png:
+        raw = b"\xff" * PIXELS
+    else:
+        try:
+            raw = decode_mask(png)
+        except (ValueError, OSError):
+            raw = b"\xff" * PIXELS
     arr = np.frombuffer(raw, dtype=np.uint8).reshape(TILE_SIZE, TILE_SIZE)
     classes = get_config()["classes"]
     lut = np.zeros((256, 4), dtype=np.uint8)

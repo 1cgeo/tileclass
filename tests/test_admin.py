@@ -428,6 +428,169 @@ def test_admin_assign_requires_admin_role(client, admin_user, operators, tiles):
     assert r.status_code == 403
 
 
+# ---------- Admin pause (operator forgot to pause before leaving) ----------
+
+def _last_action(tile_id: int, action: str):
+    from backend.database import connect
+    conn = connect()
+    try:
+        return conn.execute(
+            "SELECT user_id, detail FROM action_log "
+            "WHERE tile_id=? AND action=? ORDER BY id DESC LIMIT 1",
+            (tile_id, action),
+        ).fetchone()
+    finally:
+        conn.close()
+
+
+def test_admin_pause_in_progress_sets_paused_at(client, admin_user, operators, tiles):
+    """Happy path: admin pauses an in_progress tile. Tile stays assigned and
+    in_progress, paused_at is set, version bumps."""
+    tok = token(client, "op1", "secret123")
+    tile = client.get("/api/tiles/next", headers=headers(tok)).json()
+    before = _db_row(tile["id"])
+    assert before["status"] == "in_progress"
+
+    adm = token(client, "admin", "admin123")
+    r = client.post(f"/api/admin/tiles/{tile['id']}/admin-pause",
+                    headers=headers(adm), json={"reason": "foi embora sem pausar"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body == {"id": tile["id"], "status": "in_progress", "paused": True}
+
+    from backend.database import connect
+    conn = connect()
+    try:
+        row = dict(conn.execute(
+            "SELECT status, assigned_to, paused_at, version FROM tiles WHERE id=?",
+            (tile["id"],),
+        ).fetchone())
+    finally:
+        conn.close()
+    assert row["status"] == "in_progress"
+    assert row["assigned_to"] == operators[0]["id"]  # still assigned
+    assert row["paused_at"] is not None
+    assert row["version"] == before["version"] + 1
+
+
+def test_admin_pause_in_review_keeps_reviewer_assigned(
+    client, admin_user, operators, tiles
+):
+    """in_review is also pauseable; reviewer remains the assignee."""
+    op1 = token(client, "op1", "secret123")
+    tile = client.get("/api/tiles/next", headers=headers(op1)).json()
+    client.post(f"/api/tiles/{tile['id']}/classify",
+                headers={**headers(op1), "Content-Type": "application/octet-stream"},
+                content=np.full(65536, 1, dtype=np.uint8).tobytes())
+    op2 = token(client, "op2", "secret123")
+    client.get("/api/tiles/next", headers=headers(op2))
+    assert _db_row(tile["id"])["status"] == "in_review"
+    assert _db_row(tile["id"])["assigned_to"] == operators[1]["id"]
+
+    adm = token(client, "admin", "admin123")
+    r = client.post(f"/api/admin/tiles/{tile['id']}/admin-pause",
+                    headers=headers(adm), json={})
+    assert r.status_code == 200, r.text
+    assert _db_row(tile["id"])["assigned_to"] == operators[1]["id"]
+
+
+def test_admin_pause_logs_under_operator_and_admin(
+    client, admin_user, operators, tiles
+):
+    """The `pause` log must be attributed to the operator (so _cycle_durations
+    pairs it against their assign→classify cycle). A separate `admin_pause`
+    entry under the admin provides audit trail."""
+    tok = token(client, "op1", "secret123")
+    tile = client.get("/api/tiles/next", headers=headers(tok)).json()
+    adm = token(client, "admin", "admin123")
+    client.post(f"/api/admin/tiles/{tile['id']}/admin-pause",
+                headers=headers(adm), json={"reason": "AFK"})
+
+    pause = _last_action(tile["id"], "pause")
+    assert pause is not None
+    assert pause["user_id"] == operators[0]["id"]
+    assert pause["detail"] == "admin"  # not 'queue', so /next won't auto-resume
+
+    audit = _last_action(tile["id"], "admin_pause")
+    assert audit is not None
+    assert audit["user_id"] == admin_user["id"]
+    assert "AFK" in (audit["detail"] or "")
+
+
+def test_admin_pause_rejects_pending_tile(client, admin_user, tiles):
+    adm = token(client, "admin", "admin123")
+    tid = client.get("/api/admin/tiles?status=pending",
+                     headers=headers(adm)).json()[0]["id"]
+    r = client.post(f"/api/admin/tiles/{tid}/admin-pause",
+                    headers=headers(adm), json={})
+    assert r.status_code == 409
+
+
+def test_admin_pause_rejects_classified_tile(
+    client, admin_user, operators, tiles
+):
+    op1 = token(client, "op1", "secret123")
+    tile = client.get("/api/tiles/next", headers=headers(op1)).json()
+    client.post(f"/api/tiles/{tile['id']}/classify",
+                headers={**headers(op1), "Content-Type": "application/octet-stream"},
+                content=np.full(65536, 1, dtype=np.uint8).tobytes())
+    assert _db_row(tile["id"])["status"] == "classified"
+    adm = token(client, "admin", "admin123")
+    r = client.post(f"/api/admin/tiles/{tile['id']}/admin-pause",
+                    headers=headers(adm), json={})
+    assert r.status_code == 409
+
+
+def test_admin_pause_rejects_already_paused(client, admin_user, operators, tiles):
+    """Second admin-pause call is a no-op with a clear 409, so an accidental
+    double-click doesn't bury the original paused_at timestamp."""
+    tok = token(client, "op1", "secret123")
+    tile = client.get("/api/tiles/next", headers=headers(tok)).json()
+    adm = token(client, "admin", "admin123")
+    r = client.post(f"/api/admin/tiles/{tile['id']}/admin-pause",
+                    headers=headers(adm), json={})
+    assert r.status_code == 200
+    r = client.post(f"/api/admin/tiles/{tile['id']}/admin-pause",
+                    headers=headers(adm), json={})
+    assert r.status_code == 409
+
+
+def test_admin_pause_requires_admin(client, admin_user, operators, tiles):
+    op1 = token(client, "op1", "secret123")
+    tile = client.get("/api/tiles/next", headers=headers(op1)).json()
+    r = client.post(f"/api/admin/tiles/{tile['id']}/admin-pause",
+                    headers=headers(op1), json={})
+    assert r.status_code == 403
+
+
+def test_admin_pause_is_not_auto_resumed_by_next(
+    client, admin_user, operators, tiles
+):
+    """When the operator comes back and hits /next, an admin-pause must NOT
+    auto-resume (detail != 'queue'). Timer stays stopped until they explicitly
+    resume via editor."""
+    tok = token(client, "op1", "secret123")
+    tile = client.get("/api/tiles/next", headers=headers(tok)).json()
+    adm = token(client, "admin", "admin123")
+    client.post(f"/api/admin/tiles/{tile['id']}/admin-pause",
+                headers=headers(adm), json={})
+
+    r = client.get("/api/tiles/next", headers=headers(tok))
+    assert r.status_code == 200
+    assert r.json()["id"] == tile["id"]
+    # Still paused — /next did not clear paused_at.
+    assert _db_row(tile["id"])
+    from backend.database import connect
+    conn = connect()
+    try:
+        row = dict(conn.execute(
+            "SELECT paused_at FROM tiles WHERE id=?", (tile["id"],)
+        ).fetchone())
+    finally:
+        conn.close()
+    assert row["paused_at"] is not None
+
+
 def test_thumbnail(client, admin_user, tiles):
     """Thumbnail must be a valid PNG of the requested size, not arbitrary bytes."""
     import io
@@ -441,4 +604,25 @@ def test_thumbnail(client, admin_user, tiles):
     assert r.content[:8] == b"\x89PNG\r\n\x1a\n"
     img = Image.open(io.BytesIO(r.content))
     assert img.format == "PNG"
+    assert img.size == (64, 64)
+
+
+def test_thumbnail_falls_back_to_blank_on_missing_blob(client, admin_user, tiles):
+    """A tile whose data_png is NULL (or corrupt) must still return a 200 PNG,
+    rendered as the empty mask — the admin grid should never 422 on rows that
+    simply haven't been painted yet."""
+    import io
+    from PIL import Image
+    from backend.database import connect
+    t = token(client, "admin", "admin123")
+    tid = client.get("/api/admin/tiles", headers=headers(t)).json()[0]["id"]
+    conn = connect()
+    try:
+        conn.execute("UPDATE tiles SET data_png=NULL WHERE id=?", (tid,))
+        conn.commit()
+    finally:
+        conn.close()
+    r = client.get(f"/api/admin/tiles/{tid}/thumbnail?size=64", headers=headers(t))
+    assert r.status_code == 200
+    img = Image.open(io.BytesIO(r.content))
     assert img.size == (64, 64)

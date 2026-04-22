@@ -385,6 +385,9 @@ function renderTable(root, tiles) {
             tdAct.append(btn("Atribuir", () => assignOne(t)));
         }
         if (t.status === "in_progress" || t.status === "in_review") {
+            if (!t.paused_at) {
+                tdAct.append(btn("Pausar", () => adminPauseOne(t.id)));
+            }
             tdAct.append(btn("Liberar operador", () => unassignOne(t.id)));
         }
         if (isBlockable(t)) {
@@ -635,6 +638,17 @@ async function unassignOne(id) {
     if (!r.confirmed) return;
     await apiPostJson(`/api/admin/tiles/${id}/unassign`, { reason: r.reason });
     showToast("Operador liberado.", "success");
+    loadAndRender();
+}
+async function adminPauseOne(id) {
+    const r = await confirmDestructive({
+        title: `Pausar tile #${id}`,
+        description: "Congela o cronômetro de classificação sem liberar o operador. Útil quando o operador foi embora sem pausar. Ele retoma o tile quando voltar.",
+        ids: [id], confirmLabel: "Pausar", danger: false,
+    });
+    if (!r.confirmed) return;
+    await apiPostJson(`/api/admin/tiles/${id}/admin-pause`, { reason: r.reason });
+    showToast("Tile pausado.", "success");
     loadAndRender();
 }
 async function reReviewOne(id) {
