@@ -10,6 +10,38 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# Base SELECT used everywhere a tile is returned to the client. The LEFT JOIN
+# on users pulls the classifier's username so the review banner
+# ("Classificado por <nome>") can render in one round-trip — without it, tiles
+# returned by `/api/tiles/next` would have `classified_by_username=None` and
+# the frontend would fall back to "?".
+_TILE_SELECT = (
+    "SELECT tiles.*, users.username AS classified_by_username "
+    "FROM tiles LEFT JOIN users ON users.id=tiles.classified_by"
+)
+
+
+# Order in which the "resume" pick is chosen when the user has multiple tiles
+# assigned. Rules, in order:
+#   1. Non-paused tile (actively in progress) wins over any paused one.
+#   2. Among paused tiles, a manual pause beats a queue pause. We detect
+#      this by looking up the most recent `pause` log for the tile+user:
+#      manual pauses are logged with detail=NULL, admin bulk-assigns log
+#      detail='queue' (admin_service.assign_many). A user who paused a tile
+#      manually expects to resume THAT tile, not a queue tile the admin
+#      added later with a smaller id.
+#   3. Oldest id last — FIFO only inside the "queue-paused" group, so
+#      existing bulk-assign FIFO behavior is preserved.
+_RESUME_ORDER_BY = """
+  ORDER BY
+    (paused_at IS NULL) DESC,
+    ((SELECT detail FROM action_log
+        WHERE tile_id=tiles.id AND user_id=? AND action='pause'
+        ORDER BY id DESC LIMIT 1) IS NULL) DESC,
+    id ASC
+"""
+
+
 def _row_to_tile_dict(row) -> dict:
     d = {
         "id": row["id"],
@@ -40,6 +72,10 @@ def _row_to_tile_dict(row) -> dict:
             d["filled_pixels"] = 0
     else:
         d["filled_pixels"] = 0
+    try:
+        d["classified_by_username"] = row["classified_by_username"]
+    except (IndexError, KeyError):
+        d["classified_by_username"] = None
     return d
 
 
@@ -48,15 +84,15 @@ def get_resume_tile(user_id: int) -> dict | None:
     or None. Read-only: does NOT assign from the queue and does NOT unpause.
     Used by the editor to decide whether to skip the idle screen on login.
 
-    When the user has multiple tiles assigned (admin bulk-assign pre-loaded a
-    personal queue), the non-paused one wins; ties broken by id ascending."""
+    Selection order when multiple tiles are assigned: see `_RESUME_ORDER_BY`."""
     conn = connect()
     try:
         row = conn.execute(
-            """SELECT * FROM tiles
-               WHERE assigned_to=? AND status IN ('in_progress','in_review')
-               ORDER BY (paused_at IS NULL) DESC, id ASC LIMIT 1""",
-            (user_id,),
+            f"""{_TILE_SELECT}
+                WHERE tiles.assigned_to=? AND tiles.status IN ('in_progress','in_review')
+                {_RESUME_ORDER_BY}
+                LIMIT 1""",
+            (user_id, user_id),
         ).fetchone()
         return _row_to_tile_dict(row) if row else None
     finally:
@@ -69,24 +105,26 @@ def peek_next_tile(user_id: int) -> dict | None:
     conn = connect()
     try:
         row = conn.execute(
-            """SELECT * FROM tiles
-               WHERE assigned_to=? AND status IN ('in_progress','in_review')
-               ORDER BY (paused_at IS NULL) DESC, id ASC LIMIT 1""",
-            (user_id,),
+            f"""{_TILE_SELECT}
+                WHERE tiles.assigned_to=? AND tiles.status IN ('in_progress','in_review')
+                {_RESUME_ORDER_BY}
+                LIMIT 1""",
+            (user_id, user_id),
         ).fetchone()
         if row:
             return _row_to_tile_dict(row)
         if _user_can_review(conn, user_id):
             row = conn.execute(
-                """SELECT * FROM tiles
-                   WHERE status='classified' AND (classified_by IS NULL OR classified_by != ?)
-                   ORDER BY classified_at LIMIT 1""",
+                f"""{_TILE_SELECT}
+                    WHERE tiles.status='classified'
+                      AND (tiles.classified_by IS NULL OR tiles.classified_by != ?)
+                    ORDER BY tiles.classified_at LIMIT 1""",
                 (user_id,),
             ).fetchone()
             if row:
                 return _row_to_tile_dict(row)
         row = conn.execute(
-            "SELECT * FROM tiles WHERE status='pending' ORDER BY id LIMIT 1"
+            f"{_TILE_SELECT} WHERE tiles.status='pending' ORDER BY tiles.id LIMIT 1"
         ).fetchone()
         return _row_to_tile_dict(row) if row else None
     finally:
@@ -161,10 +199,11 @@ def get_next_tile(user_id: int) -> dict | None:
     with transaction("IMMEDIATE") as conn:
         # 1) Resume: if user already has a tile assigned and in-progress/in-review, return it.
         row = conn.execute(
-            """SELECT * FROM tiles
-               WHERE assigned_to=? AND status IN ('in_progress','in_review')
-               ORDER BY (paused_at IS NULL) DESC, id ASC LIMIT 1""",
-            (user_id,),
+            f"""{_TILE_SELECT}
+                WHERE tiles.assigned_to=? AND tiles.status IN ('in_progress','in_review')
+                {_RESUME_ORDER_BY}
+                LIMIT 1""",
+            (user_id, user_id),
         ).fetchone()
         if row:
             # Auto-resume only if the last pause was from an admin bulk-assign
@@ -185,7 +224,7 @@ def get_next_tile(user_id: int) -> dict | None:
                     )
                     log_action(conn, user_id, row["id"], "resume")
                     row = conn.execute(
-                        "SELECT * FROM tiles WHERE id=?", (row["id"],)
+                        f"{_TILE_SELECT} WHERE tiles.id=?", (row["id"],)
                     ).fetchone()
             return _row_to_tile_dict(row)
 
@@ -193,9 +232,10 @@ def get_next_tile(user_id: int) -> dict | None:
         row = None
         if _user_can_review(conn, user_id):
             row = conn.execute(
-                """SELECT * FROM tiles
-                   WHERE status='classified' AND (classified_by IS NULL OR classified_by != ?)
-                   ORDER BY classified_at LIMIT 1""",
+                f"""{_TILE_SELECT}
+                    WHERE tiles.status='classified'
+                      AND (tiles.classified_by IS NULL OR tiles.classified_by != ?)
+                    ORDER BY tiles.classified_at LIMIT 1""",
                 (user_id,),
             ).fetchone()
         if row:
@@ -204,12 +244,14 @@ def get_next_tile(user_id: int) -> dict | None:
                 (user_id, row["id"]),
             )
             log_action(conn, user_id, row["id"], "assign_review")
-            row = conn.execute("SELECT * FROM tiles WHERE id=?", (row["id"],)).fetchone()
+            row = conn.execute(
+                f"{_TILE_SELECT} WHERE tiles.id=?", (row["id"],)
+            ).fetchone()
             return _row_to_tile_dict(row)
 
         # 3) Pending queue
         row = conn.execute(
-            "SELECT * FROM tiles WHERE status='pending' ORDER BY id LIMIT 1"
+            f"{_TILE_SELECT} WHERE tiles.status='pending' ORDER BY tiles.id LIMIT 1"
         ).fetchone()
         if row:
             conn.execute(
@@ -217,7 +259,9 @@ def get_next_tile(user_id: int) -> dict | None:
                 (user_id, row["id"]),
             )
             log_action(conn, user_id, row["id"], "assign_classify")
-            row = conn.execute("SELECT * FROM tiles WHERE id=?", (row["id"],)).fetchone()
+            row = conn.execute(
+                f"{_TILE_SELECT} WHERE tiles.id=?", (row["id"],)
+            ).fetchone()
             return _row_to_tile_dict(row)
 
     return None
@@ -227,18 +271,11 @@ def get_tile(tile_id: int) -> dict | None:
     conn = connect()
     try:
         row = conn.execute(
-            """SELECT t.*, u.username AS classified_by_username
-               FROM tiles t LEFT JOIN users u ON u.id=t.classified_by
-               WHERE t.id=?""",
-            (tile_id,),
+            f"{_TILE_SELECT} WHERE tiles.id=?", (tile_id,),
         ).fetchone()
     finally:
         conn.close()
-    if not row:
-        return None
-    d = _row_to_tile_dict(row)
-    d["classified_by_username"] = row["classified_by_username"]
-    return d
+    return _row_to_tile_dict(row) if row else None
 
 
 def get_tile_image(tile_id: int) -> bytes | None:
@@ -364,7 +401,7 @@ def pause_tile(tile_id: int, user_id: int, raw_mask: bytes,
             (png, _now(), tile_id),
         )
         log_action(conn, user_id, tile_id, "pause")
-        row = conn.execute("SELECT * FROM tiles WHERE id=?", (tile_id,)).fetchone()
+        row = conn.execute(f"{_TILE_SELECT} WHERE tiles.id=?", (tile_id,)).fetchone()
     return _row_to_tile_dict(row)
 
 
@@ -387,5 +424,5 @@ def resume_tile(tile_id: int, user_id: int) -> dict:
             (tile_id,),
         )
         log_action(conn, user_id, tile_id, "resume")
-        row = conn.execute("SELECT * FROM tiles WHERE id=?", (tile_id,)).fetchone()
+        row = conn.execute(f"{_TILE_SELECT} WHERE tiles.id=?", (tile_id,)).fetchone()
     return _row_to_tile_dict(row)

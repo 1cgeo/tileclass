@@ -352,13 +352,6 @@ input[type="range"] {
 .no-tiles-box h2 { margin: 0 0 var(--space-2); }
 .no-tiles-box p { margin: 0 0 var(--space-4); color: var(--text-muted); }
 .no-tiles-actions { display: flex; gap: var(--space-2); justify-content: center; }
-.backup-banner {
-    position: absolute; bottom: 8px; left: 50%; transform: translateX(-50%);
-    background: var(--bg-1); border: 1px solid var(--accent);
-    padding: 8px 12px; border-radius: var(--radius);
-    display: flex; gap: 8px; align-items: center;
-    box-shadow: var(--shadow-lg); z-index: 10; font-size: 13px;
-}
 .canvas-stack {
     position: relative; width: 768px; height: 768px;
     flex-shrink: 0;

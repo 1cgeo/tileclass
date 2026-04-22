@@ -151,6 +151,10 @@ def test_reviewer_never_gets_own_classification(client, operators, tiles):
     nxt2 = client.get("/api/tiles/next", headers=headers(t2)).json()
     assert nxt2["id"] == tile["id"]
     assert nxt2["status"] == "in_review"
+    # The review banner renders "Classificado por <username>" from the /next
+    # response directly (no second round-trip). Must be populated, not the
+    # "?" fallback.
+    assert nxt2["classified_by_username"] == "op1"
 
 
 def test_report_problem(client, operators, tiles):

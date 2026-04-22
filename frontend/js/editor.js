@@ -56,7 +56,6 @@ let todayCount = 0;
 
 // Preload cache for the "next" tile while user paints
 let preloadedNext = null;
-let _pendingBackup = null;
 
 // Test hook only — never gate production logic on this.
 let _tileReady = false;
@@ -345,7 +344,13 @@ async function loadMaskFromServer(tileId) {
 }
 
 function tryRestoreBackup() {
-    hideBackupBanner();
+    // Auto-restore: if localStorage holds a different mask for the tile we
+    // just loaded, overwrite in-memory mask silently. The backup is only
+    // written during active painting and cleared on submit, so the only time
+    // it differs from the server blob is exactly when the user had unsaved
+    // work (F5, browser crash). Prompting for confirmation every time
+    // produced more friction than it was worth. Caller is responsible for
+    // re-rendering (loadTile calls renderMaskFull right after).
     try {
         const raw = localStorage.getItem(LS_BACKUP_KEY);
         if (!raw) return;
@@ -353,41 +358,15 @@ function tryRestoreBackup() {
         if (b.tileId !== currentTile.id || !b.mask) return;
         const restored = Uint8Array.from(atob(b.mask), c => c.charCodeAt(0));
         if (restored.length !== PIXELS) return;
-        // Compare — if identical to current, nothing to offer.
-        let differs = restored.length !== mask.length;
-        if (!differs) {
-            for (let i = 0; i < PIXELS; i++) { if (restored[i] !== mask[i]) { differs = true; break; } }
+        let differs = false;
+        for (let i = 0; i < PIXELS; i++) {
+            if (restored[i] !== mask[i]) { differs = true; break; }
         }
         if (!differs) return;
-        _pendingBackup = restored;
-        showBackupBanner();
+        mask = restored;
+        recountFilled();
+        showToast("Trabalho local restaurado.", "success", 2500);
     } catch {}
-}
-
-function showBackupBanner() {
-    const el = document.getElementById("backup-banner");
-    if (!el) return;
-    el.classList.remove("hidden");
-}
-function hideBackupBanner() {
-    const el = document.getElementById("backup-banner");
-    if (el) el.classList.add("hidden");
-    _pendingBackup = null;
-}
-function applyPendingBackup() {
-    if (!_pendingBackup) return;
-    mask = _pendingBackup;
-    _pendingBackup = null;
-    hideBackupBanner();
-    recountFilled();
-    renderMaskFull();
-    saveBackup();
-    showToast("Trabalho local restaurado.", "success");
-}
-function discardPendingBackup() {
-    _pendingBackup = null;
-    hideBackupBanner();
-    clearBackup();
 }
 
 function uint8ToBase64(arr) {
@@ -717,11 +696,6 @@ function attachEvents() {
         await apiLogout();
         location.reload();
     });
-
-    const backupApply = document.getElementById("backup-apply");
-    const backupDiscard = document.getElementById("backup-discard");
-    if (backupApply) backupApply.addEventListener("click", applyPendingBackup);
-    if (backupDiscard) backupDiscard.addEventListener("click", discardPendingBackup);
 
     const note = document.getElementById("problem-note");
     const noteCount = document.getElementById("problem-note-count");
@@ -1061,10 +1035,11 @@ async function submit() {
         todayCount++;
         document.getElementById("today-count").textContent = todayCount;
         loadQueueStats();
+        // Clear the canvas immediately instead of waiting out the flash — the
+        // operator shouldn't see the previous tile's painted mask lingering
+        // while they decide whether to pull the next one.
         flashSuccess();
-        setTimeout(() => {
-            showIdleScreen("Tile enviado ✓", "Clique para iniciar o próximo tile.");
-        }, 220);
+        showIdleScreen("Tile enviado ✓", "Clique para iniciar o próximo tile.");
     } catch (e) {
         const err = e.body?.detail?.error;
         if (err === "unfilled_pixels") {

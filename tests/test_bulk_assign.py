@@ -219,6 +219,148 @@ def test_next_does_not_auto_resume_manual_pause(client, operators, tiles):
     assert "resume" not in [a["action"] for a in _actions(tile["id"])]
 
 
+# ---------- manual pause beats queue pause when both coexist ----------
+
+def test_resume_prefers_manual_pause_over_queue_pause(
+    client, admin_user, operators, tiles
+):
+    """When an operator has BOTH a manually-paused tile AND queue-paused
+    tiles assigned (admin bulk-assigned after the manual pause, possibly with
+    smaller ids), `/assigned`, `/next-preview` and `/next` must all return the
+    manual-paused one. The operator clicked Pause expecting to come back to
+    THAT tile; the queue is a convenience layer that shouldn't override intent."""
+    op1 = token(client, "op1", "secret123")
+    adm = token(client, "admin", "admin123")
+
+    # Snapshot pending tiles in id order so we can pick "older" ids for the queue.
+    pending = client.get("/api/admin/tiles?status=pending", headers=h(adm)).json()
+    pending.sort(key=lambda t: t["id"])
+    # Reserve tiles[2] as the one op1 will manually pause (larger id than the
+    # queue tiles); admin will bulk-assign tiles[0] and tiles[1] afterwards.
+    manual_id = pending[2]["id"]
+    queue_ids = [pending[0]["id"], pending[1]["id"]]
+
+    # op1 claims the manual tile: /next walks by id ASC, so we need to burn
+    # through the smaller ids first. Easiest: admin moves tiles[0..1] out of
+    # pending temporarily by assigning them to another op, then restore by
+    # resetting AFTER op1 gets tiles[2]. Simpler path: assign tile[2] directly.
+    client.post("/api/admin/tiles/assign", headers=h(adm),
+                json={"tile_ids": [manual_id], "user_id": operators[0]["id"]})
+    # That put tile[2] on op1's queue as queue-paused; unpause it via /next
+    # (auto-resume fires for detail='queue').
+    t = client.get("/api/tiles/next", headers=h(op1)).json()
+    assert t["id"] == manual_id
+    assert t["paused_at"] is None
+
+    # Now op1 pauses it MANUALLY (detail=null).
+    empty = np.full(65536, 255, dtype=np.uint8).tobytes()
+    pr = client.post(f"/api/tiles/{manual_id}/pause",
+                     headers={**h(op1), "Content-Type": "application/octet-stream",
+                              "X-Tile-Version": str(t["version"])},
+                     content=empty)
+    assert pr.status_code == 200
+
+    # Admin bulk-assigns the two smaller-id tiles as a personal queue.
+    r = client.post("/api/admin/tiles/assign", headers=h(adm),
+                    json={"tile_ids": queue_ids, "user_id": operators[0]["id"]})
+    assert r.status_code == 200
+
+    # /assigned must surface the manually-paused tile, not the smallest-id
+    # queue-paused one.
+    ass = client.get("/api/tiles/assigned", headers=h(op1)).json()
+    assert ass["id"] == manual_id, (
+        f"expected manual-paused #{manual_id}, got #{ass['id']} — "
+        "queue tile shouldn't override manual pause"
+    )
+    assert ass["paused_at"] is not None
+
+    # /next-preview agrees (peek, no mutation).
+    peek = client.get("/api/tiles/next-preview", headers=h(op1)).json()
+    assert peek["id"] == manual_id
+
+    # /next ALSO returns the manual-paused one, and does NOT auto-resume it
+    # (manual pauses never auto-resume, regardless of ordering).
+    log_before = _actions(manual_id)
+    nxt = client.get("/api/tiles/next", headers=h(op1)).json()
+    assert nxt["id"] == manual_id
+    assert nxt["paused_at"] is not None
+    log_after = _actions(manual_id)
+    # Last action must still be the manual pause — /next did not log a new resume.
+    assert log_after == log_before
+    assert log_after[-1]["action"] == "pause" and log_after[-1]["detail"] is None
+
+    # The queue tiles stayed paused, untouched.
+    for qid in queue_ids:
+        assert _paused_at(qid) is not None
+
+
+def test_manual_pause_from_within_queue_brings_user_back_to_same_tile(
+    client, admin_user, operators, tiles
+):
+    """Scenario reported by an operator: admin pre-loaded a queue of tiles,
+    operator pulled the first one via /next (auto-resume), painted some,
+    then clicked Pause. On the next login, /assigned must return THAT tile,
+    not the next queue-paused one.
+
+    This is subtle because the paused tile has TWO pause log rows: the
+    original queue-pause (detail='queue') from the bulk-assign, and the
+    manual pause (detail=NULL) the operator just made. The tie-breaker
+    reads the MOST RECENT pause log, so the manual one wins."""
+    adm = token(client, "admin", "admin123")
+    op1 = token(client, "op1", "secret123")
+
+    # Admin bulk-assigns 3 tiles to op1 as a personal queue.
+    pending = client.get("/api/admin/tiles?status=pending", headers=h(adm)).json()
+    pending.sort(key=lambda t: t["id"])
+    queue_ids = [pending[0]["id"], pending[1]["id"], pending[2]["id"]]
+    client.post("/api/admin/tiles/assign", headers=h(adm),
+                json={"tile_ids": queue_ids, "user_id": operators[0]["id"]})
+
+    # op1 pulls the first queue tile (/next auto-resumes the oldest by id).
+    t = client.get("/api/tiles/next", headers=h(op1)).json()
+    assert t["id"] == queue_ids[0]
+    assert t["paused_at"] is None
+
+    # op1 pauses it manually while the two other queue tiles are still paused.
+    partial = np.full(65536, 255, dtype=np.uint8)
+    partial[:100] = 3  # some paint, rest empty
+    pr = client.post(f"/api/tiles/{t['id']}/pause",
+                     headers={**h(op1), "Content-Type": "application/octet-stream",
+                              "X-Tile-Version": str(t["version"])},
+                     content=partial.tobytes())
+    assert pr.status_code == 200
+
+    # Sanity: both the manual one and the queue ones are now paused.
+    assert _paused_at(queue_ids[0]) is not None
+    assert _paused_at(queue_ids[1]) is not None
+    assert _paused_at(queue_ids[2]) is not None
+    # And the pause log on the manual tile has two rows: queue then manual.
+    pause_logs = [a for a in _actions(queue_ids[0]) if a["action"] == "pause"]
+    assert [p["detail"] for p in pause_logs] == ["queue", None]
+
+    # op1 logs out and back in — `/assigned` must return the manually-paused
+    # tile (the one the operator was actively working on), not the next
+    # smaller-id queue tile.
+    ass = client.get("/api/tiles/assigned", headers=h(op1)).json()
+    assert ass["id"] == queue_ids[0], (
+        f"expected the just-paused tile #{queue_ids[0]}, got #{ass['id']} — "
+        "operator would lose their in-flight work to a queue tile"
+    )
+    assert ass["paused_at"] is not None
+
+    # /next also returns it, and does NOT auto-resume (last pause is manual).
+    log_before = _actions(queue_ids[0])
+    nxt = client.get("/api/tiles/next", headers=h(op1)).json()
+    assert nxt["id"] == queue_ids[0]
+    assert nxt["paused_at"] is not None
+    assert _actions(queue_ids[0]) == log_before  # no new resume
+
+    # Explicit /resume puts it back in play with the partial mask intact.
+    r = client.post(f"/api/tiles/{queue_ids[0]}/resume", headers=h(op1))
+    assert r.status_code == 200
+    assert r.json()["paused_at"] is None
+
+
 # ---------- atomicity ----------
 
 def test_bulk_assign_rollback_on_bad_tile(client, admin_user, operators, tiles):

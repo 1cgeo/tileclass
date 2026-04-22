@@ -127,14 +127,14 @@ tileclass/
 
 - Login → pintar em < 5s. Evitar modais/confirmações desnecessárias.
 - **Pré-carregar próximo tile:** `/api/tiles/next-preview` (peek sem atribuir) enquanto operador pinta o atual. Cache em `preloadedNext` é invalidado se o tile realmente atribuído em `/next` for diferente.
-- Após submeter: próximo tile carrega automaticamente (sem clique extra); flash verde 200ms antes.
+- Após submeter: tela limpa imediatamente (mask zerada, canvas coberto pela `idle-screen` "Tile enviado ✓"), flash verde fica por baixo da overlay. Operador clica para pedir o próximo tile — sem auto-avanço, pra ele ter um respiro entre cartas.
 - Pixels faltantes ao submeter: pisca vermelho 2s sobre o canvas.
 - **Pixels faltantes sempre visíveis:** linha `⚠ Faltam N pixels` (`#missing-line`) na sidebar enquanto incompleto; some em 0.
 - **Botão de submit auto-explicativo:** quando incompleto, troca para label `"Faltam N px"` com estilo `.incomplete` (laranja-aviso). Em tile `in_review`, label vira `"Aprovar revisão"`.
 - **Modo sempre visível:** pill `#mode-pill` no header — azul `CLASSIFICAR` ou laranja `REVISAR`. Atualizado em `loadTile()` junto com o `review-banner`.
 - **Barra de progresso:** `#progress-bar-fill` (gradiente azul→verde) reflete `filledCount/65536`.
 - **Atalhos visíveis:** badges `<span class="kbd">` inline nos botões (Tools/Undo/Redo/Submit) + seção `"Atalhos"` persistente no sidebar com as combinações principais + link "Ver todos" abrindo modal completo.
-- Backup do `Uint8Array` em `localStorage` durante edição; restaurar em caso de F5 (confirmação obrigatória antes de sobrescrever estado do servidor).
+- Backup do `Uint8Array` em `localStorage` durante edição. No F5 (ou reabrir o tile), `tryRestoreBackup()` compara com a máscara do servidor e, se diferirem, sobrescreve a in-memory silenciosamente — toast rápido `"Trabalho local restaurado."` como feedback. Sem banner de confirmação: o backup só é gravado durante pintura ativa e é apagado no submit, então só difere do servidor exatamente nos casos em que o usuário tinha trabalho não-submetido.
 - **JWT refresh proativo:** `api.js` decodifica o `exp` do token e agenda refresh 60s antes de expirar. Além disso, re-tenta automaticamente no 401 (reativo). O usuário não deve ver logout por expiração durante uso contínuo.
 
 ## Design system (CSS)
