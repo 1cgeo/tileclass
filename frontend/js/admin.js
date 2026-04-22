@@ -91,9 +91,17 @@ async function renderDashboard(root) {
     root.innerHTML = "";
     const grid = document.createElement("div");
     grid.className = "stats-grid";
+    // Cumulative classified count: every tile that finished the classify step.
+    // status='classified' awaits review, 'in_review' is under review, 'reviewed'
+    // completed it — all three imply the classify happened.
+    const classifiedTotal =
+        (d.totals_by_status.classified || 0)
+        + (d.totals_by_status.in_review || 0)
+        + (d.totals_by_status.reviewed || 0);
     grid.append(
         statCard("Total de tiles", d.total_tiles),
         statCard("% concluído", `${d.completion_percent}%`),
+        statCard("Classificados", classifiedTotal),
         statCard("Revisados", d.totals_by_status.reviewed || 0),
         statCard("Pendentes", d.totals_by_status.pending || 0),
         statCard("Em andamento", (d.totals_by_status.in_progress || 0) + (d.totals_by_status.in_review || 0)),

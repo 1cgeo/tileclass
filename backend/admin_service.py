@@ -59,7 +59,17 @@ def dashboard() -> dict:
         totals = {r["status"]: r["c"] for r in rows}
         total = sum(totals.values())
         reviewed = totals.get("reviewed", 0)
-        pct = round(100.0 * reviewed / total, 2) if total else 0.0
+        # "Classified" for dashboard metrics means "past the classify step" —
+        # includes tiles awaiting review, under review, and fully reviewed.
+        # The % concluded, rate per day, and ETA all use this definition so
+        # the numbers reflect classification throughput, which is the team's
+        # primary production metric (review is a secondary validation step).
+        classified_total = (
+            totals.get("classified", 0)
+            + totals.get("in_review", 0)
+            + totals.get("reviewed", 0)
+        )
+        pct = round(100.0 * classified_total / total, 2) if total else 0.0
         paused_count = conn.execute(
             "SELECT COUNT(*) c FROM tiles WHERE paused_at IS NOT NULL"
         ).fetchone()["c"]
@@ -111,13 +121,17 @@ def dashboard() -> dict:
             d["avg_seconds_per_tile"] = round(sum(combined) / len(combined), 1) if combined else 0.0
             per_op_list.append(d)
 
-        # ETA: remaining = total - reviewed; rate = tiles reviewed in last 7 days / day
+        # ETA: remaining = tiles not yet classified; rate = tiles classified
+        # in the last 7 days / 7. `classified_at` is set when a tile first
+        # transitions to 'classified' and is cleared on reset; filtering on
+        # status keeps re-classified-then-problem tiles out of the rate.
         rate_row = conn.execute(
             """SELECT COUNT(*) c FROM tiles
-               WHERE status='reviewed' AND reviewed_at >= datetime('now','-7 days')"""
+               WHERE status IN ('classified','in_review','reviewed')
+                 AND classified_at >= datetime('now','-7 days')"""
         ).fetchone()
         rate_per_day = (rate_row["c"] or 0) / 7.0
-        remaining = total - reviewed
+        remaining = total - classified_total
         eta_days = round(remaining / rate_per_day, 1) if rate_per_day > 0 else None
     finally:
         conn.close()

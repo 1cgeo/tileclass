@@ -154,6 +154,9 @@ input[type="range"] {
     font-size: 13px; color: var(--text-muted);
     padding: 3px 8px; background: var(--bg-2);
     border-radius: var(--radius-sm); border: 1px solid var(--border);
+    max-width: 40ch;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    min-width: 0;
 }
 .mode-pill {
     display: inline-flex; align-items: center;
@@ -169,6 +172,21 @@ input[type="range"] {
 .mode-pill.mode-review {
     background: #fff1dc; color: var(--warn);
     border-color: #f0c07a;
+}
+#idle-message.idle-hint-classify,
+#idle-message.idle-hint-review {
+    display: inline-block; padding: 4px 10px; border-radius: 99px;
+    font-weight: 700; font-size: 13px; letter-spacing: 0.02em;
+    max-width: 100%;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#idle-message.idle-hint-classify {
+    background: var(--accent-soft); color: var(--accent-hi);
+    border: 1px solid var(--accent);
+}
+#idle-message.idle-hint-review {
+    background: #fff1dc; color: var(--warn);
+    border: 1px solid #f0c07a;
 }
 .review-banner {
     background: #fff1dc; color: #7a4a00;

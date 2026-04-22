@@ -62,7 +62,9 @@ def test_dashboard_reflects_real_actions(client, admin_user, operators, tiles):
     assert totals.get("problem") == 1
     assert totals.get("pending") == 6
     assert d["total_tiles"] == 10
-    assert d["completion_percent"] == 10.0  # 1 reviewed / 10 total
+    # completion_percent tracks the CLASSIFY step (primary production metric):
+    # 2 classified + 1 reviewed (which also passed classify) = 3 of 10.
+    assert d["completion_percent"] == 30.0
 
 
 def test_dashboard_per_operator_counts_match_actions(client, admin_user, operators, tiles):
@@ -109,6 +111,34 @@ def test_dashboard_empty_state_no_crash(client, admin_user):
     assert d["eta_days"] is None
     assert d["avg_classify_seconds"] == 0.0
     assert d["avg_review_seconds"] == 0.0
+
+
+def test_dashboard_percent_and_rate_track_classification_not_review(
+    client, admin_user, operators, tiles
+):
+    """`completion_percent`, `rate_per_day` and `eta_days` all key off the
+    classify step — a tile that is classified but not yet reviewed must
+    still count toward completion and throughput. Review is a secondary
+    validation step; the team's output metric is classifications done."""
+    t1 = token(client, "op1", "secret123")
+
+    # Classify 4 of 10 tiles. Don't review anything.
+    for _ in range(4):
+        tile = client.get("/api/tiles/next", headers=h(t1)).json()
+        _classify(client, t1, tile["id"])
+
+    adm = token(client, "admin", "admin123")
+    d = client.get("/api/admin/dashboard", headers=h(adm)).json()
+
+    assert d["totals_by_status"].get("classified") == 4
+    assert d["totals_by_status"].get("reviewed") is None or \
+           d["totals_by_status"].get("reviewed") == 0
+    # 4 classified / 10 total = 40% — old behavior would have shown 0%.
+    assert d["completion_percent"] == 40.0
+    # Rate counts classifications in the last 7 days, so 4/7 = ~0.57.
+    assert d["rate_per_day"] == round(4 / 7.0, 2)
+    # ETA: 6 remaining / 0.57 per day ≈ 10.5 days — must be positive.
+    assert d["eta_days"] is not None and d["eta_days"] > 0
 
 
 def test_dashboard_avg_durations_split_by_action(client, admin_user, operators, tiles):

@@ -33,3 +33,13 @@ export function escapeHtml(s) {
         ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]
     );
 }
+
+// Clip a tile name for inline display ("Tile: X (#42)", etc.). Imported CSVs
+// can carry long descriptive names that blow up header/idle-screen layouts.
+// Uses an actual ellipsis char to keep the visual width closer to `max`.
+export function truncateName(name, max = 32) {
+    if (name == null) return "";
+    const s = String(name);
+    if (s.length <= max) return s;
+    return s.slice(0, Math.max(0, max - 1)) + "…";
+}

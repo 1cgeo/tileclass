@@ -12,7 +12,7 @@ function expandBbox(bbox, factor) {
     const hw = (e - w) * factor / 2, hh = (n - s) * factor / 2;
     return [cx - hw, cy - hh, cx + hw, cy + hh];
 }
-import { hexToRgb, blobToImage } from "./utils.js";
+import { hexToRgb, blobToImage, truncateName } from "./utils.js";
 import {
     paintAt as corePaintAt,
     paintLine as corePaintLine,
@@ -164,7 +164,7 @@ export async function initEditor(user) {
         preloadNext();
         return;
     }
-    showIdleScreen("Pronto para começar", "Clique para receber um tile.");
+    showIdleScreen("Pronto para começar", "Verificando próximo tile...", { previewNext: true });
 }
 
 async function loadTodayCount() {
@@ -293,7 +293,7 @@ async function loadTile(t, preloadedMask = null) {
     hideNoTilesScreen();
     hideIdleScreen();
     hidePausedResumeScreen();
-    document.getElementById("tile-name-label").textContent = `Tile: ${t.name} (#${t.id})`;
+    document.getElementById("tile-name-label").textContent = `Tile: ${truncateName(t.name)} (#${t.id})`;
     const reviewBanner = document.getElementById("review-banner");
     const modePill = document.getElementById("mode-pill");
     if (t.status === "in_review") {
@@ -1039,7 +1039,7 @@ async function submit() {
         // operator shouldn't see the previous tile's painted mask lingering
         // while they decide whether to pull the next one.
         flashSuccess();
-        showIdleScreen("Tile enviado ✓", "Clique para iniciar o próximo tile.");
+        showIdleScreen("Tile enviado ✓", "Verificando próximo tile...", { previewNext: true });
     } catch (e) {
         const err = e.body?.detail?.error;
         if (err === "unfilled_pixels") {
@@ -1078,10 +1078,14 @@ function flashMissing() {
     step();
 }
 
-function showIdleScreen(title, message) {
+function showIdleScreen(title, message, { previewNext = false } = {}) {
     hidePausedResumeScreen();
     document.getElementById("idle-title").textContent = title;
-    document.getElementById("idle-message").textContent = message;
+    const msgEl = document.getElementById("idle-message");
+    msgEl.textContent = message;
+    // Drop any hint-pill styling from a previous idle showing while the new
+    // preview (if any) is being fetched.
+    msgEl.classList.remove("idle-hint-classify", "idle-hint-review");
     document.getElementById("idle-screen").classList.remove("hidden");
     setTimeout(() => document.getElementById("idle-start").focus(), 0);
     currentTile = null;
@@ -1091,6 +1095,40 @@ function showIdleScreen(title, message) {
     writeMaskPixels(0, 0, TILE, TILE);
     blitMask();
     updateProgress();
+    // Tell the operator up front whether the next tile will be a
+    // classification or a review — they should know what they're about
+    // to commit to before clicking.
+    if (previewNext) updateIdleNextHint();
+}
+
+function describeNextPreview(t) {
+    if (!t) return { label: "Fila vazia", kind: null };
+    // status='classified' → /next will promote to 'in_review' for this user.
+    // status='pending'    → will become 'in_progress'.
+    // status='in_progress'/'in_review' → user's own resume (bulk-assign queue).
+    let kind, verb;
+    if (t.status === "classified") { kind = "review"; verb = "Revisar"; }
+    else if (t.status === "in_review") { kind = "review"; verb = "Continuar revisão"; }
+    else if (t.status === "in_progress") { kind = "classify"; verb = "Continuar classificação"; }
+    else { kind = "classify"; verb = "Classificar"; }
+    return { label: `Próximo: ${verb} · ${truncateName(t.name)} (#${t.id})`, kind };
+}
+
+async function updateIdleNextHint() {
+    const msg = document.getElementById("idle-message");
+    const idle = document.getElementById("idle-screen");
+    if (!msg || !idle) return;
+    try {
+        const next = await apiGet("/api/tiles/next-preview");
+        // Avoid overwriting if the user already left the idle screen while the
+        // preview was in flight (e.g. clicked "Iniciar tile" quickly).
+        if (idle.classList.contains("hidden")) return;
+        const { label, kind } = describeNextPreview(next);
+        msg.textContent = label;
+        msg.classList.remove("idle-hint-classify", "idle-hint-review");
+        if (kind === "review") msg.classList.add("idle-hint-review");
+        else if (kind === "classify") msg.classList.add("idle-hint-classify");
+    } catch {}
 }
 
 function hideIdleScreen() {
@@ -1193,7 +1231,7 @@ async function pauseTile() {
 function showPausedResumeScreen(tile) {
     const msg = document.getElementById("paused-resume-message");
     if (msg) {
-        msg.textContent = `Tile: ${tile.name} (#${tile.id}). Deseja continuar de onde parou?`;
+        msg.textContent = `Tile: ${truncateName(tile.name)} (#${tile.id}). Deseja continuar de onde parou?`;
     }
     const btn = document.getElementById("paused-resume-continue");
     if (btn) btn.dataset.tileId = String(tile.id);
