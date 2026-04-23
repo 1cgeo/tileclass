@@ -17,6 +17,7 @@ from .models import (
     LoginIn, TokenOut, RefreshIn, UserOut, ClassOut, TileOut,
     ReportProblemIn, CreateUserIn, DashboardOut, BulkTileIdsIn, SetActiveIn,
     SetCanReviewIn, AssignTileIn, BulkAssignIn, ResetReasonIn,
+    BulkReportProblemIn,
 )
 
 
@@ -398,6 +399,17 @@ def admin_tile_thumbnail(tile_id: int = Path(ge=1), size: int = Query(128, ge=16
     )
 
 
+@app.get("/api/admin/tiles/{tile_id}/satellite-thumbnail")
+def admin_tile_satellite_thumbnail(tile_id: int = Path(ge=1),
+                                   size: int = Query(128, ge=16, le=512),
+                                   _: auth.CurrentUser = Depends(auth.require_admin)):
+    return Response(
+        content=admin_service.tile_satellite_thumbnail(tile_id, size=size),
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
+
+
 @app.get("/api/admin/tiles/problems")
 def admin_problems(_: auth.CurrentUser = Depends(auth.require_admin)):
     return admin_service.list_problems()
@@ -418,6 +430,12 @@ def admin_bulk_reset(body: BulkTileIdsIn, u: auth.CurrentUser = Depends(auth.req
 def admin_bulk_rereview(body: BulkTileIdsIn, u: auth.CurrentUser = Depends(auth.require_admin)):
     n = admin_service.re_review_many(body.ids, u.id, reason=body.reason)
     return {"affected": n}
+
+
+@app.post("/api/admin/tiles/bulk/report-problem")
+def admin_bulk_report_problem(body: BulkReportProblemIn,
+                              u: auth.CurrentUser = Depends(auth.require_admin)):
+    return admin_service.report_problem_many(body.ids, u.id, body.note)
 
 
 @app.post("/api/admin/tiles/{tile_id}/reset")

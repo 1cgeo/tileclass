@@ -250,6 +250,7 @@ async function renderTiles(root) {
             <button id="bulk-assign">Atribuir a operador…</button>
             <button id="bulk-reset">Resetar</button>
             <button id="bulk-rereview">Re-revisar</button>
+            <button id="bulk-report-problem">Reportar problema…</button>
             <button id="bulk-block">Bloquear</button>
             <button id="bulk-unblock">Desbloquear</button>
             <button id="bulk-clear">Limpar seleção</button>
@@ -263,9 +264,16 @@ async function renderTiles(root) {
     document.getElementById("bulk-assign").addEventListener("click", bulkAssign);
     document.getElementById("bulk-reset").addEventListener("click", bulkReset);
     document.getElementById("bulk-rereview").addEventListener("click", bulkReReview);
+    document.getElementById("bulk-report-problem").addEventListener("click", bulkReportProblem);
     document.getElementById("bulk-block").addEventListener("click", bulkBlock);
     document.getElementById("bulk-unblock").addEventListener("click", bulkUnblock);
-    document.getElementById("bulk-clear").addEventListener("click", () => { selectedIds.clear(); loadAndRender(); });
+    document.getElementById("bulk-clear").addEventListener("click", () => {
+        selectedIds.clear();
+        const target = document.getElementById("tiles-list");
+        target.querySelectorAll(".selected").forEach(el => el.classList.remove("selected"));
+        target.querySelectorAll("input[type=checkbox]").forEach(cb => { cb.checked = false; });
+        updateBulkBar();
+    });
     await loadAndRender();
 }
 
@@ -334,6 +342,54 @@ function updateBulkBar() {
     bar.classList.toggle("hidden", selectedIds.size === 0);
 }
 
+function buildTableRow(t) {
+    const tr = document.createElement("tr");
+    tr.dataset.id = t.id;
+    if (selectedIds.has(t.id)) tr.classList.add("selected");
+    const cb = document.createElement("input"); cb.type = "checkbox"; cb.checked = selectedIds.has(t.id);
+    cb.addEventListener("change", () => toggleSelect(t.id, cb.checked, tr));
+    const tdCb = document.createElement("td"); tdCb.appendChild(cb);
+    const tdStatus = document.createElement("td");
+    const chip = document.createElement("span");
+    if (t.paused_at) {
+        chip.className = "chip paused";
+        chip.textContent = t.status === "in_review" ? "pausado (revisão)" : "pausado";
+        chip.title = `Pausado em ${t.paused_at}`;
+    } else {
+        chip.className = `chip ${t.status}`;
+        chip.textContent = t.status;
+        if (t.status === "blocked" && t.blocked_from) chip.title = `Antes: ${t.blocked_from}`;
+    }
+    tdStatus.appendChild(chip);
+    const tdAct = document.createElement("td");
+    tdAct.append(
+        btn("Ver", () => openViewer(t.id)),
+        btn("Resetar", () => resetOne(t.id)),
+    );
+    if (t.status === "reviewed") tdAct.append(btn("Re-revisar", () => reReviewOne(t.id)));
+    if (t.status === "pending" || t.status === "classified") {
+        tdAct.append(btn("Atribuir", () => assignOne(t)));
+    }
+    if (t.status === "in_progress" || t.status === "in_review") {
+        if (!t.paused_at) {
+            tdAct.append(btn("Pausar", () => adminPauseOne(t.id)));
+        }
+        tdAct.append(btn("Liberar operador", () => unassignOne(t.id)));
+    }
+    if (isBlockable(t)) {
+        tdAct.append(btn("Bloquear", () => blockAction([t.id])));
+    }
+    if (t.status === "blocked") {
+        tdAct.append(btn("Desbloquear", () => blockAction([t.id], { unblock: true })));
+    }
+    tr.append(tdCb, td(t.id), td(t.name), tdStatus,
+              td(classifierCell(t)), td(reviewerCell(t)),
+              td(finishedCell(t.classified_at, t.status === "in_progress")),
+              td(finishedCell(t.reviewed_at, t.status === "in_review")),
+              tdAct);
+    return tr;
+}
+
 function renderTable(root, tiles) {
     const wrap = document.createElement("div");
     wrap.className = "admin-table-wrap";
@@ -356,53 +412,7 @@ function renderTable(root, tiles) {
     });
     table.appendChild(thead);
     const tbody = document.createElement("tbody");
-    for (const t of tiles) {
-        const tr = document.createElement("tr");
-        tr.dataset.id = t.id;
-        if (selectedIds.has(t.id)) tr.classList.add("selected");
-        const cb = document.createElement("input"); cb.type = "checkbox"; cb.checked = selectedIds.has(t.id);
-        cb.addEventListener("change", () => toggleSelect(t.id, cb.checked, tr));
-        const tdCb = document.createElement("td"); tdCb.appendChild(cb);
-        const tdStatus = document.createElement("td");
-        const chip = document.createElement("span");
-        if (t.paused_at) {
-            chip.className = "chip paused";
-            chip.textContent = t.status === "in_review" ? "pausado (revisão)" : "pausado";
-            chip.title = `Pausado em ${t.paused_at}`;
-        } else {
-            chip.className = `chip ${t.status}`;
-            chip.textContent = t.status;
-            if (t.status === "blocked" && t.blocked_from) chip.title = `Antes: ${t.blocked_from}`;
-        }
-        tdStatus.appendChild(chip);
-        const tdAct = document.createElement("td");
-        tdAct.append(
-            btn("Ver", () => openViewer(t.id)),
-            btn("Resetar", () => resetOne(t.id)),
-        );
-        if (t.status === "reviewed") tdAct.append(btn("Re-revisar", () => reReviewOne(t.id)));
-        if (t.status === "pending" || t.status === "classified") {
-            tdAct.append(btn("Atribuir", () => assignOne(t)));
-        }
-        if (t.status === "in_progress" || t.status === "in_review") {
-            if (!t.paused_at) {
-                tdAct.append(btn("Pausar", () => adminPauseOne(t.id)));
-            }
-            tdAct.append(btn("Liberar operador", () => unassignOne(t.id)));
-        }
-        if (isBlockable(t)) {
-            tdAct.append(btn("Bloquear", () => blockAction([t.id])));
-        }
-        if (t.status === "blocked") {
-            tdAct.append(btn("Desbloquear", () => blockAction([t.id], { unblock: true })));
-        }
-        tr.append(tdCb, td(t.id), td(t.name), tdStatus,
-                  td(classifierCell(t)), td(reviewerCell(t)),
-                  td(finishedCell(t.classified_at, t.status === "in_progress")),
-                  td(finishedCell(t.reviewed_at, t.status === "in_review")),
-                  tdAct);
-        tbody.appendChild(tr);
-    }
+    for (const t of tiles) tbody.appendChild(buildTableRow(t));
     table.appendChild(tbody);
     wrap.appendChild(table);
     root.appendChild(wrap);
@@ -417,55 +427,84 @@ function renderTable(root, tiles) {
     });
 }
 
+function buildGridCard(t) {
+    const card = document.createElement("div");
+    card.className = "thumb-card" + (selectedIds.has(t.id) ? " selected" : "");
+    card.dataset.id = t.id;
+    const img = document.createElement("img");
+    img.alt = `Tile ${t.id}`;
+    img.className = "thumb-skeleton";
+    // Backend picks mask vs satellite based on whether the tile has any
+    // painted pixels, so empty masks (pending / problem / freshly-assigned)
+    // still show something meaningful without frontend branching.
+    apiGetBlob(`/api/admin/tiles/${t.id}/thumbnail?size=128`)
+        .then(b => { img.src = URL.createObjectURL(b); img.classList.remove("thumb-skeleton"); })
+        .catch(() => { img.alt = "?"; img.classList.remove("thumb-skeleton"); });
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    meta.textContent = `#${t.id} · ${t.status}`;
+    const whoText =
+        t.reviewed_by_username ? `revisado por ${t.reviewed_by_username}` :
+        t.classified_by_username ? `classificado por ${t.classified_by_username}` :
+        t.assigned_to_username ? `atribuído a ${t.assigned_to_username}` : "";
+    card.append(img, meta);
+    if (whoText) {
+        const who = document.createElement("div");
+        who.className = "meta-dim";
+        who.textContent = whoText;
+        card.append(who);
+    }
+    if (t.status === "pending" || t.status === "classified") {
+        const assignBtn = document.createElement("button");
+        assignBtn.className = "card-action";
+        assignBtn.textContent = t.status === "classified" ? "Atribuir revisor" : "Atribuir";
+        assignBtn.addEventListener("click", (ev) => {
+            ev.stopPropagation();
+            assignOne(t);
+        });
+        card.appendChild(assignBtn);
+    }
+    if (isBlockable(t)) {
+        card.appendChild(btn("Bloquear", () => blockAction([t.id]), "card-action"));
+    } else if (t.status === "blocked") {
+        card.appendChild(btn("Desbloquear", () => blockAction([t.id], { unblock: true }), "card-action"));
+    }
+    card.addEventListener("click", (ev) => {
+        if (ev.shiftKey) toggleSelect(t.id, !selectedIds.has(t.id), card);
+        else openViewer(t.id);
+    });
+    return card;
+}
+
 function renderGrid(root, tiles) {
     const grid = document.createElement("div");
     grid.className = "thumb-grid";
-    for (const t of tiles) {
-        const card = document.createElement("div");
-        card.className = "thumb-card" + (selectedIds.has(t.id) ? " selected" : "");
-        card.dataset.id = t.id;
-        const img = document.createElement("img");
-        img.alt = `Tile ${t.id}`;
-        img.className = "thumb-skeleton";
-        apiGetBlob(`/api/admin/tiles/${t.id}/thumbnail?size=128`)
-            .then(b => { img.src = URL.createObjectURL(b); img.classList.remove("thumb-skeleton"); })
-            .catch(() => { img.alt = "?"; img.classList.remove("thumb-skeleton"); });
-        const meta = document.createElement("div");
-        meta.className = "meta";
-        meta.textContent = `#${t.id} · ${t.status}`;
-        const whoText =
-            t.reviewed_by_username ? `revisado por ${t.reviewed_by_username}` :
-            t.classified_by_username ? `classificado por ${t.classified_by_username}` :
-            t.assigned_to_username ? `atribuído a ${t.assigned_to_username}` : "";
-        card.append(img, meta);
-        if (whoText) {
-            const who = document.createElement("div");
-            who.className = "meta-dim";
-            who.textContent = whoText;
-            card.append(who);
-        }
-        if (t.status === "pending" || t.status === "classified") {
-            const assignBtn = document.createElement("button");
-            assignBtn.className = "card-action";
-            assignBtn.textContent = t.status === "classified" ? "Atribuir revisor" : "Atribuir";
-            assignBtn.addEventListener("click", (ev) => {
-                ev.stopPropagation();
-                assignOne(t);
-            });
-            card.appendChild(assignBtn);
-        }
-        if (isBlockable(t)) {
-            card.appendChild(btn("Bloquear", () => blockAction([t.id]), "card-action"));
-        } else if (t.status === "blocked") {
-            card.appendChild(btn("Desbloquear", () => blockAction([t.id], { unblock: true }), "card-action"));
-        }
-        card.addEventListener("click", (ev) => {
-            if (ev.shiftKey) toggleSelect(t.id, !selectedIds.has(t.id), card);
-            else openViewer(t.id);
-        });
-        grid.appendChild(card);
-    }
+    for (const t of tiles) grid.appendChild(buildGridCard(t));
     root.appendChild(grid);
+}
+
+// In-place swap of a row/card for one tile — avoids the full list reload on
+// single-tile actions (assign, reset, unassign, block…). Silent no-op if the
+// row isn't currently rendered (e.g. user changed filters meanwhile).
+async function refreshTileInPlace(id) {
+    try {
+        const fresh = await apiGet(`/api/tiles/${id}`);
+        if (listView === "table") {
+            const oldTr = document.querySelector(`tr[data-id="${id}"]`);
+            if (oldTr) oldTr.replaceWith(buildTableRow(fresh));
+        } else {
+            const oldCard = document.querySelector(`.thumb-card[data-id="${id}"]`);
+            if (oldCard) oldCard.replaceWith(buildGridCard(fresh));
+        }
+    } catch {
+        // Fallback: if the single-tile fetch fails, fall back to the full reload
+        // so the UI doesn't get stuck showing stale state.
+        loadAndRender();
+    }
+}
+
+async function refreshTilesInPlace(ids) {
+    await Promise.all(ids.map(refreshTileInPlace));
 }
 
 function toggleSelect(id, on, el) {
@@ -512,7 +551,10 @@ function wireConfirmModal() {
     });
 }
 
-function confirmDestructive({ title, description, ids, confirmLabel = "Confirmar", danger = true }) {
+function confirmDestructive({
+    title, description, ids, confirmLabel = "Confirmar", danger = true,
+    reasonLabel, reasonPlaceholder, reasonRequired = false, reasonMaxLength = 500,
+}) {
     return new Promise((resolve) => {
         const modal = document.getElementById("modal-confirm");
         document.getElementById("confirm-title").textContent = title;
@@ -522,22 +564,44 @@ function confirmDestructive({ title, description, ids, confirmLabel = "Confirmar
         const preview = ids.slice(0, 20);
         list.textContent = `IDs: ${preview.join(", ")}${ids.length > 20 ? ` … (+${ids.length - 20})` : ""}`;
         const reason = document.getElementById("confirm-reason");
+        const reasonLabelEl = modal.querySelector(".confirm-reason-label");
+        // Remember original label/placeholder/maxlength so we can restore them
+        // on close — other callers share this modal and expect the defaults.
+        const origLabelText = reasonLabelEl?.firstChild?.nodeValue;
+        const origPlaceholder = reason.placeholder;
+        const origMaxLength = reason.maxLength;
+        if (reasonLabel && reasonLabelEl?.firstChild) reasonLabelEl.firstChild.nodeValue = reasonLabel;
+        if (reasonPlaceholder !== undefined) reason.placeholder = reasonPlaceholder;
+        if (reasonMaxLength) reason.maxLength = reasonMaxLength;
         reason.value = "";
         const ok = document.getElementById("confirm-ok");
         ok.textContent = confirmLabel;
         ok.classList.toggle("danger", !!danger);
         const cancel = document.getElementById("confirm-cancel");
+        const updateOkState = () => {
+            ok.disabled = reasonRequired && !reason.value.trim();
+        };
+        updateOkState();
 
         const cleanup = (result) => {
             modal.classList.add("hidden");
             ok.removeEventListener("click", onOk);
             cancel.removeEventListener("click", onCancel);
+            reason.removeEventListener("input", updateOkState);
+            ok.disabled = false;
+            if (origLabelText && reasonLabelEl?.firstChild) reasonLabelEl.firstChild.nodeValue = origLabelText;
+            reason.placeholder = origPlaceholder;
+            reason.maxLength = origMaxLength;
             resolve(result);
         };
-        const onOk = () => cleanup({ confirmed: true, reason: reason.value.trim() });
+        const onOk = () => {
+            if (reasonRequired && !reason.value.trim()) return;
+            cleanup({ confirmed: true, reason: reason.value.trim() });
+        };
         const onCancel = () => cleanup({ confirmed: false });
         ok.addEventListener("click", onOk);
         cancel.addEventListener("click", onCancel);
+        reason.addEventListener("input", updateOkState);
         modal.classList.remove("hidden");
         setTimeout(() => reason.focus(), 50);
     });
@@ -552,7 +616,7 @@ async function resetOne(id) {
     if (!r.confirmed) return;
     await apiPostJson(`/api/admin/tiles/${id}/reset`, { reason: r.reason });
     showToast("Resetado.", "success");
-    loadAndRender();
+    refreshTileInPlace(id);
 }
 async function assignOne(tile) {
     const users = await apiGet("/api/admin/users");
@@ -579,7 +643,7 @@ async function assignOne(tile) {
         user_id: r.user_id, reason: r.reason || null,
     });
     showToast("Tile atribuído.", "success");
-    loadAndRender();
+    refreshTileInPlace(tile.id);
 }
 
 function promptAssign({ title, description, users }) {
@@ -638,7 +702,7 @@ async function unassignOne(id) {
     if (!r.confirmed) return;
     await apiPostJson(`/api/admin/tiles/${id}/unassign`, { reason: r.reason });
     showToast("Operador liberado.", "success");
-    loadAndRender();
+    refreshTileInPlace(id);
 }
 async function adminPauseOne(id) {
     const r = await confirmDestructive({
@@ -649,7 +713,7 @@ async function adminPauseOne(id) {
     if (!r.confirmed) return;
     await apiPostJson(`/api/admin/tiles/${id}/admin-pause`, { reason: r.reason });
     showToast("Tile pausado.", "success");
-    loadAndRender();
+    refreshTileInPlace(id);
 }
 async function reReviewOne(id) {
     const r = await confirmDestructive({
@@ -660,11 +724,10 @@ async function reReviewOne(id) {
     if (!r.confirmed) return;
     await apiPostJson(`/api/admin/tiles/${id}/re-review`, { reason: r.reason });
     showToast("Enviado para nova revisão.", "success");
-    loadAndRender();
+    refreshTileInPlace(id);
 }
 // Unified block/unblock for single-id and multi-id batches. Returns true on
-// success so viewer callers can re-render the tile without the default
-// full-list reload (reload=false).
+// success so viewer callers can skip the default in-place refresh (reload=false).
 async function blockAction(ids, { unblock = false, reload = true } = {}) {
     if (!ids.length) return false;
     const verb = unblock ? "Desbloquear" : "Bloquear";
@@ -680,7 +743,7 @@ async function blockAction(ids, { unblock = false, reload = true } = {}) {
         { ids, reason: r.reason },
     );
     showToast(`${resp.affected} ${unblock ? "desbloqueado(s)" : "bloqueado(s)"}.`, "success");
-    if (reload) loadAndRender();
+    if (reload) refreshTilesInPlace(ids);
     return true;
 }
 
@@ -706,7 +769,8 @@ async function bulkReset() {
     const resp = await apiPostJson("/api/admin/tiles/bulk/reset", { ids, reason: r.reason });
     showToast(`${resp.affected} resetados.`, "success");
     selectedIds.clear();
-    loadAndRender();
+    updateBulkBar();
+    refreshTilesInPlace(ids);
 }
 async function bulkReReview() {
     if (selectedIds.size === 0) return;
@@ -720,7 +784,29 @@ async function bulkReReview() {
     const resp = await apiPostJson("/api/admin/tiles/bulk/re-review", { ids, reason: r.reason });
     showToast(`${resp.affected} enviados.`, "success");
     selectedIds.clear();
-    loadAndRender();
+    updateBulkBar();
+    refreshTilesInPlace(ids);
+}
+
+async function bulkReportProblem() {
+    if (selectedIds.size === 0) return;
+    const ids = [...selectedIds];
+    const r = await confirmDestructive({
+        title: `Reportar problema em ${ids.length} tile(s)`,
+        description: "Os tiles selecionados vão para o status 'problem' com a nota abaixo. A máscara é apagada e a atribuição liberada.",
+        ids, confirmLabel: `Reportar ${ids.length}`, danger: true,
+        reasonLabel: "Descrição do problema (obrigatória):",
+        reasonPlaceholder: "Ex: imagem com nuvem, bbox incorreta, tile fora da área de interesse...",
+        reasonRequired: true, reasonMaxLength: 2000,
+    });
+    if (!r.confirmed) return;
+    const resp = await apiPostJson("/api/admin/tiles/bulk/report-problem", {
+        ids, note: r.reason,
+    });
+    showToast(`${resp.affected} tile(s) reportados.`, "success");
+    selectedIds.clear();
+    updateBulkBar();
+    refreshTilesInPlace(ids);
 }
 
 async function bulkAssign() {
@@ -768,7 +854,8 @@ async function bulkAssign() {
     });
     showToast(`${resp.affected} tile(s) atribuídos (pausados).`, "success");
     selectedIds.clear();
-    loadAndRender();
+    updateBulkBar();
+    refreshTilesInPlace(ids);
 }
 
 async function openViewer(tileId) {

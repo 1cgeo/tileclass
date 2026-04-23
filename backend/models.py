@@ -39,9 +39,11 @@ class TileOut(BaseModel):
     bbox_north: float
     status: str
     assigned_to: Optional[int]
+    assigned_to_username: Optional[str] = None
     classified_by: Optional[int]
     classified_by_username: Optional[str] = None
     reviewed_by: Optional[int]
+    reviewed_by_username: Optional[str] = None
     version: int = 1
     filled_pixels: int = 0
     paused_at: Optional[str] = None
@@ -55,6 +57,11 @@ class ReportProblemIn(BaseModel):
 class BulkTileIdsIn(BaseModel):
     ids: list[int]
     reason: Optional[str] = Field(default=None, max_length=500)
+
+
+class BulkReportProblemIn(BaseModel):
+    ids: list[int] = Field(min_length=1)
+    note: str = Field(min_length=1, max_length=2000)
 
 
 class ResetReasonIn(BaseModel):

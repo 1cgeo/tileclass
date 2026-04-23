@@ -2,10 +2,12 @@
 from datetime import datetime, timezone
 import io
 import json
+import math
 from fastapi import HTTPException
 from PIL import Image
 import numpy as np
 
+from . import mbtiles_service
 from .database import connect, transaction, log_action
 from .mask_utils import empty_mask_png, decode_mask, TILE_SIZE, PIXELS
 from .auth import hash_password
@@ -286,6 +288,37 @@ def reset_many(tile_ids: list[int], admin_id: int, reason: str | None = None) ->
 
 def reset_tile(tile_id: int, admin_id: int, reason: str | None = None) -> None:
     reset_many([tile_id], admin_id, reason)
+
+
+def report_problem_many(tile_ids: list[int], admin_id: int, note: str) -> dict:
+    """Admin flags N tiles as 'problem' with a shared note.
+
+    Mirrors the operator-side report: wipes the mask and frees the slot.
+    Accepts any current state — blocked tiles get their blocked_from cleared
+    since the state machine leaves that branch."""
+    if not tile_ids:
+        return {"affected": 0}
+    note = (note or "").strip()
+    if not note:
+        raise HTTPException(400, "note is required")
+    if len(note) > 2000:
+        note = note[:2000]
+    empty = empty_mask_png()
+    with transaction("IMMEDIATE") as conn:
+        count = 0
+        for tid in tile_ids:
+            row = conn.execute("SELECT id FROM tiles WHERE id=?", (tid,)).fetchone()
+            if not row:
+                continue
+            conn.execute(
+                """UPDATE tiles SET status='problem', problem_note=?, data_png=?,
+                   assigned_to=NULL, paused_at=NULL, blocked_from=NULL,
+                   version=version+1 WHERE id=?""",
+                (note, empty, tid),
+            )
+            log_action(conn, admin_id, tid, "report_problem", note)
+            count += 1
+    return {"affected": count}
 
 
 def re_review_many(tile_ids: list[int], admin_id: int, strict: bool = False,
@@ -633,7 +666,10 @@ def set_user_active(user_id: int, active: bool, admin_id: int) -> dict:
 
 
 def tile_thumbnail(tile_id: int, size: int = 128) -> bytes:
-    """Return a PNG thumbnail of the classification mask colorized using class colors."""
+    """Return the best thumbnail for the admin grid: colorized mask if the tile
+    has any painted pixels, otherwise the satellite backdrop so empty tiles
+    (pending / problem / freshly-assigned) still give the admin something to
+    look at. Falls back to the transparent empty mask if MBTiles isn't open."""
     from .config import get_config
     conn = connect()
     try:
@@ -654,6 +690,15 @@ def tile_thumbnail(tile_id: int, size: int = 128) -> bytes:
             raw = decode_mask(png)
         except (ValueError, OSError):
             raw = b"\xff" * PIXELS
+    # Empty mask (no painted pixels) → prefer satellite backdrop when available.
+    # `count(b"\xff")` is a C-level byte scan on the bytes object, cheaper than
+    # any numpy detour — we only fall through to the colorized render when
+    # there's at least one non-255 pixel, or MBTiles isn't open.
+    if raw.count(b"\xff") == PIXELS and mbtiles_service.is_open():
+        try:
+            return _tile_satellite_png(tile_id, size)
+        except HTTPException:
+            pass
     arr = np.frombuffer(raw, dtype=np.uint8).reshape(TILE_SIZE, TILE_SIZE)
     classes = get_config()["classes"]
     lut = np.zeros((256, 4), dtype=np.uint8)
@@ -667,3 +712,77 @@ def tile_thumbnail(tile_id: int, size: int = 128) -> bytes:
     buf = io.BytesIO()
     img.save(buf, format="PNG", optimize=True)
     return buf.getvalue()
+
+
+def _lon_to_tile_x(lon: float, z: int) -> float:
+    return (lon + 180.0) / 360.0 * (1 << z)
+
+
+def _lat_to_tile_y(lat: float, z: int) -> float:
+    # Web Mercator: clamp to valid range to avoid math domain errors near poles.
+    lat = max(min(lat, 85.05112878), -85.05112878)
+    lat_rad = math.radians(lat)
+    return (1.0 - math.asinh(math.tan(lat_rad)) / math.pi) / 2.0 * (1 << z)
+
+
+def _tile_satellite_png(tile_id: int, size: int = 128) -> bytes:
+    """Composite satellite imagery from MBTiles over the tile bbox and return a PNG.
+    Shared by the empty-mask fallback in `tile_thumbnail` and the dedicated
+    `/satellite-thumbnail` endpoint. Raises 404 if MBTiles isn't open or the
+    tile isn't found — callers decide whether to fall through."""
+    if not mbtiles_service.is_open():
+        raise HTTPException(404, "satellite source not available")
+    conn = connect()
+    try:
+        row = conn.execute(
+            "SELECT bbox_west, bbox_south, bbox_east, bbox_north FROM tiles WHERE id=?",
+            (tile_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        raise HTTPException(404, "tile not found")
+    w, s, e, n = row["bbox_west"], row["bbox_south"], row["bbox_east"], row["bbox_north"]
+    min_z, max_z = mbtiles_service.zoom_range()
+    zoom = max_z if max_z is not None else 19
+
+    x0_f = _lon_to_tile_x(w, zoom)
+    x1_f = _lon_to_tile_x(e, zoom)
+    # Web Mercator y grows southward: north lat → smaller y.
+    y0_f = _lat_to_tile_y(n, zoom)
+    y1_f = _lat_to_tile_y(s, zoom)
+    x0, x1 = math.floor(x0_f), math.ceil(x1_f)
+    y0, y1 = math.floor(y0_f), math.ceil(y1_f)
+
+    TS = 256
+    canvas = Image.new("RGB", ((x1 - x0) * TS, (y1 - y0) * TS), (32, 32, 32))
+    for tx in range(x0, x1):
+        for ty in range(y0, y1):
+            data = mbtiles_service.get_tile(zoom, tx, ty)
+            if not data:
+                continue
+            try:
+                src = Image.open(io.BytesIO(data)).convert("RGB")
+            except (OSError, ValueError):
+                continue
+            canvas.paste(src, ((tx - x0) * TS, (ty - y0) * TS))
+
+    crop_box = (
+        (x0_f - x0) * TS,
+        (y0_f - y0) * TS,
+        (x1_f - x0) * TS,
+        (y1_f - y0) * TS,
+    )
+    cropped = canvas.crop(crop_box)
+    if cropped.size != (size, size):
+        cropped = cropped.resize((size, size), Image.LANCZOS)
+    buf = io.BytesIO()
+    cropped.save(buf, format="PNG", optimize=True)
+    return buf.getvalue()
+
+
+def tile_satellite_thumbnail(tile_id: int, size: int = 128) -> bytes:
+    """Public endpoint wrapper: always serve satellite, even when the mask is
+    non-empty. Used by callers that explicitly want the backdrop regardless of
+    mask state."""
+    return _tile_satellite_png(tile_id, size)

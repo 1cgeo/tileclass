@@ -10,14 +10,20 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-# Base SELECT used everywhere a tile is returned to the client. The LEFT JOIN
-# on users pulls the classifier's username so the review banner
-# ("Classificado por <nome>") can render in one round-trip — without it, tiles
-# returned by `/api/tiles/next` would have `classified_by_username=None` and
-# the frontend would fall back to "?".
+# Base SELECT used everywhere a tile is returned to the client. The LEFT JOINs
+# pull the classifier's/reviewer's/assignee's username so the review banner
+# ("Classificado por <nome>") and the admin table's operator column can render
+# in one round-trip. Without `assigned_to_username`, admin's in-place refresh
+# after pause/assign shows a blank operator even though the tile is still
+# assigned.
 _TILE_SELECT = (
-    "SELECT tiles.*, users.username AS classified_by_username "
-    "FROM tiles LEFT JOIN users ON users.id=tiles.classified_by"
+    "SELECT tiles.*, uc.username AS classified_by_username, "
+    "ur.username AS reviewed_by_username, "
+    "ua.username AS assigned_to_username "
+    "FROM tiles "
+    "LEFT JOIN users uc ON uc.id=tiles.classified_by "
+    "LEFT JOIN users ur ON ur.id=tiles.reviewed_by "
+    "LEFT JOIN users ua ON ua.id=tiles.assigned_to"
 )
 
 
@@ -76,6 +82,14 @@ def _row_to_tile_dict(row) -> dict:
         d["classified_by_username"] = row["classified_by_username"]
     except (IndexError, KeyError):
         d["classified_by_username"] = None
+    try:
+        d["reviewed_by_username"] = row["reviewed_by_username"]
+    except (IndexError, KeyError):
+        d["reviewed_by_username"] = None
+    try:
+        d["assigned_to_username"] = row["assigned_to_username"]
+    except (IndexError, KeyError):
+        d["assigned_to_username"] = None
     return d
 
 
