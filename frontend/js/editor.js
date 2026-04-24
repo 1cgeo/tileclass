@@ -4,8 +4,12 @@ import { apiGet, apiGetBlob, apiPostBytes, apiPostJson, onSessionWarning, logout
 import { showToast } from "./toast.js";
 import { createLockedMap, setMapBbox, updateMapSource } from "./maplib.js";
 
-// Context view shows 3x3 tiles around the paintable center.
-const CONTEXT_FACTOR = 3;
+// Context view shows CONTEXT_FACTOR × CONTEXT_FACTOR tiles around the
+// paintable center (paintable is the central 1/CONTEXT_FACTOR). The CSS
+// custom property `--ctx` on #map-satellite is set from this same constant
+// at init so the satellite div size/offset stays in sync — bumping the
+// factor here is enough to widen the visible context.
+const CONTEXT_FACTOR = 7;
 function expandBbox(bbox, factor) {
     const [w, s, e, n] = bbox;
     const cx = (w + e) / 2, cy = (s + n) / 2;
@@ -89,7 +93,11 @@ let satMap = null;
 // pixels at the current zoom (applied AFTER scale via translate).
 let zoom = 1;
 let panX = 0, panY = 0;
-const MIN_ZOOM = 1;
+// MIN_ZOOM lets the operator shrink the stack until the full satellite
+// context (CONTEXT_FACTOR × tile) fits in the original paintable area's
+// footprint. A small extra margin (×0.9) lets them go slightly further to
+// see the whole context without it touching the viewport edges.
+const MIN_ZOOM = 0.9 / CONTEXT_FACTOR;
 const MAX_ZOOM = 16;
 let spaceHeld = false;
 // Tracks that Z is physically still down after a Ctrl+Z chord. Without this,
@@ -130,6 +138,9 @@ export async function initEditor(user) {
         };
     }
     document.getElementById("user-label").textContent = user.username;
+    // Drive #map-satellite size/offset from CONTEXT_FACTOR — keeps CSS in sync
+    // when the constant is bumped without editing both files.
+    document.getElementById("map-satellite").style.setProperty("--ctx", CONTEXT_FACTOR);
     onSessionWarning(() => {
         showToast("Sua sessão expira em breve. Submeta seu trabalho e faça login novamente.", "warn", 30_000);
     });

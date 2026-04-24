@@ -378,12 +378,17 @@ input[type="range"] {
     will-change: transform;
 }
 .canvas-stack.panning { transition: none; }
-/* MapLibre renders 3x3 tiles (paint area in the center third). Positioned
-   at -100%/-100% so the paintable 256x256 stays at 0,0 of the stack. */
+/* MapLibre renders CONTEXT_FACTOR × CONTEXT_FACTOR tiles (paint area in
+   the center). The --ctx custom property is set from JS at editor init so
+   the size/offset follow the same constant — bump CONTEXT_FACTOR in
+   editor.js to widen the satellite context without touching this rule. */
 #map-satellite {
+    --ctx: 3;
     position: absolute;
-    top: -100%; left: -100%;
-    width: 300%; height: 300%;
+    top: calc((1 - var(--ctx)) * 50%);
+    left: calc((1 - var(--ctx)) * 50%);
+    width: calc(var(--ctx) * 100%);
+    height: calc(var(--ctx) * 100%);
 }
 .canvas-stack canvas {
     position: absolute; top: 0; left: 0;
@@ -495,8 +500,51 @@ input[type="range"] {
     flex: 1; min-height: 500px;
     border: 1px solid var(--border);
     border-radius: var(--radius-sm); overflow: hidden;
+    position: relative;
 }
 .map-tab-container .maplibregl-canvas { outline: none; }
+
+/* Map tab toolbar (rectangle-select tool + bulk actions) */
+.map-tab-toolbar {
+    display: flex; align-items: center; gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    background: var(--bg-1); border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    flex-wrap: wrap;
+}
+.map-toolbar-spacer { flex: 1; }
+.map-tool-btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 6px 12px;
+    background: var(--bg-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    cursor: pointer; user-select: none;
+    font-size: 13px;
+    transition: background 120ms, border-color 120ms;
+}
+.map-tool-btn:hover { background: var(--bg-3); }
+.map-tool-btn.active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+}
+.map-tool-icon { font-size: 14px; }
+.map-sel-info {
+    font-size: 13px; color: var(--text-muted);
+    padding: 0 var(--space-2);
+}
+.map-sel-info b { color: var(--text); }
+
+/* Drag-rectangle overlay drawn while the tool is active */
+.map-rect-overlay {
+    position: absolute;
+    pointer-events: none;
+    border: 1.5px dashed #fff;
+    background: rgba(59, 130, 246, 0.18);
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.4);
+    z-index: 10;
+}
+.map-rect-overlay.hidden { display: none; }
 
 .admin-table {
     width: 100%; border-collapse: collapse; margin-top: var(--space-3);
@@ -675,10 +723,38 @@ input[type="range"] {
 
 /* Pager */
 .pager {
-    display: flex; gap: 12px; align-items: center; justify-content: center;
-    padding: 12px; margin-top: 8px;
+    display: flex; gap: 4px; align-items: center; justify-content: center;
+    padding: 10px; margin-top: 8px; flex-wrap: wrap;
 }
-.pager-info { font-size: 13px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.pager:empty { display: none; }
+.pager-info {
+    font-size: 13px; color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+    margin-left: 12px;
+}
+.pager-btn {
+    min-width: 34px;
+    padding: 4px 10px;
+    background: var(--bg-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-size: 13px; font-variant-numeric: tabular-nums;
+    transition: background 120ms, border-color 120ms;
+}
+.pager-btn:hover:not(:disabled) { background: var(--bg-3); }
+.pager-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.pager-btn.active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+    font-weight: 600;
+}
+.pager-ellipsis {
+    padding: 0 4px;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+    user-select: none;
+}
 
 /* Empty state */
 .empty-state {

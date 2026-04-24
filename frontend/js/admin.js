@@ -12,6 +12,12 @@ let selectedIds = new Set();
 let currentTab = "dashboard";
 let listView = "table"; // "table" | "grid"
 
+// Map tab — rectangle-selection state. Lives outside renderMap so the click
+// handler on tile layers can suppress the viewer while the tool is active.
+let mapSelectedIds = new Set();
+let mapTilePropsById = new Map();   // id -> feature properties (for status filtering)
+let mapRectSelectActive = false;
+
 // Sort + pagination state for the tiles tab
 let sortKey = "id";
 let sortDir = "asc";
@@ -255,8 +261,9 @@ async function renderTiles(root) {
             <button id="bulk-unblock">Desbloquear</button>
             <button id="bulk-clear">Limpar seleção</button>
         </div>
+        <div id="pager-top" class="pager"></div>
         <div id="tiles-list"></div>
-        <div id="pager" class="pager"></div>
+        <div id="pager-bottom" class="pager"></div>
     `;
     document.getElementById("view-table").addEventListener("click", () => { listView = "table"; loadAndRender(); });
     document.getElementById("view-grid").addEventListener("click", () => { listView = "grid"; loadAndRender(); });
@@ -318,22 +325,88 @@ function setSort(key) {
 }
 
 function renderPager() {
-    const el = document.getElementById("pager");
-    if (!el) return;
-    const totalPages = Math.max(1, Math.ceil(totalTiles / PAGE_SIZE));
+    for (const id of ["pager-top", "pager-bottom"]) {
+        const el = document.getElementById(id);
+        if (el) buildPagerInto(el);
+    }
+}
+
+// Compact page-number window: always show 1 and last; show current ± 1;
+// insert "…" placeholders where there are gaps. Returns an array of either
+// page numbers (0-indexed) or the literal string "…".
+function pageWindow(current, totalPages) {
+    if (totalPages <= 7) {
+        return Array.from({ length: totalPages }, (_, i) => i);
+    }
+    const set = new Set([0, totalPages - 1, current]);
+    if (current - 1 >= 0) set.add(current - 1);
+    if (current + 1 <= totalPages - 1) set.add(current + 1);
+    // Pad the ends so the window doesn't shrink at the edges.
+    if (current <= 2) { set.add(1); set.add(2); set.add(3); }
+    if (current >= totalPages - 3) {
+        set.add(totalPages - 2); set.add(totalPages - 3); set.add(totalPages - 4);
+    }
+    const sorted = [...set].filter(n => n >= 0 && n < totalPages).sort((a, b) => a - b);
+    const out = [];
+    for (let i = 0; i < sorted.length; i++) {
+        out.push(sorted[i]);
+        if (i < sorted.length - 1 && sorted[i + 1] !== sorted[i] + 1) out.push("…");
+    }
+    return out;
+}
+
+function buildPagerInto(el) {
     el.innerHTML = "";
+    const totalPages = Math.max(1, Math.ceil(totalTiles / PAGE_SIZE));
+    const goTo = (p) => {
+        const clamped = Math.max(0, Math.min(totalPages - 1, p));
+        if (clamped === page) return;
+        page = clamped;
+        loadAndRender();
+    };
+    const navBtn = (label, disabled, onClick, title) => {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = "pager-btn";
+        b.textContent = label;
+        b.disabled = disabled;
+        if (title) b.title = title;
+        b.addEventListener("click", onClick);
+        return b;
+    };
+
+    el.append(
+        navBtn("«", page === 0, () => goTo(0), "Primeira página"),
+        navBtn("←", page === 0, () => goTo(page - 1), "Página anterior"),
+    );
+
+    for (const item of pageWindow(page, totalPages)) {
+        if (item === "…") {
+            const span = document.createElement("span");
+            span.className = "pager-ellipsis";
+            span.textContent = "…";
+            el.appendChild(span);
+        } else {
+            const b = navBtn(String(item + 1), false, () => goTo(item));
+            b.classList.add("pager-num");
+            if (item === page) b.classList.add("active");
+            el.appendChild(b);
+        }
+    }
+
+    el.append(
+        navBtn("→", page >= totalPages - 1, () => goTo(page + 1), "Próxima página"),
+        navBtn("»", page >= totalPages - 1, () => goTo(totalPages - 1), "Última página"),
+    );
+
     const info = document.createElement("span");
     info.className = "pager-info";
     const start = page * PAGE_SIZE + 1;
     const end = Math.min(totalTiles, (page + 1) * PAGE_SIZE);
-    info.textContent = totalTiles === 0 ? "Nenhum tile" : `${start}–${end} de ${totalTiles}`;
-    const prev = document.createElement("button");
-    prev.textContent = "← Anterior"; prev.disabled = page === 0;
-    prev.addEventListener("click", () => { page--; loadAndRender(); });
-    const next = document.createElement("button");
-    next.textContent = "Próxima →"; next.disabled = page >= totalPages - 1;
-    next.addEventListener("click", () => { page++; loadAndRender(); });
-    el.append(prev, info, next);
+    info.textContent = totalTiles === 0
+        ? "Nenhum tile"
+        : `${start}–${end} de ${totalTiles}`;
+    el.appendChild(info);
 }
 
 function updateBulkBar() {
@@ -983,10 +1056,28 @@ const MAP_STATUS_COLORS = {
 
 async function renderMap(root) {
     const tiles = await apiGet("/api/admin/tiles/map");
+    mapSelectedIds = new Set();
+    mapTilePropsById = new Map();
+    mapRectSelectActive = false;
     root.innerHTML = `
         <div class="map-tab">
+            <div class="map-tab-toolbar" id="map-toolbar">
+                <button id="map-tool-rect" class="map-tool-btn" type="button"
+                        title="Arrastar para selecionar. Shift = adicionar; Alt = remover; Esc = sair.">
+                    <span class="map-tool-icon">▭</span> Seleção retangular
+                </button>
+                <span id="map-sel-info" class="map-sel-info hidden">
+                    <b id="map-sel-count">0</b> tile(s) selecionado(s)
+                </span>
+                <span class="map-toolbar-spacer"></span>
+                <button id="map-bulk-assign" type="button" disabled>Atribuir operador</button>
+                <button id="map-bulk-rereview" type="button" disabled>Re-revisar selecionados</button>
+                <button id="map-sel-clear" type="button" disabled>Limpar seleção</button>
+            </div>
             <div class="map-tab-legend" id="map-legend"></div>
-            <div class="map-tab-container" id="admin-map"></div>
+            <div class="map-tab-container" id="admin-map">
+                <div id="map-rect-overlay" class="map-rect-overlay hidden"></div>
+            </div>
         </div>
     `;
     // All statuses enabled by default. Clicking a legend item toggles — the
@@ -1041,6 +1132,7 @@ async function renderMap(root) {
             paused: !!t.paused_at,
             blocked_from: t.blocked_from,
         };
+        mapTilePropsById.set(t.id, props);
         polyFeatures.push({
             type: "Feature",
             properties: props,
@@ -1124,6 +1216,27 @@ async function renderMap(root) {
                         "circle-stroke-width": 1,
                     },
                 },
+                {
+                    // Selection highlight: thick white outline. Filter is
+                    // updated by updateMapSelectionHighlight().
+                    id: "tiles-selected-outline", type: "line", source: "tiles",
+                    paint: {
+                        "line-color": "#ffffff",
+                        "line-width": 3,
+                        "line-opacity": 0.95,
+                    },
+                    filter: ["in", ["get", "id"], ["literal", []]],
+                },
+                {
+                    id: "tiles-selected-glow", type: "circle", source: "tile-points",
+                    paint: {
+                        "circle-color": "rgba(0,0,0,0)",
+                        "circle-radius": 9,
+                        "circle-stroke-color": "#ffffff",
+                        "circle-stroke-width": 2,
+                    },
+                    filter: ["in", ["get", "id"], ["literal", []]],
+                },
             ],
         },
         bounds: [[w, s], [e, n]],
@@ -1133,17 +1246,296 @@ async function renderMap(root) {
 
     for (const layer of ["tiles-fill", "tiles-dot"]) {
         mapView.on("mouseenter", layer, () => {
+            if (mapRectSelectActive) return;
             mapView.getCanvas().style.cursor = "pointer";
         });
         mapView.on("mouseleave", layer, () => {
+            if (mapRectSelectActive) return;
             mapView.getCanvas().style.cursor = "";
         });
         mapView.on("click", layer, (ev) => {
+            if (mapRectSelectActive) return;  // suppress viewer while selecting
             const f = ev.features && ev.features[0];
             if (!f) return;
             openViewer(f.properties.id);
         });
     }
+
+    wireMapSelectionTools();
+}
+
+// ---------- Map tab: rectangle selection + bulk actions ----------
+
+function wireMapSelectionTools() {
+    const toolBtn = document.getElementById("map-tool-rect");
+    const clearBtn = document.getElementById("map-sel-clear");
+    const reReviewBtn = document.getElementById("map-bulk-rereview");
+    const container = document.getElementById("admin-map");
+    const overlay = document.getElementById("map-rect-overlay");
+
+    const assignBtn = document.getElementById("map-bulk-assign");
+    toolBtn.addEventListener("click", () => setRectSelectActive(!mapRectSelectActive));
+    clearBtn.addEventListener("click", () => clearMapSelection());
+    reReviewBtn.addEventListener("click", () => mapBulkReReview());
+    assignBtn.addEventListener("click", () => mapBulkAssign());
+
+    // Esc clears tool/selection. Listener is attached to document but scoped:
+    // it bails if the map tab isn't active anymore.
+    const onKey = (ev) => {
+        if (currentTab !== "map") return;
+        if (ev.key === "Escape") {
+            if (mapRectSelectActive) setRectSelectActive(false);
+            else if (mapSelectedIds.size) clearMapSelection();
+        }
+    };
+    document.addEventListener("keydown", onKey);
+    // When mapView is replaced (tab switch), the old listener becomes a no-op
+    // via the currentTab guard, so no explicit cleanup is needed.
+
+    // Drag-to-select. We track on the container in pixel coords, then ask
+    // MapLibre for features in the screen bbox at mouseup.
+    let start = null;
+    let modifier = "replace";  // "replace" | "add" | "remove"
+
+    const containerPoint = (ev) => {
+        const r = container.getBoundingClientRect();
+        return { x: ev.clientX - r.left, y: ev.clientY - r.top };
+    };
+
+    container.addEventListener("mousedown", (ev) => {
+        if (!mapRectSelectActive) return;
+        if (ev.button !== 0) return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        start = containerPoint(ev);
+        modifier = ev.shiftKey ? "add" : (ev.altKey ? "remove" : "replace");
+        overlay.classList.remove("hidden");
+        overlay.style.left = `${start.x}px`;
+        overlay.style.top = `${start.y}px`;
+        overlay.style.width = "0px";
+        overlay.style.height = "0px";
+    });
+
+    window.addEventListener("mousemove", (ev) => {
+        if (!start) return;
+        const cur = containerPoint(ev);
+        const x = Math.min(start.x, cur.x);
+        const y = Math.min(start.y, cur.y);
+        const w = Math.abs(cur.x - start.x);
+        const h = Math.abs(cur.y - start.y);
+        overlay.style.left = `${x}px`;
+        overlay.style.top = `${y}px`;
+        overlay.style.width = `${w}px`;
+        overlay.style.height = `${h}px`;
+    });
+
+    window.addEventListener("mouseup", (ev) => {
+        if (!start) return;
+        const end = containerPoint(ev);
+        const s = start; start = null;
+        overlay.classList.add("hidden");
+        if (!mapView) return;
+
+        const dx = Math.abs(end.x - s.x), dy = Math.abs(end.y - s.y);
+        // A pure click (tiny drag) inside the tool: treat as single-tile pick
+        // at the click point so users don't have to draw a rectangle for one.
+        const bbox = (dx < 3 && dy < 3)
+            ? [[s.x - 3, s.y - 3], [s.x + 3, s.y + 3]]
+            : [[Math.min(s.x, end.x), Math.min(s.y, end.y)],
+               [Math.max(s.x, end.x), Math.max(s.y, end.y)]];
+        const feats = mapView.queryRenderedFeatures(bbox, {
+            layers: ["tiles-fill", "tiles-dot"],
+        });
+        const hitIds = new Set(feats.map(f => f.properties.id));
+
+        if (modifier === "replace") mapSelectedIds = new Set(hitIds);
+        else if (modifier === "add") for (const id of hitIds) mapSelectedIds.add(id);
+        else for (const id of hitIds) mapSelectedIds.delete(id);
+
+        updateMapSelectionHighlight();
+    });
+}
+
+function setRectSelectActive(on) {
+    mapRectSelectActive = on;
+    const btn = document.getElementById("map-tool-rect");
+    if (btn) btn.classList.toggle("active", on);
+    if (!mapView) return;
+    if (on) {
+        mapView.dragPan.disable();
+        mapView.boxZoom.disable();
+        mapView.doubleClickZoom.disable();
+        mapView.getCanvas().style.cursor = "crosshair";
+    } else {
+        mapView.dragPan.enable();
+        mapView.boxZoom.enable();
+        mapView.doubleClickZoom.enable();
+        mapView.getCanvas().style.cursor = "";
+    }
+}
+
+function clearMapSelection() {
+    mapSelectedIds.clear();
+    updateMapSelectionHighlight();
+}
+
+function updateMapSelectionHighlight() {
+    const ids = [...mapSelectedIds];
+    if (mapView) {
+        const filter = ["in", ["get", "id"], ["literal", ids]];
+        mapView.setFilter("tiles-selected-outline", filter);
+        mapView.setFilter("tiles-selected-glow", filter);
+    }
+    const info = document.getElementById("map-sel-info");
+    const count = document.getElementById("map-sel-count");
+    const clearBtn = document.getElementById("map-sel-clear");
+    const reReviewBtn = document.getElementById("map-bulk-rereview");
+    if (count) count.textContent = ids.length;
+    if (info) info.classList.toggle("hidden", ids.length === 0);
+    const reviewedCount = ids.filter(id => mapTilePropsById.get(id)?.status === "reviewed").length;
+    const assignableCount = ids.filter(id => {
+        const s = mapTilePropsById.get(id)?.status;
+        return s === "pending" || s === "classified";
+    }).length;
+    const assignBtn = document.getElementById("map-bulk-assign");
+    if (clearBtn) clearBtn.disabled = ids.length === 0;
+    if (reReviewBtn) {
+        reReviewBtn.disabled = reviewedCount === 0;
+        reReviewBtn.textContent = reviewedCount
+            ? `Re-revisar selecionados (${reviewedCount})`
+            : "Re-revisar selecionados";
+    }
+    if (assignBtn) {
+        assignBtn.disabled = assignableCount === 0;
+        assignBtn.textContent = assignableCount
+            ? `Atribuir operador (${assignableCount})`
+            : "Atribuir operador";
+    }
+}
+
+async function mapBulkReReview() {
+    const ids = [...mapSelectedIds];
+    if (!ids.length) return;
+    // Only reviewed tiles are eligible — backend silently skips others, but
+    // we surface the split so admins know what they're confirming.
+    const eligible = ids.filter(id => mapTilePropsById.get(id)?.status === "reviewed");
+    if (!eligible.length) {
+        showToast("Nenhum tile selecionado está em 'reviewed'.", "error");
+        return;
+    }
+    const skipped = ids.length - eligible.length;
+    const r = await confirmDestructive({
+        title: `Re-revisar ${eligible.length} tile(s)`,
+        description: skipped > 0
+            ? `Os tiles 'reviewed' voltarão para 'classified' e reaparecerão na fila de revisão. ${skipped} tile(s) selecionado(s) não estão em 'reviewed' e serão ignorados.`
+            : "Os tiles voltarão para 'classified' e reaparecerão na fila de revisão.",
+        ids: eligible, confirmLabel: `Enviar ${eligible.length} para revisão`, danger: false,
+    });
+    if (!r.confirmed) return;
+    const resp = await apiPostJson("/api/admin/tiles/bulk/re-review", {
+        ids: eligible, reason: r.reason,
+    });
+    showToast(`${resp.affected} enviados para nova revisão.`, "success");
+    // Refresh the affected features in-place: flip their status to 'classified'
+    // in the cached props + geojson sources so the map recolors without a
+    // full reload.
+    for (const id of eligible) {
+        const p = mapTilePropsById.get(id);
+        if (p) p.status = "classified";
+    }
+    if (mapView) {
+        const polySrc = mapView.getSource("tiles");
+        const ptSrc = mapView.getSource("tile-points");
+        for (const src of [polySrc, ptSrc]) {
+            if (!src) continue;
+            const data = src._data;
+            if (!data) continue;
+            for (const f of data.features) {
+                if (eligible.includes(f.properties.id)) f.properties.status = "classified";
+            }
+            src.setData(data);
+        }
+    }
+    clearMapSelection();
+}
+
+async function mapBulkAssign() {
+    const ids = [...mapSelectedIds];
+    if (!ids.length) return;
+    // Eligible = pending|classified by cached props. Other statuses are
+    // ignored (the backend would 409 on the whole batch otherwise).
+    const eligibleIds = ids.filter(id => {
+        const s = mapTilePropsById.get(id)?.status;
+        return s === "pending" || s === "classified";
+    });
+    if (!eligibleIds.length) {
+        showToast("Nenhum tile selecionado está em 'pending' ou 'classified'.", "error");
+        return;
+    }
+    const skipped = ids.length - eligibleIds.length;
+    // Need fresh per-tile records: classified tiles carry classified_by which
+    // determines reviewer eligibility (a reviewer can't review their own work).
+    const [users, tileRows] = await Promise.all([
+        apiGet("/api/admin/users"),
+        Promise.all(eligibleIds.map(id => apiGet(`/api/tiles/${id}`))),
+    ]);
+    // Re-check status against fresh data — the cached props snapshot may be
+    // stale after other admins acted concurrently.
+    const fresh = tileRows.filter(t => t.status === "pending" || t.status === "classified");
+    if (!fresh.length) {
+        showToast("Os tiles selecionados mudaram de status. Recarregue o mapa.", "error");
+        return;
+    }
+    const hasReview = fresh.some(t => t.status === "classified");
+    const classifierIds = new Set(
+        fresh.filter(t => t.status === "classified" && t.classified_by)
+              .map(t => t.classified_by),
+    );
+    const eligibleUsers = users.filter(u =>
+        u.role === "operator" && u.active &&
+        (!hasReview || (u.can_review && !classifierIds.has(u.id)))
+    );
+    if (!eligibleUsers.length) {
+        showToast(hasReview
+            ? "Sem revisores habilitados (ou todos já classificaram algum tile do lote)."
+            : "Sem operadores ativos.", "error");
+        return;
+    }
+    const r = await promptAssign({
+        title: `Atribuir ${fresh.length} tile(s) a um operador`,
+        description: (hasReview
+            ? "Os tiles vão para a fila pessoal do usuário como pausados. Tiles 'classified' exigem revisor habilitado e o revisor não pode ter classificado o tile."
+            : "Os tiles vão para a fila pessoal do usuário como pausados. Ao terminar o atual, ele recebe o próximo automaticamente.")
+            + (skipped > 0 ? ` ${skipped} tile(s) selecionado(s) não estão em 'pending'/'classified' e foram ignorados.` : ""),
+        users: eligibleUsers,
+    });
+    if (!r.confirmed) return;
+    const assignIds = fresh.map(t => t.id);
+    const resp = await apiPostJson("/api/admin/tiles/assign", {
+        tile_ids: assignIds, user_id: r.user_id, reason: r.reason || null,
+    });
+    showToast(`${resp.affected} tile(s) atribuídos (pausados).`, "success");
+    // Optimistic recolor: pending -> in_progress, classified -> in_review.
+    for (const t of fresh) {
+        const newStatus = t.status === "pending" ? "in_progress" : "in_review";
+        const p = mapTilePropsById.get(t.id);
+        if (p) p.status = newStatus;
+    }
+    if (mapView) {
+        const polySrc = mapView.getSource("tiles");
+        const ptSrc = mapView.getSource("tile-points");
+        for (const src of [polySrc, ptSrc]) {
+            if (!src) continue;
+            const data = src._data;
+            if (!data) continue;
+            for (const f of data.features) {
+                const p = mapTilePropsById.get(f.properties.id);
+                if (p) f.properties.status = p.status;
+            }
+            src.setData(data);
+        }
+    }
+    clearMapSelection();
 }
 
 
