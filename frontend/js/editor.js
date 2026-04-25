@@ -173,8 +173,29 @@ export async function initEditor(user) {
     buildClassPanel();
     buildColorLut();
     attachEvents();
+    applySecondaryButtonLabels();
     _editorInitialized = true;
     await enterEditor();
+}
+
+// Admins shouldn't logout when they cancel the "start next tile" / "no tiles"
+// / "paused tile" prompts — they should bounce back to the admin panel.
+// applies once (role doesn't change mid-session); the click handlers all go
+// through exitEditorOrLogout which checks role at click time.
+function applySecondaryButtonLabels() {
+    const label = currentUser?.role === "admin" ? "Voltar ao painel" : "Sair";
+    for (const id of ["idle-logout", "paused-resume-logout", "no-tiles-logout"]) {
+        const el = document.getElementById(id);
+        if (el) el.textContent = label;
+    }
+}
+
+function exitEditorOrLogout() {
+    if (currentUser?.role === "admin") {
+        document.getElementById("btn-go-admin").click();
+    } else {
+        document.getElementById("btn-logout").click();
+    }
 }
 
 export async function enterEditor() {
@@ -686,7 +707,7 @@ function attachEvents() {
     const ntRefresh = document.getElementById("no-tiles-refresh");
     if (ntRefresh) ntRefresh.addEventListener("click", loadNext);
     const ntLogout = document.getElementById("no-tiles-logout");
-    if (ntLogout) ntLogout.addEventListener("click", async () => { await apiLogout(); location.reload(); });
+    if (ntLogout) ntLogout.addEventListener("click", exitEditorOrLogout);
 
     document.getElementById("tool-brush").addEventListener("click", () => setTool("brush"));
     document.getElementById("tool-eraser").addEventListener("click", () => setTool("eraser"));
@@ -719,17 +740,13 @@ function attachEvents() {
     const resumeContinue = document.getElementById("paused-resume-continue");
     if (resumeContinue) resumeContinue.addEventListener("click", continuePausedTile);
     const resumeLogout = document.getElementById("paused-resume-logout");
-    if (resumeLogout) resumeLogout.addEventListener("click", () => {
-        document.getElementById("btn-logout").click();
-    });
+    if (resumeLogout) resumeLogout.addEventListener("click", exitEditorOrLogout);
 
     document.getElementById("idle-start").addEventListener("click", () => {
         hideIdleScreen();
         loadNext();
     });
-    document.getElementById("idle-logout").addEventListener("click", () => {
-        document.getElementById("btn-logout").click();
-    });
+    document.getElementById("idle-logout").addEventListener("click", exitEditorOrLogout);
 
     document.getElementById("problem-cancel").addEventListener("click", closeProblemModal);
     document.getElementById("problem-confirm").addEventListener("click", confirmProblem);

@@ -28,7 +28,7 @@ uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
 python -m backend.scripts.create_admin
 python -m backend.scripts.import_points --point <lat> <lon> <name>          # um ponto
 python -m backend.scripts.import_points --csv pontos.csv [--block 3]        # CSV lat,lon,name; block NxN
-python -m backend.scripts.export_tiles <out_dir> [--mosaic]
+python -m backend.scripts.export_tiles <out_dir> [--status reviewed|reviewed+classified] [--raw] [--mosaic] [--manifest <path>]
 
 # Testes
 python -m pytest tests/ --ignore=tests/e2e --ignore=tests/frontend -v   # backend
@@ -91,7 +91,54 @@ tileclass/
 - **Protocolo wire:** frontend envia **raw bytes** (Uint8Array, 65536 bytes) no body do classify/review; nunca PNG. Backend converte.
 - **Submissão:** rejeitar se houver `255` no array. Resposta de erro traz a contagem.
 - **Máquina de estados de tile:** `pending → in_progress → classified → in_review → reviewed`; qualquer estado `→ problem`; `problem → pending` e `reviewed → in_review` são transições de admin. Admin pode também bloquear via `pending|classified|reviewed → blocked` (guardando o status original em `blocked_from`) e desbloquear via `blocked → <blocked_from>`. `in_progress`/`in_review`/`problem` **não podem** ser bloqueados. Tiles bloqueados são naturalmente excluídos das filas porque os SELECTs de `/next` filtram por `status='pending'` ou `'classified'`.
-- **Export GeoTIFF:** `export_tiles.py` usa `rasterio.transform.from_bounds(west, south, east, north, 256, 256)` com `crs=EPSG:4326`. Combinado com a bbox de `bbox_from_center`, o pixel resultante é exatamente 2.5 m na latitude do centro (validado para 20 pontos mundiais em `test_raster_worldwide.py`).
+- **Export GeoTIFF:** `backend/scripts/export_tiles.py` usa `rasterio.transform.from_bounds(west, south, east, north, 256, 256)` com `crs=EPSG:4326`. Combinado com a bbox de `bbox_from_center`, o pixel resultante é exatamente 2.5 m na latitude do centro (validado para 20 pontos mundiais em `test_raster_worldwide.py`). Detalhes do contrato (status filter, remap EDGV, manifest) na seção **GT Extractor** abaixo.
+
+## GT Extractor (interface canônica)
+
+`backend/scripts/export_tiles.py` é a **interface padrão** para outras aplicações/agentes consumirem máscaras finalizadas. Output é compatível bit-a-bit com `treinamento_6c/<split>/<split>_masks/` (mesmas classes, mesmo NODATA, mesmo formato GeoTIFF).
+
+**Uso:**
+
+```bash
+# Padrão: só tiles revisados, IDs remapeados para EDGV 0..5
+python -m backend.scripts.export_tiles <out_dir>
+
+# Inclui classificados (sem revisão) — útil pra dataset preliminar
+python -m backend.scripts.export_tiles <out_dir> --status reviewed+classified
+
+# Mantém IDs nativos do TileClass (1..6) sem remapear
+python -m backend.scripts.export_tiles <out_dir> --raw
+
+# Também escreve gt_mosaic.tif unindo tudo
+python -m backend.scripts.export_tiles <out_dir> --mosaic
+```
+
+**Formato de saída** (cada tile: `<out_dir>/gt_<tile.name>.tif`):
+- GeoTIFF single-band uint8, 256×256, **EPSG:4326**, compressão `deflate`, **NODATA = 255**
+- Transform via `rasterio.transform.from_bounds(west, south, east, north, 256, 256)` — pixel ≈ 2.5 m na latitude do centro
+- Reprojeção para 3857/UTM fica a cargo do consumer (`gdalwarp` / `rasterio.warp`).
+
+**Remap canônico de classes** (default; `--raw` desativa):
+
+| TileClass id | Nome (config.yaml) | EDGV id | Nome EDGV (treinamento_6c) |
+|:-:|---|:-:|---|
+| 1 | Massa d'água | **0** | agua |
+| 2 | Área edificada | **1** | edif |
+| 3 | Floresta | **4** | floresta |
+| 4 | Campo | **3** | campo |
+| 5 | Cultivo | **5** | veg_cultivada |
+| 6 | Terreno exposto | **2** | terr_exp |
+| 255 | NODATA | **255** | NODATA (ignore_index) |
+
+A LUT (`EDGV_REMAP_LUT`) é constante de módulo no topo do script — único ponto de verdade para o mapeamento. Indexes não usados (0, 7..254) passam como identidade.
+
+**Filtros de status:**
+- `reviewed` (padrão) — só tiles que passaram pela revisão (GT estritamente aceito).
+- `reviewed+classified` — inclui também `classified` (passaram só pela classificação, ainda não revisados). Útil para dataset preliminar/maior, ciente do risco de inconsistência.
+
+**Manifest (`<out_dir>/manifest.csv`):** uma linha por tile exportado com `filename, tile_id, name, status, classified_by, reviewed_by, classified_at, reviewed_at, bbox_*`. É o ponto de entrada pra outros agentes saberem o que receberam (status, autoria, geometria) sem precisar abrir o GeoTIFF.
+
+**Quando estender:** se um consumer precisar de outro CRS, formato (PNG/Zarr), ou subset (por bbox/operador/data), adicione flags ao mesmo script — não crie novo extractor. Manter um único ponto de saída evita drift entre consumers.
 
 ## Regras críticas de backend
 
