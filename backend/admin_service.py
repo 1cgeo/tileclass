@@ -395,8 +395,10 @@ def assign_many(tile_ids: list[int], user_id: int, admin_id: int,
             raise HTTPException(404, "user not found")
         if not user["active"]:
             raise HTTPException(409, "user is inactive")
-        if user["role"] == "admin":
-            raise HTTPException(409, "cannot assign tiles to an admin")
+        # Admins also act as operators/reviewers — role==admin shortcuts can_review
+        # the same way `tile_service._user_can_review` does, so the queues stay
+        # consistent regardless of who's working the tile.
+        user_can_review = bool(user["can_review"]) or user["role"] == "admin"
 
         # Validate every tile up-front so a bad one doesn't half-assign the lot.
         plans: list[tuple[int, str, str]] = []  # (tile_id, new_status, assign_action)
@@ -410,7 +412,7 @@ def assign_many(tile_ids: list[int], user_id: int, admin_id: int,
             if status == "pending":
                 plans.append((tid, "in_progress", "assign_classify"))
             elif status == "classified":
-                if not user["can_review"]:
+                if not user_can_review:
                     raise HTTPException(
                         409, f"tile {tid} needs a reviewer (user lacks can_review)"
                     )

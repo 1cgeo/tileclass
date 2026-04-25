@@ -540,6 +540,15 @@ function buildGridCard(t) {
     const card = document.createElement("div");
     card.className = "thumb-card" + (selectedIds.has(t.id) ? " selected" : "");
     card.dataset.id = t.id;
+    // Selection checkbox overlaid top-left. Stops propagation so toggling it
+    // doesn't also open the viewer. Shift+click on the card body still works.
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.className = "thumb-check";
+    cb.checked = selectedIds.has(t.id);
+    cb.addEventListener("click", (ev) => ev.stopPropagation());
+    cb.addEventListener("change", () => toggleSelect(t.id, cb.checked, card));
+    card.appendChild(cb);
     const img = document.createElement("img");
     img.alt = `Tile ${t.id}`;
     img.className = "thumb-skeleton";
@@ -573,9 +582,7 @@ function buildGridCard(t) {
         });
         card.appendChild(assignBtn);
     }
-    if (isBlockable(t)) {
-        card.appendChild(btn("Bloquear", () => blockAction([t.id]), "card-action"));
-    } else if (t.status === "blocked") {
+    if (t.status === "blocked") {
         card.appendChild(btn("Desbloquear", () => blockAction([t.id], { unblock: true }), "card-action"));
     }
     card.addEventListener("click", (ev) => {
@@ -730,14 +737,16 @@ async function resetOne(id) {
 async function assignOne(tile) {
     const users = await apiGet("/api/admin/users");
     const isReview = tile.status === "classified";
+    // Admins are eligible too — they also classify/review. role==admin
+    // implicitly grants review rights (mirrors backend `_user_can_review`).
     const eligible = users.filter(u =>
-        u.role === "operator" && u.active &&
-        (!isReview || (u.can_review && u.id !== tile.classified_by))
+        u.active &&
+        (!isReview || ((u.can_review || u.role === "admin") && u.id !== tile.classified_by))
     );
     if (!eligible.length) {
         showToast(isReview
             ? "Sem revisores habilitados (ou todos classificaram este tile)."
-            : "Sem operadores ativos.", "error");
+            : "Sem usuários ativos.", "error");
         return;
     }
     const r = await promptAssign({
@@ -765,7 +774,10 @@ function promptAssign({ title, description, users }) {
         for (const u of users) {
             const opt = document.createElement("option");
             opt.value = String(u.id);
-            opt.textContent = u.username + (u.can_review ? " (revisor)" : "");
+            const tags = [];
+            if (u.role === "admin") tags.push("admin");
+            else if (u.can_review) tags.push("revisor");
+            opt.textContent = u.username + (tags.length ? ` (${tags.join(", ")})` : "");
             sel.appendChild(opt);
         }
         const reason = document.getElementById("assign-reason"); reason.value = "";
@@ -941,17 +953,17 @@ async function bulkAssign() {
                 .map(t => t.classified_by),
     );
     const eligible = users.filter(u =>
-        u.role === "operator" && u.active &&
-        (!hasReview || (u.can_review && !classifierIds.has(u.id)))
+        u.active &&
+        (!hasReview || ((u.can_review || u.role === "admin") && !classifierIds.has(u.id)))
     );
     if (!eligible.length) {
         showToast(hasReview
             ? "Sem revisores habilitados (ou todos já classificaram algum tile do lote)."
-            : "Sem operadores ativos.", "error");
+            : "Sem usuários ativos.", "error");
         return;
     }
     const r = await promptAssign({
-        title: `Atribuir ${ids.length} tile(s) a um operador`,
+        title: `Atribuir ${ids.length} tile(s) a um usuário`,
         description: hasReview
             ? "Os tiles vão para a fila pessoal do usuário como pausados. Ao terminar o atual, ele recebe o próximo automaticamente. Tiles classified exigem revisor habilitado, e o revisor não pode ter classificado o tile."
             : "Os tiles vão para a fila pessoal do usuário como pausados. Ao terminar o atual, ele recebe o próximo automaticamente.",
@@ -1779,17 +1791,17 @@ async function mapBulkAssign() {
               .map(t => t.classified_by),
     );
     const eligibleUsers = users.filter(u =>
-        u.role === "operator" && u.active &&
-        (!hasReview || (u.can_review && !classifierIds.has(u.id)))
+        u.active &&
+        (!hasReview || ((u.can_review || u.role === "admin") && !classifierIds.has(u.id)))
     );
     if (!eligibleUsers.length) {
         showToast(hasReview
             ? "Sem revisores habilitados (ou todos já classificaram algum tile do lote)."
-            : "Sem operadores ativos.", "error");
+            : "Sem usuários ativos.", "error");
         return;
     }
     const r = await promptAssign({
-        title: `Atribuir ${fresh.length} tile(s) a um operador`,
+        title: `Atribuir ${fresh.length} tile(s) a um usuário`,
         description: (hasReview
             ? "Os tiles vão para a fila pessoal do usuário como pausados. Tiles 'classified' exigem revisor habilitado e o revisor não pode ter classificado o tile."
             : "Os tiles vão para a fila pessoal do usuário como pausados. Ao terminar o atual, ele recebe o próximo automaticamente.")
