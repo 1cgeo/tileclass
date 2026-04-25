@@ -2,7 +2,7 @@
 // (mask + cursor) sit georeferenced on top of the tile bbox.
 import { apiGet, apiGetBlob, apiPostBytes, apiPostJson, onSessionWarning, logout as apiLogout } from "./api.js";
 import { showToast } from "./toast.js";
-import { createLockedMap, setMapBbox, updateMapSource } from "./maplib.js";
+import { createLockedMap, setMapBbox, setOverlayVisible } from "./maplib.js";
 
 // Context view shows CONTEXT_FACTOR × CONTEXT_FACTOR tiles around the
 // paintable center (paintable is the central 1/CONTEXT_FACTOR). The CSS
@@ -52,10 +52,12 @@ let maskHidden = false;
 let missingHighlight = false;  // H: persistent highlight of unfilled (255) pixels
 let nextMissingCursor = 0;     // N: walks through missing pixels in raster order
 let tileserverUrl = "";
-let tileserverUrlSecondary = null;
 let tileserverMaxZoom = 22;
-let tileserverMaxZoomSecondary = 22;
-let activeSource = "primary"; // "primary" | "secondary"
+// Overlays are hold-to-show; each cfg is { url, minZoom?, maxZoom? } or null.
+const overlayCfg = { secondary: null, tertiary: null, wc: null };
+const overlayHeld = { secondary: false, tertiary: false, wc: false };
+const OVERLAY_LABEL = { secondary: "secundária", tertiary: "terciária", wc: "WorldCover" };
+const KEY_TO_OVERLAY = { d: "secondary", r: "tertiary", t: "wc" };
 let todayCount = 0;
 
 // Preload cache for the "next" tile while user paints
@@ -149,9 +151,16 @@ export async function initEditor(user) {
         apiGet("/api/config/classes"),
     ]);
     tileserverUrl = cfg.url_template;
-    tileserverUrlSecondary = cfg.secondary_url_template || null;
     tileserverMaxZoom = cfg.max_zoom ?? 22;
-    tileserverMaxZoomSecondary = cfg.secondary_max_zoom ?? 22;
+    overlayCfg.secondary = cfg.secondary_url_template
+        ? { url: cfg.secondary_url_template, maxZoom: cfg.secondary_max_zoom ?? 22 }
+        : null;
+    overlayCfg.tertiary = cfg.tertiary_url_template
+        ? { url: cfg.tertiary_url_template, maxZoom: cfg.tertiary_max_zoom ?? 22 }
+        : null;
+    overlayCfg.wc = cfg.wc_url_template
+        ? { url: cfg.wc_url_template, minZoom: cfg.wc_min_zoom ?? 0, maxZoom: cfg.wc_max_zoom ?? 22 }
+        : null;
     classes = cls;
     classesById = Object.fromEntries(classes.map(c => [c.id, c]));
     buildClassPanel();
@@ -443,19 +452,28 @@ function updateSubmitButton(missing) {
 
 // --- Rendering ---
 
-function toggleSecondarySource() {
-    if (!tileserverUrlSecondary) {
-        showToast("Imagem secundária não configurada.", "warn", 2500);
+function setOverlayHold(key, on) {
+    if (!satMap) return;
+    setOverlayVisible(satMap, key, on);
+    if (key === "wc") {
+        document.getElementById("canvas-viewport").classList.toggle("wc-held", on);
+    }
+}
+
+function pressOverlay(key) {
+    if (!overlayCfg[key]) {
+        showToast(`Imagem ${OVERLAY_LABEL[key]} não configurada.`, "warn", 1500);
         return;
     }
-    if (!satMap) return;
-    activeSource = activeSource === "primary" ? "secondary" : "primary";
-    const url = activeSource === "primary" ? tileserverUrl : tileserverUrlSecondary;
-    const mz = activeSource === "primary" ? tileserverMaxZoom : tileserverMaxZoomSecondary;
-    _mapErrorCount = 0;
-    document.getElementById("map-warning")?.classList.add("hidden");
-    updateMapSource(satMap, url, mz);
-    showToast(`Imagem: ${activeSource === "primary" ? "principal" : "secundária"}`, "info", 1200);
+    if (overlayHeld[key]) return;
+    overlayHeld[key] = true;
+    setOverlayHold(key, true);
+}
+
+function releaseOverlay(key) {
+    if (!overlayHeld[key]) return;
+    overlayHeld[key] = false;
+    setOverlayHold(key, false);
 }
 
 let _mapErrorCount = 0;
@@ -466,7 +484,7 @@ function renderSatellite(t) {
     if (warnEl) warnEl.classList.add("hidden");
     _mapErrorCount = 0;
     if (!satMap) {
-        satMap = createLockedMap("map-satellite", tileserverUrl, bbox, tileserverMaxZoom);
+        satMap = createLockedMap("map-satellite", tileserverUrl, bbox, tileserverMaxZoom, overlayCfg);
         satMap.on("error", (e) => {
             // Multiple consecutive tile errors → surface a banner so the
             // operator knows the satellite background is missing (pure
@@ -698,10 +716,6 @@ function attachEvents() {
     document.getElementById("problem-cancel").addEventListener("click", closeProblemModal);
     document.getElementById("problem-confirm").addEventListener("click", confirmProblem);
 
-    document.getElementById("btn-help").addEventListener("click", () => document.getElementById("modal-help").classList.remove("hidden"));
-    const btnHelpInline = document.getElementById("btn-help-inline");
-    if (btnHelpInline) btnHelpInline.addEventListener("click", () => document.getElementById("modal-help").classList.remove("hidden"));
-    document.getElementById("help-close").addEventListener("click", () => document.getElementById("modal-help").classList.add("hidden"));
 
     document.getElementById("btn-logout").addEventListener("click", async () => {
         await apiLogout();
@@ -725,7 +739,11 @@ function attachEvents() {
     window.addEventListener("keyup", onKeyUp);
     // Losing focus mid-chord (e.g. Alt+Tab during Ctrl+Z) drops the keyup,
     // leaving zSuppressed stuck. Reset on blur so the next session is clean.
-    window.addEventListener("blur", () => { zSuppressed = false; spaceHeld = false; });
+    window.addEventListener("blur", () => {
+        zSuppressed = false;
+        spaceHeld = false;
+        for (const key of Object.keys(overlayHeld)) releaseOverlay(key);
+    });
 }
 
 function isTextFocused() {
@@ -733,8 +751,38 @@ function isTextFocused() {
     return el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA");
 }
 function isModalOpen() {
-    return !document.getElementById("modal-problem").classList.contains("hidden") ||
-           !document.getElementById("modal-help").classList.contains("hidden");
+    return !document.getElementById("modal-problem").classList.contains("hidden")
+        || !document.getElementById("modal-action-confirm").classList.contains("hidden");
+}
+
+function confirmAction({ title = "Confirmar", message, okLabel = "Confirmar", cancelLabel = "Cancelar" }) {
+    const modal = document.getElementById("modal-action-confirm");
+    document.getElementById("action-confirm-title").textContent = title;
+    document.getElementById("action-confirm-message").textContent = message;
+    const okBtn = document.getElementById("action-confirm-ok");
+    const cancelBtn = document.getElementById("action-confirm-cancel");
+    okBtn.textContent = okLabel;
+    cancelBtn.textContent = cancelLabel;
+    modal.classList.remove("hidden");
+    okBtn.focus();
+    return new Promise((resolve) => {
+        const finish = (value) => {
+            modal.classList.add("hidden");
+            okBtn.removeEventListener("click", onOk);
+            cancelBtn.removeEventListener("click", onCancel);
+            window.removeEventListener("keydown", onKey, true);
+            resolve(value);
+        };
+        const onOk = () => finish(true);
+        const onCancel = () => finish(false);
+        const onKey = (ev) => {
+            if (ev.key === "Escape") { ev.stopPropagation(); finish(false); }
+            else if (ev.key === "Enter") { ev.stopPropagation(); finish(true); }
+        };
+        okBtn.addEventListener("click", onOk);
+        cancelBtn.addEventListener("click", onCancel);
+        window.addEventListener("keydown", onKey, true);
+    });
 }
 
 function onMouseDown(ev) {
@@ -941,7 +989,6 @@ function onKeyDown(ev) {
     if (isTextFocused() || isModalOpen()) {
         if (ev.key === "Escape") {
             document.getElementById("modal-problem").classList.add("hidden");
-            document.getElementById("modal-help").classList.add("hidden");
         }
         return;
     }
@@ -975,12 +1022,12 @@ function onKeyDown(ev) {
         // Ignore if Z is still held down from a prior Ctrl+Z chord — otherwise
         // the autorepeat that fires after Ctrl is released would shift opacity.
         if (zSuppressed) return;
-        adjustOpacity(0.1);
+        adjustOpacity(-0.1);
         return;
     }
-    if (low === "x") { adjustOpacity(-0.1); return; }
+    if (low === "x") { adjustOpacity(0.1); return; }
     if (low === "c") { jumpToNextMissing(); return; }
-    if (low === "d") { toggleSecondarySource(); return; }
+    if (KEY_TO_OVERLAY[low]) { pressOverlay(KEY_TO_OVERLAY[low]); return; }
     if (low === "f") { missingHighlight = !missingHighlight; blitMask(); return; }
     if (k === " ") {
         ev.preventDefault();
@@ -991,7 +1038,6 @@ function onKeyDown(ev) {
         if (!maskHidden) { maskHidden = true; blitMask(); }
         return;
     }
-    if (k === "?") { document.getElementById("modal-help").classList.remove("hidden"); return; }
 }
 
 function onKeyUp(ev) {
@@ -1001,6 +1047,8 @@ function onKeyUp(ev) {
         maskHidden = false;
         blitMask();
     }
+    const upLow = ev.key.toLowerCase();
+    if (KEY_TO_OVERLAY[upLow]) releaseOverlay(KEY_TO_OVERLAY[upLow]);
     if (ev.key === "z" || ev.key === "Z") zSuppressed = false;
 }
 
@@ -1030,6 +1078,15 @@ async function submit() {
         flashMissing();
         return;
     }
+    const isReview = currentTile.status === "in_review";
+    const ok = await confirmAction({
+        title: isReview ? "Aprovar revisão?" : "Submeter classificação?",
+        message: isReview
+            ? "A revisão será aprovada e o tile marcado como revisado."
+            : "A classificação será enviada e o tile passará para a fila de revisão.",
+        okLabel: isReview ? "Aprovar" : "Submeter",
+    });
+    if (!ok) return;
     _submitting = true;
     const btn = document.getElementById("btn-submit");
     const label = document.getElementById("submit-label");
@@ -1216,6 +1273,12 @@ async function pauseTile() {
         showToast("Nenhum tile aberto para pausar.", "warn");
         return;
     }
+    const ok = await confirmAction({
+        title: "Pausar tile?",
+        message: "Seu progresso será salvo no servidor e o tempo será congelado. Você poderá retomar mais tarde.",
+        okLabel: "Pausar",
+    });
+    if (!ok) return;
     if (btn) btn.disabled = true;
     try {
         const version = currentTile.version != null ? String(currentTile.version) : "";

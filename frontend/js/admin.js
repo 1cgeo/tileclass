@@ -32,7 +32,7 @@ let opSortDir = "asc";
 // Active MapLibre instance for the "Mapa" tab, disposed on tab change.
 let mapView = null;
 
-const BLOCKABLE_STATES = new Set(["pending", "classified", "reviewed"]);
+const BLOCKABLE_STATES = new Set(["pending"]);
 const isBlockable = t => BLOCKABLE_STATES.has(t.status);
 
 export async function initAdmin(user) {
@@ -237,6 +237,7 @@ function statCard(label, value) {
 async function renderTiles(root) {
     root.innerHTML = `
         <div class="filter-bar">
+            <label>Buscar <input type="search" id="filter-q" placeholder="ID ou nome (parcial)" autocomplete="off"></label>
             <label>Status <select id="filter-status">
                 <option value="">(todos)</option>
                 <option>pending</option><option>in_progress</option><option>classified</option>
@@ -268,6 +269,15 @@ async function renderTiles(root) {
     document.getElementById("view-table").addEventListener("click", () => { listView = "table"; loadAndRender(); });
     document.getElementById("view-grid").addEventListener("click", () => { listView = "grid"; loadAndRender(); });
     document.getElementById("btn-filter").addEventListener("click", () => { page = 0; loadAndRender(); });
+    const filterQ = document.getElementById("filter-q");
+    let qTimer;
+    filterQ.addEventListener("input", () => {
+        clearTimeout(qTimer);
+        qTimer = setTimeout(() => { page = 0; loadAndRender(); }, 250);
+    });
+    filterQ.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter") { clearTimeout(qTimer); page = 0; loadAndRender(); }
+    });
     document.getElementById("bulk-assign").addEventListener("click", bulkAssign);
     document.getElementById("bulk-reset").addEventListener("click", bulkReset);
     document.getElementById("bulk-rereview").addEventListener("click", bulkReReview);
@@ -288,10 +298,12 @@ async function loadAndRender() {
     const status = document.getElementById("filter-status").value;
     const df = document.getElementById("filter-from").value;
     const dt = document.getElementById("filter-to").value;
+    const q = document.getElementById("filter-q")?.value.trim();
     const params = new URLSearchParams();
     if (status) params.set("status", status);
     if (df) params.set("date_from", df);
     if (dt) params.set("date_to", dt);
+    if (q) params.set("q", q);
     params.set("limit", PAGE_SIZE);
     params.set("offset", page * PAGE_SIZE);
     const target = document.getElementById("tiles-list");
@@ -435,10 +447,7 @@ function buildTableRow(t) {
     }
     tdStatus.appendChild(chip);
     const tdAct = document.createElement("td");
-    tdAct.append(
-        btn("Ver", () => openViewer(t.id)),
-        btn("Resetar", () => resetOne(t.id)),
-    );
+    tdAct.append(btn("Ver", () => openViewer(t.id)));
     if (t.status === "reviewed") tdAct.append(btn("Re-revisar", () => reReviewOne(t.id)));
     if (t.status === "pending" || t.status === "classified") {
         tdAct.append(btn("Atribuir", () => assignOne(t)));
@@ -971,6 +980,18 @@ async function openViewer(tileId) {
         meta.appendChild(statusLine);
         const viewerActions = document.createElement("div");
         viewerActions.className = "viewer-actions";
+        if (t.status === "pending" || t.status === "classified") {
+            viewerActions.appendChild(btn(
+                t.status === "classified" ? "Atribuir revisor" : "Atribuir operador",
+                () => assignOne(t),
+            ));
+        }
+        if (t.status === "reviewed") {
+            viewerActions.appendChild(btn("Re-revisar", async () => {
+                await reReviewOne(t.id);
+                openViewer(t.id);
+            }));
+        }
         if (isBlockable(t)) {
             viewerActions.appendChild(btn("Bloquear", async () => {
                 if (await blockAction([t.id], { reload: false })) openViewer(t.id);

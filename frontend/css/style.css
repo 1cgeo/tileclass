@@ -103,14 +103,26 @@ button.danger:hover:not(:disabled) { background: #fbd9d4; border-color: var(--er
 button.active .kbd { color: var(--accent-hi); border-color: var(--accent); }
 
 input[type="text"], input[type="password"], input[type="date"],
-input[type="number"], textarea, select {
+input[type="number"], input[type="search"], textarea, select {
     background: var(--bg-2); color: var(--text);
     border: 1px solid var(--border-strong);
     padding: 7px 10px; border-radius: var(--radius-sm);
     font-size: 13px; font-family: inherit;
     transition: border-color var(--transition), box-shadow var(--transition);
     width: 100%;
+    -webkit-appearance: none;
+    appearance: none;
 }
+input[type="search"]::-webkit-search-cancel-button {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 14px; height: 14px;
+    background: var(--text-muted);
+    -webkit-mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M4 4l8 8M12 4l-8 8' stroke='black' stroke-width='2' stroke-linecap='round' fill='none'/></svg>") center/contain no-repeat;
+            mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M4 4l8 8M12 4l-8 8' stroke='black' stroke-width='2' stroke-linecap='round' fill='none'/></svg>") center/contain no-repeat;
+    cursor: pointer;
+}
+input[type="search"]::-webkit-search-cancel-button:hover { background: var(--text); }
 input:focus, textarea:focus, select:focus {
     outline: none; border-color: var(--accent);
     box-shadow: 0 0 0 3px var(--accent-soft);
@@ -397,6 +409,9 @@ input[type="range"] {
 }
 #canvas-cursor { pointer-events: auto; }
 #canvas-viewport.space-held #canvas-cursor { pointer-events: none; }
+/* T-hold: hide user mask/grid so the WC overlay (rendered by MapLibre) shows */
+#canvas-viewport.wc-held #canvas-mask,
+#canvas-viewport.wc-held #canvas-grid { visibility: hidden; }
 /* Paint area highlight — bright border on the 256x256 area, plus an outer
    dim wash so the context imagery is visibly "read-only". */
 #paint-bounds {
@@ -417,7 +432,34 @@ input[type="range"] {
     align-items: center;
     height: var(--footer-h);
 }
-.footer .primary { margin-left: auto; padding: 9px 24px; font-size: 14px; font-weight: 600; }
+.footer .footer-pause {
+    margin-left: auto;
+    background: var(--warn);
+    border-color: var(--warn);
+    color: #fff;
+}
+.footer .footer-pause:hover:not(:disabled) {
+    background: #92410a;
+    border-color: #92410a;
+}
+#btn-submit.primary:not(.incomplete) {
+    padding: 7px 18px;
+    font-size: 12px;
+    font-weight: 600;
+    background: var(--ok);
+    border-color: var(--ok);
+    color: #fff;
+}
+#btn-submit.primary:not(.incomplete):hover:not(:disabled) {
+    background: #0f6e2e;
+    border-color: #0f6e2e;
+}
+.sidebar-action {
+    width: 100%;
+    margin-top: var(--space-2);
+    font-size: 12px;
+    text-align: center;
+}
 
 /* ---------- Modal ---------- */
 .modal {

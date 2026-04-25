@@ -33,7 +33,6 @@
             <div class="header-right">
                 <span>Hoje: <span id="today-count">0</span></span>
                 <span id="user-label"></span>
-                <button id="btn-help" title="Atalhos (?)">?</button>
                 <button id="btn-logout">Sair</button>
             </div>
         </header>
@@ -56,7 +55,8 @@
                 <section class="opacity">
                     <h3>Opacidade <span id="opacity-label" style="float:right;color:var(--text-muted);font-weight:400;text-transform:none;letter-spacing:0;">50%</span></h3>
                     <input type="range" id="mask-opacity" min="0" max="100" value="50"
-                           title="0% esconde a máscara; 100% a deixa totalmente opaca sobre o satélite. Atalhos: [ / ]">
+                           title="0% esconde a máscara; 100% a deixa totalmente opaca sobre o satélite. Atalhos: Z / X">
+                    <button id="btn-gmaps" class="sidebar-action" title="Abre esta região no Google Maps (satélite) em nova aba — útil quando há dúvida grande sobre a classe">Ver no Google Maps</button>
                 </section>
             </aside>
 
@@ -127,13 +127,14 @@
                     <div class="sc-row"><span class="kbd">1</span>–<span class="kbd">6</span><span>Classe</span></div>
                     <div class="sc-row"><span class="kbd">Q</span><span class="kbd">W</span><span class="kbd">E</span><span>Pincel/Borracha/Balde</span></div>
                     <div class="sc-row"><span class="kbd">A</span><span class="kbd">S</span><span>Tamanho − / +</span></div>
-                    <div class="sc-row"><span class="kbd">D</span><span class="kbd">Z</span><span>Opacidade − / +</span></div>
-                    <div class="sc-row"><span class="kbd">X</span><span class="kbd">C</span><span>Destacar / próximo faltante</span></div>
+                    <div class="sc-row"><span class="kbd">Z</span><span class="kbd">X</span><span>Opacidade − / +</span></div>
+                    <div class="sc-row"><span class="kbd">F</span><span class="kbd">C</span><span>Destacar / próximo faltante</span></div>
+                    <div class="sc-row"><span class="kbd">D</span><span class="kbd">R</span><span>Imagem 2ª / 3ª (segurando)</span></div>
+                    <div class="sc-row"><span class="kbd">T</span><span>WorldCover (segurando)</span></div>
+                    <div class="sc-row"><span class="kbd">Space</span><span>Esconder máscara (segurando)</span></div>
                     <div class="sc-row"><span class="kbd">⌃Z</span><span class="kbd">⌃Y</span><span>Desfazer/Refazer</span></div>
                     <div class="sc-row"><span class="kbd">Roda</span><span>Zoom</span></div>
                     <div class="sc-row">Botão direito + arrastar<span>Mover</span></div>
-                    <div class="sc-row"><span class="kbd">Space</span><span>Esconder máscara (segurando)</span></div>
-                    <button id="btn-help-inline" class="link-btn" type="button">Ver todos os atalhos</button>
                 </section>
             </aside>
         </main>
@@ -141,11 +142,22 @@
         <footer class="footer">
             <button id="btn-undo" title="Ctrl+Z">Desfazer <span class="kbd">⌃Z</span></button>
             <button id="btn-redo" title="Ctrl+Shift+Z">Refazer <span class="kbd">⌃⇧Z</span></button>
-            <button id="btn-pause" title="Pausa salva o trabalho parcial no servidor e congela o tempo">Pausar</button>
-            <button id="btn-gmaps" title="Abre esta região no Google Maps (satélite) em nova aba — útil quando há dúvida grande sobre a classe">Ver no Google Maps</button>
             <button id="btn-problem">Reportar Problema</button>
+            <button id="btn-pause" class="footer-pause" title="Pausa salva o trabalho parcial no servidor e congela o tempo">Pausar</button>
             <button id="btn-submit" class="primary"><span id="submit-label">Submeter</span></button>
         </footer>
+
+        <!-- Operator action confirmation modal (submit/pause) -->
+        <div id="modal-action-confirm" class="modal hidden">
+            <div class="modal-box">
+                <h2 id="action-confirm-title">Confirmar</h2>
+                <p id="action-confirm-message"></p>
+                <div class="modal-actions">
+                    <button id="action-confirm-cancel">Cancelar</button>
+                    <button id="action-confirm-ok" class="primary">Confirmar</button>
+                </div>
+            </div>
+        </div>
 
         <!-- Problem modal -->
         <div id="modal-problem" class="modal hidden">
@@ -164,28 +176,6 @@
             </div>
         </div>
 
-        <!-- Help overlay -->
-        <div id="modal-help" class="modal hidden">
-            <div class="modal-box">
-                <h2>Atalhos</h2>
-                <table class="shortcuts">
-                    <tr><td>1–6</td><td>Selecionar classe</td></tr>
-                    <tr><td>B / E</td><td>Pincel / Borracha (E alterna)</td></tr>
-                    <tr><td>G</td><td>Balde de tinta</td></tr>
-                    <tr><td>+ / −</td><td>Tamanho do pincel</td></tr>
-                    <tr><td>Ctrl+Z / Ctrl+Shift+Z</td><td>Desfazer / Refazer</td></tr>
-                    <tr><td>Espaço (segurar)</td><td>Esconder máscara</td></tr>
-                    <tr><td>O</td><td>Modo só contornos</td></tr>
-                    <tr><td>[ / ]  ou  Z / X</td><td>Opacidade da máscara (Z aumenta, X diminui)</td></tr>
-                    <tr><td>Ctrl+roda do mouse</td><td>Ajustar opacidade</td></tr>
-                    <tr><td>C</td><td>Ir para próximo pixel faltante</td></tr>
-                    <tr><td>F</td><td>Destacar pixels faltantes</td></tr>
-                    <tr><td>D</td><td>Alternar imagem secundária (referência)</td></tr>
-                    <tr><td>Ctrl+S</td><td>Submeter</td></tr>
-                </table>
-                <div class="modal-actions"><button id="help-close" class="primary">Fechar</button></div>
-            </div>
-        </div>
     </div>
 
     <!-- Admin view -->

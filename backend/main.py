@@ -68,18 +68,25 @@ FRONTEND_DIR = FsPath(__file__).parent.parent / "frontend"
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
-    # Optional MBTiles tile source
-    mbtiles_path = (get_config().get("tileserver") or {}).get("mbtiles_path")
-    if mbtiles_path:
-        p = FsPath(mbtiles_path)
-        if not p.is_absolute():
-            p = FsPath(__file__).resolve().parent / p
-        if p.exists():
-            mbtiles_service.open_mbtiles(p)
+    cfg = get_config()
+    _open_optional(cfg.get("tileserver"), mbtiles_service.primary)
+    _open_optional(cfg.get("worldcover"), mbtiles_service.worldcover)
     try:
         yield
     finally:
-        mbtiles_service.close_mbtiles()
+        mbtiles_service.primary.close()
+        mbtiles_service.worldcover.close()
+
+
+def _open_optional(section: dict | None, reader: mbtiles_service.MBTilesReader) -> None:
+    path = (section or {}).get("mbtiles_path")
+    if not path:
+        return
+    p = FsPath(path)
+    if not p.is_absolute():
+        p = FsPath(__file__).resolve().parent / p
+    if p.exists():
+        reader.open(p)
 
 
 app = FastAPI(title="TileClass", version="1.0.0", lifespan=lifespan)
@@ -107,11 +114,12 @@ async def security_headers(request: Request, call_next):
     # Intranet deployment: all assets served from same origin.
     response.headers.setdefault(
         "Content-Security-Policy",
-        "default-src 'self'; img-src 'self' data: blob: https://server.arcgisonline.com; "
+        "default-src 'self'; "
+        "img-src 'self' data: blob: https://server.arcgisonline.com https://tiles.maps.eox.at; "
         "style-src 'self' 'unsafe-inline' https://unpkg.com; "
         "script-src 'self' https://unpkg.com; "
         "worker-src 'self' blob:; "
-        "connect-src 'self' https://server.arcgisonline.com; "
+        "connect-src 'self' https://server.arcgisonline.com https://tiles.maps.eox.at; "
         "frame-ancestors 'none'",
     )
     response.headers.setdefault("X-Frame-Options", "DENY")
@@ -216,30 +224,40 @@ def config_tileserver():
     cfg = get_config()
     ts = cfg.get("tileserver") or {}
     ts2 = cfg.get("tileserver_secondary") or {}
+    ts3 = cfg.get("tileserver_tertiary") or {}
+    primary = mbtiles_service.primary
+    wc = mbtiles_service.worldcover
     min_zoom = max_zoom = None
-    if mbtiles_service.is_open():
-        fmt = mbtiles_service.tile_format()
-        url = f"/api/xyz/{{z}}/{{x}}/{{y}}.{fmt}"
-        min_zoom, max_zoom = mbtiles_service.zoom_range()
+    if primary.is_open():
+        url = f"/api/xyz/{{z}}/{{x}}/{{y}}.{primary.tile_format()}"
+        min_zoom, max_zoom = primary.zoom_range()
     else:
         url = ts.get("url_template", "")
+    wc_url = None
+    wc_min = wc_max = None
+    if wc.is_open():
+        wc_url = f"/api/wc/{{z}}/{{x}}/{{y}}.{wc.tile_format()}"
+        wc_min, wc_max = wc.zoom_range()
     return {
         "url_template": url,
         "secondary_url_template": ts2.get("url_template"),
+        "tertiary_url_template": ts3.get("url_template"),
         "min_zoom": min_zoom,
         "max_zoom": max_zoom,
         "secondary_max_zoom": ts2.get("max_zoom", 22),
+        "tertiary_max_zoom": ts3.get("max_zoom", 22),
+        "wc_url_template": wc_url,
+        "wc_min_zoom": wc_min,
+        "wc_max_zoom": wc_max,
     }
 
 
-@app.get("/api/xyz/{z}/{x}/{y}.{ext}")
-def mbtiles_xyz(z: int, x: int, y: int, ext: str):
-    """Serve MBTiles tiles by XYZ (TMS conversion internal)."""
-    if not mbtiles_service.is_open():
+def _serve_mbtiles(reader: mbtiles_service.MBTilesReader, z: int, x: int, y: int, ext: str):
+    if not reader.is_open():
         raise HTTPException(status_code=404, detail="mbtiles not configured")
-    if ext.lower() != mbtiles_service.tile_format():
+    if ext.lower() != reader.tile_format():
         raise HTTPException(status_code=404, detail="wrong extension")
-    data = mbtiles_service.get_tile(z, x, y)
+    data = reader.get_tile(z, x, y)
     if data is None:
         return Response(status_code=204)
     media = "image/webp" if ext.lower() == "webp" else f"image/{ext.lower()}"
@@ -248,6 +266,16 @@ def mbtiles_xyz(z: int, x: int, y: int, ext: str):
         media_type=media,
         headers={"Cache-Control": "public, max-age=86400, immutable"},
     )
+
+
+@app.get("/api/xyz/{z}/{x}/{y}.{ext}")
+def mbtiles_xyz(z: int, x: int, y: int, ext: str):
+    return _serve_mbtiles(mbtiles_service.primary, z, x, y, ext)
+
+
+@app.get("/api/wc/{z}/{x}/{y}.{ext}")
+def wc_mbtiles_xyz(z: int, x: int, y: int, ext: str):
+    return _serve_mbtiles(mbtiles_service.worldcover, z, x, y, ext)
 
 
 # ---------- Tiles (operator) ----------
@@ -368,6 +396,7 @@ def admin_tiles(status: TileStatus | None = None,
                 user_id: int | None = Query(default=None, ge=1),
                 date_from: str | None = None, date_to: str | None = None,
                 paused: bool | None = None,
+                q: str | None = Query(default=None, max_length=200),
                 limit: int = Query(default=200, ge=1, le=1000),
                 offset: int = Query(default=0, ge=0),
                 _: auth.CurrentUser = Depends(auth.require_admin)):
@@ -376,13 +405,14 @@ def admin_tiles(status: TileStatus | None = None,
     if date_to:
         date_to = _parse_iso_date(date_to, "date_to")
     status_v = status.value if status else None
+    q_norm = q.strip() if q else None
     items = admin_service.list_tiles(
         status=status_v, user_id=user_id, date_from=date_from, date_to=date_to,
-        paused=paused, limit=limit, offset=offset,
+        paused=paused, q=q_norm, limit=limit, offset=offset,
     )
     total = admin_service.count_tiles(
         status=status_v, user_id=user_id, date_from=date_from, date_to=date_to,
-        paused=paused,
+        paused=paused, q=q_norm,
     )
     # Pagination metadata in headers keeps the JSON body a plain list so
     # existing clients/tests that index into it keep working.

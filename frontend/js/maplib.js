@@ -4,27 +4,46 @@
 // overzooms (scales tiles from this level) when the viewport zooms beyond it,
 // so we avoid 204 requests for zoom levels the tileserver does not serve.
 
-export function makeRasterStyle(tileserverUrlTemplate, maxZoom = 22) {
-    return {
-        version: 8,
-        sources: {
-            sat: {
-                type: "raster",
-                tiles: [tileserverUrlTemplate],
-                tileSize: 256,
-                minzoom: 0,
-                maxzoom: maxZoom,
-            },
+const OVERLAY_KEYS = ["secondary", "tertiary", "wc"];
+
+export function makeRasterStyle(primaryUrl, primaryMaxZoom = 22, overlays = {}) {
+    const sources = {
+        sat: {
+            type: "raster",
+            tiles: [primaryUrl],
+            tileSize: 256,
+            minzoom: 0,
+            maxzoom: primaryMaxZoom,
         },
-        layers: [{ id: "sat-layer", type: "raster", source: "sat" }],
     };
+    const layers = [{ id: "sat-layer", type: "raster", source: "sat" }];
+    for (const key of OVERLAY_KEYS) {
+        const o = overlays[key];
+        if (!o || !o.url) continue;
+        sources[key] = {
+            type: "raster",
+            tiles: [o.url],
+            tileSize: 256,
+            minzoom: o.minZoom ?? 0,
+            maxzoom: o.maxZoom ?? primaryMaxZoom,
+        };
+        // Opacity-toggle (not visibility) so tiles prefetch and the first
+        // hold has no fetch latency.
+        layers.push({
+            id: `${key}-layer`,
+            type: "raster",
+            source: key,
+            paint: { "raster-opacity": 0, "raster-resampling": "nearest" },
+        });
+    }
+    return { version: 8, sources, layers };
 }
 
-export function createLockedMap(containerId, tileserverUrlTemplate, bbox, maxZoom = 22) {
+export function createLockedMap(containerId, primaryUrl, bbox, primaryMaxZoom = 22, overlays = {}) {
     const [w, s, e, n] = bbox;
     const map = new maplibregl.Map({
         container: containerId,
-        style: makeRasterStyle(tileserverUrlTemplate, maxZoom),
+        style: makeRasterStyle(primaryUrl, primaryMaxZoom, overlays),
         bounds: [[w, s], [e, n]],
         fitBoundsOptions: { padding: 0, animate: false, linear: true },
         interactive: false,
@@ -34,14 +53,21 @@ export function createLockedMap(containerId, tileserverUrlTemplate, bbox, maxZoo
     return map;
 }
 
+export function setOverlayVisible(map, key, visible) {
+    if (!map) return;
+    const id = `${key}-layer`;
+    if (!map.getLayer(id)) return;
+    map.setPaintProperty(id, "raster-opacity", visible ? 1 : 0);
+}
+
 export function setMapBbox(map, bbox) {
     const [w, s, e, n] = bbox;
     map.fitBounds([[w, s], [e, n]], { padding: 0, animate: false, duration: 0, linear: true });
 }
 
-export function updateMapSource(map, tileserverUrlTemplate, maxZoom = 22) {
+export function updateMapSource(map, primaryUrl, primaryMaxZoom = 22) {
     const style = map.getStyle();
-    style.sources.sat.tiles = [tileserverUrlTemplate];
-    style.sources.sat.maxzoom = maxZoom;
+    style.sources.sat.tiles = [primaryUrl];
+    style.sources.sat.maxzoom = primaryMaxZoom;
     map.setStyle(style);
 }

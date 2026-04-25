@@ -152,9 +152,23 @@ def dashboard() -> dict:
     }
 
 
+def _like_pattern(q: str) -> str:
+    """Escape % and _ for SQL LIKE; use ESCAPE '\\' on the query side."""
+    return "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+
+def _search_clause(q: str | None, args: list, prefix: str = "") -> str | None:
+    """Return a SQL fragment matching id or partial name; appends args."""
+    if not q:
+        return None
+    pat = _like_pattern(q)
+    args.extend([pat, pat])
+    return f"({prefix}name LIKE ? ESCAPE '\\' OR CAST({prefix}id AS TEXT) LIKE ? ESCAPE '\\')"
+
+
 def list_tiles(status: str | None = None, user_id: int | None = None,
                date_from: str | None = None, date_to: str | None = None,
-               paused: bool | None = None,
+               paused: bool | None = None, q: str | None = None,
                limit: int = 200, offset: int = 0) -> list[dict]:
     where = []
     args: list = []
@@ -175,6 +189,9 @@ def list_tiles(status: str | None = None, user_id: int | None = None,
         where.append("t.paused_at IS NOT NULL")
     elif paused is False:
         where.append("t.paused_at IS NULL")
+    search = _search_clause(q, args, prefix="t.")
+    if search:
+        where.append(search)
     where_sql = (" WHERE " + " AND ".join(where)) if where else ""
     conn = connect()
     try:
@@ -200,7 +217,7 @@ def list_tiles(status: str | None = None, user_id: int | None = None,
 
 def count_tiles(status: str | None = None, user_id: int | None = None,
                 date_from: str | None = None, date_to: str | None = None,
-                paused: bool | None = None) -> int:
+                paused: bool | None = None, q: str | None = None) -> int:
     where = []
     args: list = []
     if status: where.append("status=?"); args.append(status)
@@ -215,6 +232,9 @@ def count_tiles(status: str | None = None, user_id: int | None = None,
         where.append("paused_at IS NOT NULL")
     elif paused is False:
         where.append("paused_at IS NULL")
+    search = _search_clause(q, args)
+    if search:
+        where.append(search)
     where_sql = (" WHERE " + " AND ".join(where)) if where else ""
     conn = connect()
     try:
@@ -694,7 +714,7 @@ def tile_thumbnail(tile_id: int, size: int = 128) -> bytes:
     # `count(b"\xff")` is a C-level byte scan on the bytes object, cheaper than
     # any numpy detour — we only fall through to the colorized render when
     # there's at least one non-255 pixel, or MBTiles isn't open.
-    if raw.count(b"\xff") == PIXELS and mbtiles_service.is_open():
+    if raw.count(b"\xff") == PIXELS and mbtiles_service.primary.is_open():
         try:
             return _tile_satellite_png(tile_id, size)
         except HTTPException:
@@ -730,7 +750,7 @@ def _tile_satellite_png(tile_id: int, size: int = 128) -> bytes:
     Shared by the empty-mask fallback in `tile_thumbnail` and the dedicated
     `/satellite-thumbnail` endpoint. Raises 404 if MBTiles isn't open or the
     tile isn't found — callers decide whether to fall through."""
-    if not mbtiles_service.is_open():
+    if not mbtiles_service.primary.is_open():
         raise HTTPException(404, "satellite source not available")
     conn = connect()
     try:
@@ -743,7 +763,7 @@ def _tile_satellite_png(tile_id: int, size: int = 128) -> bytes:
     if not row:
         raise HTTPException(404, "tile not found")
     w, s, e, n = row["bbox_west"], row["bbox_south"], row["bbox_east"], row["bbox_north"]
-    min_z, max_z = mbtiles_service.zoom_range()
+    min_z, max_z = mbtiles_service.primary.zoom_range()
     zoom = max_z if max_z is not None else 19
 
     x0_f = _lon_to_tile_x(w, zoom)
@@ -758,7 +778,7 @@ def _tile_satellite_png(tile_id: int, size: int = 128) -> bytes:
     canvas = Image.new("RGB", ((x1 - x0) * TS, (y1 - y0) * TS), (32, 32, 32))
     for tx in range(x0, x1):
         for ty in range(y0, y1):
-            data = mbtiles_service.get_tile(zoom, tx, ty)
+            data = mbtiles_service.primary.get_tile(zoom, tx, ty)
             if not data:
                 continue
             try:
