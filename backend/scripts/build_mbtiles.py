@@ -267,6 +267,10 @@ def main() -> None:
 
     # Índice e finalização
     conn.execute("ANALYZE")
+    # Funde o WAL no arquivo principal e desliga o modo WAL para não deixar
+    # -wal/-shm órfãos (readers usam immutable=1, não precisam de WAL).
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    conn.execute("PRAGMA journal_mode=DELETE")
     conn.close()
 
     # Stats finais

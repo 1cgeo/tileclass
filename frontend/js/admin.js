@@ -1,5 +1,5 @@
 // Admin panel: dashboard, tiles (list+grid+bulk+filters+viewer), problems, users.
-import { apiGet, apiGetBlob, apiGetWithHeaders, apiPostJson, apiJson, logout as apiLogout } from "./api.js";
+import { apiGet, apiGetBlob, apiGetWithHeaders, apiPostJson, apiPatchJson, apiJson, logout as apiLogout } from "./api.js";
 import { showToast } from "./toast.js";
 import { createLockedMap, tileTransformRequest } from "./maplib.js";
 import { hexToRgb, blobToImage, escapeHtml as escape, fmtDate } from "./utils.js";
@@ -35,8 +35,14 @@ let mapView = null;
 const BLOCKABLE_STATES = new Set(["pending"]);
 const isBlockable = t => BLOCKABLE_STATES.has(t.status);
 
+let _adminInitialized = false;
+
 export async function initAdmin(user) {
     document.getElementById("admin-user-label").textContent = `${user.username} (admin)`;
+    if (_adminInitialized) {
+        await enterAdmin();
+        return;
+    }
     document.getElementById("btn-admin-logout").addEventListener("click", async () => {
         await apiLogout(); location.reload();
     });
@@ -57,10 +63,18 @@ export async function initAdmin(user) {
     // Click on the backdrop (outside the modal-box) closes the viewer.
     vtModal.addEventListener("click", (ev) => { if (ev.target === vtModal) closeVt(); });
     document.addEventListener("keydown", (ev) => {
+        if (document.getElementById("view-admin").classList.contains("hidden")) return;
         if (ev.key === "Escape" && !vtModal.classList.contains("hidden")) closeVt();
     });
     wireConfirmModal();
+    _adminInitialized = true;
     await selectTab("dashboard");
+}
+
+// Re-render the active tab so dashboards/lists reflect any work the admin
+// just did while toggled into the editor view.
+export async function enterAdmin() {
+    await selectTab(currentTab || "dashboard");
 }
 
 async function selectTab(tab) {
@@ -1634,9 +1648,14 @@ async function renderUsers(root) {
             const rvLabel = u.can_review ? "Revogar revisão" : "Permitir revisão";
             tdAct.append(btn(rvLabel, () => toggleCanReview(u.id, !u.can_review)));
         }
-        const reviewerCell = u.role === "admin" ? "—" : (u.can_review ? "sim" : "não");
+        const newRole = u.role === "admin" ? "operator" : "admin";
+        const roleLabel = u.role === "admin" ? "Tornar operador" : "Tornar admin";
+        tdAct.append(btn(roleLabel, () => changeRole(u.id, u.username, newRole)));
+        // Admins are always reviewers (role check shortcuts can_review on the
+        // backend), so display "sim" regardless of the column value.
+        const isReviewer = u.role === "admin" || !!u.can_review;
         tr.append(td(u.id), td(u.username), td(u.role),
-                  td(u.active ? "sim" : "não"), td(reviewerCell),
+                  td(u.active ? "sim" : "não"), td(isReviewer ? "sim" : "não"),
                   td(fmtDate(u.created_at)), tdAct);
         tbody.appendChild(tr);
     }
@@ -1646,23 +1665,34 @@ async function renderUsers(root) {
 
 async function toggleCanReview(userId, canReview) {
     try {
-        await apiJson(`/api/admin/users/${userId}/can-review`, {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ can_review: canReview }),
-        });
+        await apiPatchJson(`/api/admin/users/${userId}/can-review`, { can_review: canReview });
         showToast(canReview ? "Revisor habilitado." : "Revisor revogado.", "success");
+        selectTab("users");
+    } catch (e) { showToast(`Erro: ${e.message}`, "error"); }
+}
+
+async function changeRole(userId, username, newRole) {
+    const promoting = newRole === "admin";
+    const r = await confirmDestructive({
+        title: promoting ? `Promover ${username} a admin?` : `Rebaixar ${username} a operador?`,
+        description: promoting
+            ? "O usuário ganhará acesso total ao painel administrativo (incluindo gerenciar usuários, resetar tiles e mudar roles)."
+            : "O usuário perderá o acesso ao painel administrativo. As atribuições de tiles em andamento são preservadas.",
+        ids: [userId],
+        confirmLabel: promoting ? "Promover" : "Rebaixar",
+        danger: !promoting,
+    });
+    if (!r.confirmed) return;
+    try {
+        await apiPatchJson(`/api/admin/users/${userId}/role`, { role: newRole });
+        showToast(promoting ? "Usuário promovido a admin." : "Usuário rebaixado a operador.", "success");
         selectTab("users");
     } catch (e) { showToast(`Erro: ${e.message}`, "error"); }
 }
 
 async function toggleActive(userId, active) {
     try {
-        await apiJson(`/api/admin/users/${userId}/active`, {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ active }),
-        });
+        await apiPatchJson(`/api/admin/users/${userId}/active`, { active });
         showToast(active ? "Usuário ativado." : "Usuário desativado.", "success");
         selectTab("users");
     } catch (e) { showToast(`Erro: ${e.message}`, "error"); }

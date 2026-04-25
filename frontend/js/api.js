@@ -147,6 +147,14 @@ export async function apiPostJson(url, body) {
     });
 }
 
+export async function apiPatchJson(url, body) {
+    return apiJson(url, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+    });
+}
+
 export async function apiPostBytes(url, bytes, extraHeaders = {}) {
     return apiJson(url, {
         method: "POST",

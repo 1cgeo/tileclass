@@ -6,11 +6,6 @@
 
 const OVERLAY_KEYS = ["secondary", "tertiary", "wc"];
 
-// Tiny non-zero opacity defeats MapLibre's opacity-0 short-circuit so overlay
-// tiles load eagerly with the primary (first hold is instant) and stay loaded
-// across bbox changes when the user releases the hold key.
-const OVERLAY_OFF_OPACITY = 0.0001;
-
 // Bing Maps uses quadkeys instead of z/x/y. We expose a custom URL scheme
 // `bingmaps://{z}/{x}/{y}` so config.yaml can stay declarative; the frontend
 // rewrites these on the fly via MapLibre's transformRequest hook.
@@ -57,16 +52,12 @@ export function makeRasterStyle(primaryUrl, primaryMaxZoom = 22, overlays = {}) 
             minzoom: o.minZoom ?? 0,
             maxzoom: o.maxZoom ?? primaryMaxZoom,
         };
-        // fade-duration 0: snap toggle, no cross-fade re-render loop.
         layers.push({
             id: `${key}-layer`,
             type: "raster",
             source: key,
-            paint: {
-                "raster-opacity": OVERLAY_OFF_OPACITY,
-                "raster-resampling": "nearest",
-                "raster-fade-duration": 0,
-            },
+            layout: { visibility: "none" },
+            paint: { "raster-resampling": "nearest" },
         });
     }
     return { version: 8, sources, layers };
@@ -91,7 +82,7 @@ export function setOverlayVisible(map, key, visible) {
     if (!map) return;
     const id = `${key}-layer`;
     if (!map.getLayer(id)) return;
-    map.setPaintProperty(id, "raster-opacity", visible ? 1 : OVERLAY_OFF_OPACITY);
+    map.setLayoutProperty(id, "visibility", visible ? "visible" : "none");
 }
 
 export function setMapBbox(map, bbox) {

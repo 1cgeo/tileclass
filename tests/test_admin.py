@@ -303,6 +303,73 @@ def test_can_review_endpoint_requires_admin(client, admin_user, operators):
     assert r.status_code == 403
 
 
+def _set_role(client, admin_tok, user_id, role):
+    return client.patch(f"/api/admin/users/{user_id}/role",
+                        headers=headers(admin_tok), json={"role": role})
+
+
+def test_promote_operator_to_admin_grants_review_rights(
+    client, admin_user, operators
+):
+    adm = token(client, "admin", "admin123")
+    # operator starts with can_review=0 (fixture forces it on, normalize first)
+    client.patch(f"/api/admin/users/{operators[0]['id']}/can-review",
+                 headers=headers(adm), json={"can_review": False})
+    r = _set_role(client, adm, operators[0]["id"], "admin")
+    assert r.status_code == 200, r.text
+    assert r.json() == {"id": operators[0]["id"], "role": "admin"}
+    # The promoted user should now show up as admin AND as a reviewer.
+    users = {u["id"]: u for u in client.get("/api/admin/users",
+                                            headers=headers(adm)).json()}
+    assert users[operators[0]["id"]]["role"] == "admin"
+    assert bool(users[operators[0]["id"]]["can_review"]) is True
+
+
+def test_demote_admin_to_operator(client, admin_user, operators):
+    adm = token(client, "admin", "admin123")
+    # First create a second admin so we have someone to demote.
+    _set_role(client, adm, operators[0]["id"], "admin")
+    r = _set_role(client, adm, operators[0]["id"], "operator")
+    assert r.status_code == 200
+    assert r.json()["role"] == "operator"
+
+
+def test_cannot_demote_last_active_admin(client, admin_user, operators):
+    adm = token(client, "admin", "admin123")
+    # admin_user fixture creates a single admin; demoting it must fail.
+    me = client.get("/api/auth/me", headers=headers(adm)).json()
+    r = _set_role(client, adm, me["id"], "operator")
+    assert r.status_code == 409
+    assert "last active admin" in r.json()["detail"].lower()
+
+
+def test_set_role_rejects_invalid_value(client, admin_user, operators):
+    adm = token(client, "admin", "admin123")
+    r = client.patch(f"/api/admin/users/{operators[0]['id']}/role",
+                     headers=headers(adm), json={"role": "superuser"})
+    # Pydantic Literal -> 422.
+    assert r.status_code == 422
+
+
+def test_set_role_endpoint_requires_admin(client, admin_user, operators):
+    op1 = token(client, "op1", "secret123")
+    r = client.patch(f"/api/admin/users/{operators[1]['id']}/role",
+                     headers=headers(op1), json={"role": "admin"})
+    assert r.status_code == 403
+
+
+def test_create_admin_user_seeds_can_review(client, admin_user):
+    adm = token(client, "admin", "admin123")
+    r = client.post("/api/admin/users", headers=headers(adm),
+                    json={"username": "admin2", "password": "secret123",
+                          "role": "admin"})
+    assert r.status_code == 200
+    users = {u["username"]: u for u in client.get("/api/admin/users",
+                                                  headers=headers(adm)).json()}
+    assert users["admin2"]["role"] == "admin"
+    assert bool(users["admin2"]["can_review"]) is True
+
+
 def test_admin_assigns_pending_tile_to_operator(
     client, admin_user, operators, tiles
 ):

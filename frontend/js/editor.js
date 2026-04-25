@@ -118,8 +118,15 @@ const GRID_LINE_METERS = 0.5;
 const GRID_CELL_METERS = 2.5;
 const GRID_LINE_DISPLAY = SCALE * (GRID_LINE_METERS / GRID_CELL_METERS); // in DISPLAY units
 
+let _editorInitialized = false;
+
 export async function initEditor(user) {
     currentUser = user;
+    if (_editorInitialized) {
+        document.getElementById("user-label").textContent = user.username;
+        await enterEditor();
+        return;
+    }
     // Test hook: when ?test=1 is present in the URL, expose internal state so
     // E2E tests can inspect the mask and drive state transitions. Never enabled
     // in normal use. Do not add production logic that depends on __tcTest__.
@@ -166,6 +173,17 @@ export async function initEditor(user) {
     buildClassPanel();
     buildColorLut();
     attachEvents();
+    _editorInitialized = true;
+    await enterEditor();
+}
+
+export async function enterEditor() {
+    // display:none while toggled to admin invalidates MapLibre's layout — resize
+    // on re-entry. Keep the existing tile so unsaved work isn't refetched away.
+    if (currentTile && satMap) {
+        requestAnimationFrame(() => satMap && satMap.resize());
+        return;
+    }
     // Paused tiles need an explicit confirmation before /resume restarts the timer.
     let resume = null;
     try {
@@ -986,6 +1004,9 @@ function setTool(t) {
 }
 
 function onKeyDown(ev) {
+    // Listeners stay attached when admin toggles to the panel — gate so editor
+    // shortcuts (e.g. Z/X opacity) don't fire against a hidden canvas.
+    if (document.getElementById("view-editor").classList.contains("hidden")) return;
     if (isTextFocused() || isModalOpen()) {
         if (ev.key === "Escape") {
             document.getElementById("modal-problem").classList.add("hidden");
@@ -1041,6 +1062,7 @@ function onKeyDown(ev) {
 }
 
 function onKeyUp(ev) {
+    if (document.getElementById("view-editor").classList.contains("hidden")) return;
     if (ev.key === " ") {
         spaceHeld = false;
         document.getElementById("canvas-viewport").classList.remove("space-held");

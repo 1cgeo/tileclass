@@ -95,6 +95,10 @@ class SetCanReviewIn(BaseModel):
     can_review: bool
 
 
+class SetRoleIn(BaseModel):
+    role: Literal["operator", "admin"]
+
+
 class AssignTileIn(BaseModel):
     user_id: int
     reason: str | None = None
