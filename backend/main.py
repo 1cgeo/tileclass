@@ -115,11 +115,11 @@ async def security_headers(request: Request, call_next):
     response.headers.setdefault(
         "Content-Security-Policy",
         "default-src 'self'; "
-        "img-src 'self' data: blob: https://server.arcgisonline.com https://tiles.maps.eox.at; "
+        "img-src 'self' data: blob: https://server.arcgisonline.com https://*.virtualearth.net; "
         "style-src 'self' 'unsafe-inline' https://unpkg.com; "
         "script-src 'self' https://unpkg.com; "
         "worker-src 'self' blob:; "
-        "connect-src 'self' https://server.arcgisonline.com https://tiles.maps.eox.at; "
+        "connect-src 'self' https://server.arcgisonline.com https://*.virtualearth.net; "
         "frame-ancestors 'none'",
     )
     response.headers.setdefault("X-Frame-Options", "DENY")

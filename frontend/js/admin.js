@@ -1,7 +1,7 @@
 // Admin panel: dashboard, tiles (list+grid+bulk+filters+viewer), problems, users.
 import { apiGet, apiGetBlob, apiGetWithHeaders, apiPostJson, apiJson, logout as apiLogout } from "./api.js";
 import { showToast } from "./toast.js";
-import { createLockedMap } from "./maplib.js";
+import { createLockedMap, tileTransformRequest } from "./maplib.js";
 import { hexToRgb, blobToImage, escapeHtml as escape, fmtDate } from "./utils.js";
 
 let tileserverUrl = "";
@@ -1262,6 +1262,7 @@ async function renderMap(root) {
         },
         bounds: [[w, s], [e, n]],
         fitBoundsOptions: { padding: 40, animate: false, maxZoom: 14 },
+        transformRequest: tileTransformRequest,
     });
     mapView.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
 

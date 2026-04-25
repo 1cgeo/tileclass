@@ -469,6 +469,8 @@ input[type="range"] {
     z-index: 100; padding: var(--space-4);
     animation: fadeIn 140ms ease-out;
 }
+/* Viewer is a host modal — confirm/assign/etc. open on top of it. */
+#modal-view-tile { z-index: 90; }
 @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
 .modal-box {
     background: var(--bg-1); padding: var(--space-5);
