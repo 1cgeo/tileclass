@@ -1355,7 +1355,10 @@ function showPausedResumeScreen(tile) {
         msg.textContent = `Tile: ${truncateName(tile.name)} (#${tile.id}). Deseja continuar de onde parou?`;
     }
     const btn = document.getElementById("paused-resume-continue");
-    if (btn) btn.dataset.tileId = String(tile.id);
+    if (btn) {
+        btn.dataset.tileId = String(tile.id);
+        btn.disabled = false;
+    }
     const el = document.getElementById("paused-resume-screen");
     if (el) el.classList.remove("hidden");
     setTimeout(() => btn?.focus(), 0);
