@@ -4,8 +4,9 @@ The SQLite DB is opened read-only + immutable, one connection per worker
 thread (FastAPI runs sync endpoints in a thread pool, and a single sqlite3
 connection cannot serve concurrent queries even with check_same_thread=False).
 
-Two pre-instantiated singletons are exported: `primary` (the satellite/imagery
-mbtiles, default WebP) and `worldcover` (the WC overlay, PNG).
+Three pre-instantiated singletons are exported: `primary` (the satellite/imagery
+mbtiles, default WebP), `worldcover` (the WC overlay, PNG), and `mapbiomas`
+(the MapBiomas overlay, PNG, mapped to TileClass palette).
 """
 from __future__ import annotations
 import sqlite3
@@ -88,3 +89,4 @@ class MBTilesReader:
 
 primary = MBTilesReader("webp")
 worldcover = MBTilesReader("png")
+mapbiomas = MBTilesReader("png")

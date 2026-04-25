@@ -54,10 +54,10 @@ let nextMissingCursor = 0;     // N: walks through missing pixels in raster orde
 let tileserverUrl = "";
 let tileserverMaxZoom = 22;
 // Overlays are hold-to-show; each cfg is { url, minZoom?, maxZoom? } or null.
-const overlayCfg = { secondary: null, tertiary: null, wc: null };
-const overlayHeld = { secondary: false, tertiary: false, wc: false };
-const OVERLAY_LABEL = { secondary: "secundária", tertiary: "terciária", wc: "WorldCover" };
-const KEY_TO_OVERLAY = { d: "secondary", r: "tertiary", t: "wc" };
+const overlayCfg = { secondary: null, tertiary: null, wc: null, mb: null };
+const overlayHeld = { secondary: false, tertiary: false, wc: false, mb: false };
+const OVERLAY_LABEL = { secondary: "secundária", tertiary: "terciária", wc: "WorldCover", mb: "MapBiomas" };
+const KEY_TO_OVERLAY = { d: "secondary", r: "tertiary", t: "wc", y: "mb" };
 let todayCount = 0;
 
 // Preload cache for the "next" tile while user paints
@@ -167,6 +167,9 @@ export async function initEditor(user) {
         : null;
     overlayCfg.wc = cfg.wc_url_template
         ? { url: cfg.wc_url_template, minZoom: cfg.wc_min_zoom ?? 0, maxZoom: cfg.wc_max_zoom ?? 22 }
+        : null;
+    overlayCfg.mb = cfg.mb_url_template
+        ? { url: cfg.mb_url_template, minZoom: cfg.mb_min_zoom ?? 0, maxZoom: cfg.mb_max_zoom ?? 22 }
         : null;
     classes = cls;
     classesById = Object.fromEntries(classes.map(c => [c.id, c]));
@@ -491,11 +494,16 @@ function updateSubmitButton(missing) {
 
 // --- Rendering ---
 
+// Categorical overlays (wc/mb) hide the user mask while held so the operator
+// sees the overlay clean. Imagery overlays (secondary/tertiary) keep the mask
+// visible because they are alternative satellite views, not a comparison layer.
+const HIDE_MASK_OVERLAYS = new Set(["wc", "mb"]);
+
 function setOverlayHold(key, on) {
     if (!satMap) return;
     setOverlayVisible(satMap, key, on);
-    if (key === "wc") {
-        document.getElementById("canvas-viewport").classList.toggle("wc-held", on);
+    if (HIDE_MASK_OVERLAYS.has(key)) {
+        document.getElementById("canvas-viewport").classList.toggle(`${key}-held`, on);
     }
 }
 

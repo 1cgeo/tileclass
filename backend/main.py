@@ -71,11 +71,13 @@ async def lifespan(app: FastAPI):
     cfg = get_config()
     _open_optional(cfg.get("tileserver"), mbtiles_service.primary)
     _open_optional(cfg.get("worldcover"), mbtiles_service.worldcover)
+    _open_optional(cfg.get("mapbiomas"), mbtiles_service.mapbiomas)
     try:
         yield
     finally:
         mbtiles_service.primary.close()
         mbtiles_service.worldcover.close()
+        mbtiles_service.mapbiomas.close()
 
 
 def _open_optional(section: dict | None, reader: mbtiles_service.MBTilesReader) -> None:
@@ -227,6 +229,7 @@ def config_tileserver():
     ts3 = cfg.get("tileserver_tertiary") or {}
     primary = mbtiles_service.primary
     wc = mbtiles_service.worldcover
+    mb = mbtiles_service.mapbiomas
     min_zoom = max_zoom = None
     if primary.is_open():
         url = f"/api/xyz/{{z}}/{{x}}/{{y}}.{primary.tile_format()}"
@@ -238,6 +241,11 @@ def config_tileserver():
     if wc.is_open():
         wc_url = f"/api/wc/{{z}}/{{x}}/{{y}}.{wc.tile_format()}"
         wc_min, wc_max = wc.zoom_range()
+    mb_url = None
+    mb_min = mb_max = None
+    if mb.is_open():
+        mb_url = f"/api/mb/{{z}}/{{x}}/{{y}}.{mb.tile_format()}"
+        mb_min, mb_max = mb.zoom_range()
     return {
         "url_template": url,
         "secondary_url_template": ts2.get("url_template"),
@@ -249,6 +257,9 @@ def config_tileserver():
         "wc_url_template": wc_url,
         "wc_min_zoom": wc_min,
         "wc_max_zoom": wc_max,
+        "mb_url_template": mb_url,
+        "mb_min_zoom": mb_min,
+        "mb_max_zoom": mb_max,
     }
 
 
@@ -276,6 +287,11 @@ def mbtiles_xyz(z: int, x: int, y: int, ext: str):
 @app.get("/api/wc/{z}/{x}/{y}.{ext}")
 def wc_mbtiles_xyz(z: int, x: int, y: int, ext: str):
     return _serve_mbtiles(mbtiles_service.worldcover, z, x, y, ext)
+
+
+@app.get("/api/mb/{z}/{x}/{y}.{ext}")
+def mb_mbtiles_xyz(z: int, x: int, y: int, ext: str):
+    return _serve_mbtiles(mbtiles_service.mapbiomas, z, x, y, ext)
 
 
 # ---------- Tiles (operator) ----------
