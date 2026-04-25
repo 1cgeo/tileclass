@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.gzip import GZipMiddleware
 
-from . import auth, tile_service, admin_service, mbtiles_service
+from . import auth, tile_service, admin_service, mbtiles_service, mask_tile_service
 from .config import get_config
 from .database import init_db
 from .mask_utils import PIXELS
@@ -448,6 +448,28 @@ def admin_problems(_: auth.CurrentUser = Depends(auth.require_admin)):
 @app.get("/api/admin/tiles/map")
 def admin_tiles_map(_: auth.CurrentUser = Depends(auth.require_admin)):
     return admin_service.list_tiles_map()
+
+
+@app.get("/api/admin/mask-tiles/{z}/{x}/{y}.png")
+def admin_mask_tile(z: int = Path(ge=0, le=22), x: int = Path(ge=0), y: int = Path(ge=0),
+                    _: auth.CurrentUser = Depends(auth.require_admin)):
+    """Colorized mask overlay for the admin map view. Renders + caches a 256x256
+    RGBA tile composed from every TileClass tile whose bbox intersects (z,x,y).
+    Empty regions return a fully transparent PNG."""
+    if z < mask_tile_service.min_zoom() or z > mask_tile_service.max_zoom():
+        raise HTTPException(404, "zoom out of range")
+    n = 1 << z
+    if x >= n or y >= n:
+        raise HTTPException(404, "tile out of range")
+    png = mask_tile_service.get_tile(z, x, y)
+    return Response(
+        content=png,
+        media_type="image/png",
+        # Server caches indefinitely (invalidated on mutations); client
+        # caches briefly so panning around stays snappy without holding
+        # stale colors after a classify/review.
+        headers={"Cache-Control": "public, max-age=60"},
+    )
 
 
 @app.post("/api/admin/tiles/bulk/reset")

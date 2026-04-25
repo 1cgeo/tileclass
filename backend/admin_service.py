@@ -7,7 +7,7 @@ from fastapi import HTTPException
 from PIL import Image
 import numpy as np
 
-from . import mbtiles_service
+from . import mbtiles_service, mask_tile_service
 from .database import connect, transaction, log_action
 from .mask_utils import empty_mask_png, decode_mask, TILE_SIZE, PIXELS
 from .auth import hash_password
@@ -303,6 +303,8 @@ def reset_many(tile_ids: list[int], admin_id: int, reason: str | None = None) ->
                 (empty, tid),
             )
             log_action(conn, admin_id, tid, "reset", detail)
+    for tid in tile_ids:
+        mask_tile_service.safe_invalidate_tile(tid)
     return len(tile_ids)
 
 
@@ -324,8 +326,8 @@ def report_problem_many(tile_ids: list[int], admin_id: int, note: str) -> dict:
     if len(note) > 2000:
         note = note[:2000]
     empty = empty_mask_png()
+    affected_ids: list[int] = []
     with transaction("IMMEDIATE") as conn:
-        count = 0
         for tid in tile_ids:
             row = conn.execute("SELECT id FROM tiles WHERE id=?", (tid,)).fetchone()
             if not row:
@@ -337,8 +339,10 @@ def report_problem_many(tile_ids: list[int], admin_id: int, note: str) -> dict:
                 (note, empty, tid),
             )
             log_action(conn, admin_id, tid, "report_problem", note)
-            count += 1
-    return {"affected": count}
+            affected_ids.append(tid)
+    for tid in affected_ids:
+        mask_tile_service.safe_invalidate_tile(tid)
+    return {"affected": len(affected_ids)}
 
 
 def re_review_many(tile_ids: list[int], admin_id: int, strict: bool = False,
@@ -465,7 +469,9 @@ def delete_tile(tile_id: int, admin_id: int, reason: str | None = None) -> dict:
     clean = _clean_reason(reason)
     with transaction("IMMEDIATE") as conn:
         row = conn.execute(
-            "SELECT id, name, status FROM tiles WHERE id=?", (tile_id,)
+            "SELECT id, name, status, bbox_west, bbox_south, bbox_east, bbox_north "
+            "FROM tiles WHERE id=?",
+            (tile_id,),
         ).fetchone()
         if not row:
             raise HTTPException(404, "tile not found")
@@ -480,6 +486,12 @@ def delete_tile(tile_id: int, admin_id: int, reason: str | None = None) -> dict:
             conn, admin_id, None, "delete_tile",
             json.dumps({"tile_id": tile_id, "name": row["name"], "reason": clean}),
         )
+        bbox = (row["bbox_west"], row["bbox_south"], row["bbox_east"], row["bbox_north"])
+    # Bbox-based invalidation: the row is gone, but the gate above guarantees
+    # status was 'problem' so the mask was already wiped + invalidated by the
+    # report-problem step. This call is a defensive cleanup for any cached
+    # entry that could have been re-rendered between report and delete.
+    mask_tile_service.safe_invalidate_bbox(*bbox)
     return {"id": tile_id, "deleted": True}
 
 
@@ -599,6 +611,11 @@ def block_many(tile_ids: list[int], admin_id: int, reason: str | None = None) ->
                 (tid,),
             )
             log_action(conn, admin_id, tid, "block", detail)
+    # Visible tiles (classified/reviewed) becoming 'blocked' must drop from
+    # the overlay. 'pending' source state was already invisible — invalidating
+    # is a no-op there but keeps the call site uniform.
+    for tid in tile_ids:
+        mask_tile_service.safe_invalidate_tile(tid)
     return len(tile_ids)
 
 
@@ -628,6 +645,9 @@ def unblock_many(tile_ids: list[int], admin_id: int, reason: str | None = None) 
                 (found[tid]["blocked_from"], tid),
             )
             log_action(conn, admin_id, tid, "unblock", detail)
+    # Restoring to classified/reviewed makes the mask visible again.
+    for tid in tile_ids:
+        mask_tile_service.safe_invalidate_tile(tid)
     return len(tile_ids)
 
 

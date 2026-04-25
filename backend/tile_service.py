@@ -4,6 +4,7 @@ import json
 from fastapi import HTTPException
 from .database import connect, transaction, log_action
 from .mask_utils import encode_mask, decode_mask, empty_mask_png, validate_submission, validate_partial
+from . import mask_tile_service
 
 
 def _now() -> str:
@@ -354,6 +355,10 @@ def submit_classification(tile_id: int, user_id: int, raw_mask: bytes,
             log_action(conn, user_id, tile_id, "review")
         else:
             raise HTTPException(409, f"invalid state for submit: {status}")
+    # Mask just changed and the new status is visible in the overlay
+    # (classified or reviewed). Invalidate after commit so a failed submit
+    # leaves the cache untouched.
+    mask_tile_service.safe_invalidate_tile(tile_id)
     return {"ok": True}
 
 
@@ -377,6 +382,9 @@ def report_problem(tile_id: int, user_id: int, note: str) -> dict:
             (note, empty_mask_png(), tile_id),
         )
         log_action(conn, user_id, tile_id, "report_problem", note)
+    # Tile leaves the visible status set ('problem'), and its mask was wiped.
+    # Drop overlay cache so the colored area disappears from the map.
+    mask_tile_service.safe_invalidate_tile(tile_id)
     return {"ok": True}
 
 
@@ -416,6 +424,10 @@ def pause_tile(tile_id: int, user_id: int, raw_mask: bytes,
         )
         log_action(conn, user_id, tile_id, "pause")
         row = conn.execute(f"{_TILE_SELECT} WHERE tiles.id=?", (tile_id,)).fetchone()
+    # When the tile is `in_review` (visible in the overlay), the reviewer's
+    # partial edits would otherwise be cached as the prior committed mask.
+    # Invalidate uniformly — pauses from `in_progress` simply hit nothing.
+    mask_tile_service.safe_invalidate_tile(tile_id)
     return _row_to_tile_dict(row)
 
 

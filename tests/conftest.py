@@ -10,23 +10,37 @@ from fastapi.testclient import TestClient
 def app_env(monkeypatch, tmp_path):
     """Point backend to a temp SQLite file + temp JWT secret per test."""
     db_file = tmp_path / "test.db"
+    cache_file = tmp_path / "mask_overlay_cache.mbtiles"
 
     import backend.config as config_mod
     import backend.database as dbmod
     import backend.auth as authmod
+    import backend.mask_tile_service as mtsmod
 
     original = config_mod.get_config
 
     def patched():
         cfg = original()
-        return {**cfg, "database": {"path": str(db_file)}}
+        return {
+            **cfg,
+            "database": {"path": str(db_file)},
+            # Per-test cache file so invalidation tests don't pollute each other
+            # (the service's resolved path is also reset below).
+            "mask_overlay": {
+                "cache_path": str(cache_file),
+                "min_zoom": 8,
+                "max_zoom": 18,
+            },
+        }
 
     # Patch the references actually used inside each module (from ... import binds early).
     monkeypatch.setattr(config_mod, "get_config", patched, raising=True)
     monkeypatch.setattr(dbmod, "get_config", patched, raising=True)
     monkeypatch.setattr(authmod, "get_config", patched, raising=True)
+    monkeypatch.setattr(mtsmod, "get_config", patched, raising=True)
     # admin_service, tile_service import config inside functions, so patching config_mod is enough
     monkeypatch.setattr(dbmod, "_DB_PATH", None, raising=True)
+    mtsmod.reset_cache_path()
 
     # Reset in-memory rate-limit state between tests
     authmod.reset_rate_limits()

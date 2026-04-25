@@ -1,7 +1,7 @@
 // Admin panel: dashboard, tiles (list+grid+bulk+filters+viewer), problems, users.
 import { apiGet, apiGetBlob, apiGetWithHeaders, apiPostJson, apiPatchJson, apiJson, logout as apiLogout } from "./api.js";
 import { showToast } from "./toast.js";
-import { createLockedMap, tileTransformRequest } from "./maplib.js";
+import { createLockedMap, disposeMap, tileTransformRequest } from "./maplib.js";
 import { hexToRgb, blobToImage, escapeHtml as escape, fmtDate } from "./utils.js";
 
 let tileserverUrl = "";
@@ -31,6 +31,12 @@ let opSortDir = "asc";
 
 // Active MapLibre instance for the "Mapa" tab, disposed on tab change.
 let mapView = null;
+// Active MapLibre instance for the tile viewer modal. Disposed on close
+// and before each re-open — otherwise WebGL contexts pile up until the
+// browser starts evicting them ("Too many active WebGL contexts").
+let viewerMap = null;
+
+function disposeViewerMap() { viewerMap = disposeMap(viewerMap); }
 
 const BLOCKABLE_STATES = new Set(["pending"]);
 const isBlockable = t => BLOCKABLE_STATES.has(t.status);
@@ -58,7 +64,13 @@ export async function initAdmin(user) {
     classes = cls;
     classesById = Object.fromEntries(classes.map(c => [c.id, c]));
     const vtModal = document.getElementById("modal-view-tile");
-    const closeVt = () => vtModal.classList.add("hidden");
+    const closeVt = () => {
+        vtModal.classList.add("hidden");
+        disposeViewerMap();
+        // Clear body so any in-flight renderTileInfo's setTimeout sees the
+        // mapDiv is gone and bails before creating an orphan WebGL context.
+        document.getElementById("view-tile-body").innerHTML = "";
+    };
     document.getElementById("view-tile-close").addEventListener("click", closeVt);
     // Click on the backdrop (outside the modal-box) closes the viewer.
     vtModal.addEventListener("click", (ev) => { if (ev.target === vtModal) closeVt(); });
@@ -81,7 +93,8 @@ async function selectTab(tab) {
     currentTab = tab;
     selectedIds.clear();
     page = 0;
-    if (mapView) { mapView.remove(); mapView = null; }
+    mapView = disposeMap(mapView);
+    disposeViewerMap();
     document.querySelectorAll(".admin-nav button").forEach(b => {
         b.classList.toggle("active", b.dataset.tab === tab);
     });
@@ -954,14 +967,17 @@ async function bulkAssign() {
     refreshTilesInPlace(ids);
 }
 
-async function openViewer(tileId) {
-    const modal = document.getElementById("modal-view-tile");
-    const body = document.getElementById("view-tile-body");
-    document.getElementById("view-tile-title").textContent = `Tile #${tileId}`;
-    body.innerHTML = `
+// Render the tile info (status, actions, history, map+mask preview) into
+// `targetBody`. Used by both the modal viewer (Tiles tab) and the side panel
+// (Mapa tab). Owns `viewerMap` lifecycle — disposes the previous map and
+// installs a new one in the rendered `viewer-map-${tileId}` div. `reload`
+// is the function to call when an action button needs to refresh the same
+// view (e.g. after Re-revisar / Bloquear).
+async function renderTileInfo(targetBody, tileId, reload) {
+    disposeViewerMap();
+    targetBody.innerHTML = `
         <div class="loading-text"><span class="loading"></span> Carregando tile...</div>
         <div class="viewer-skeleton"></div>`;
-    modal.classList.remove("hidden");
     try {
         const [t, history, blob] = await Promise.all([
             apiGet(`/api/tiles/${tileId}`),
@@ -969,7 +985,7 @@ async function openViewer(tileId) {
             apiGetBlob(`/api/tiles/${tileId}/image`),
         ]);
         const img = await blobToImage(blob);
-        body.innerHTML = "";
+        targetBody.innerHTML = "";
         const meta = document.createElement("div");
         const statusLine = document.createElement("p");
         statusLine.innerHTML = `<b>Status:</b> `;
@@ -1003,20 +1019,20 @@ async function openViewer(tileId) {
         if (t.status === "reviewed") {
             viewerActions.appendChild(btn("Re-revisar", async () => {
                 await reReviewOne(t.id);
-                openViewer(t.id);
+                reload(t.id);
             }));
         }
         if (isBlockable(t)) {
             viewerActions.appendChild(btn("Bloquear", async () => {
-                if (await blockAction([t.id], { reload: false })) openViewer(t.id);
+                if (await blockAction([t.id], { reload: false })) reload(t.id);
             }));
         } else if (t.status === "blocked") {
             viewerActions.appendChild(btn("Desbloquear", async () => {
-                if (await blockAction([t.id], { unblock: true, reload: false })) openViewer(t.id);
+                if (await blockAction([t.id], { unblock: true, reload: false })) reload(t.id);
             }));
         }
         if (viewerActions.children.length) meta.appendChild(viewerActions);
-        body.appendChild(meta);
+        targetBody.appendChild(meta);
 
         if (history.length) {
             const h = document.createElement("details");
@@ -1038,7 +1054,7 @@ async function openViewer(tileId) {
                 ul.appendChild(li);
             }
             h.appendChild(ul);
-            body.appendChild(h);
+            targetBody.appendChild(h);
         }
         const stack = document.createElement("div");
         stack.className = "viewer-stack";
@@ -1047,9 +1063,14 @@ async function openViewer(tileId) {
         const maskCnv = document.createElement("canvas");
         maskCnv.width = 512; maskCnv.height = 512;
         stack.append(mapDiv, maskCnv);
-        body.appendChild(stack);
+        targetBody.appendChild(stack);
         setTimeout(() => {
-            createLockedMap(`viewer-map-${tileId}`, tileserverUrl,
+            // Bail if the host cleared this body (closed modal / panel, or
+            // requested a different tile) before this tick fires — otherwise
+            // we'd leak a WebGL context into an orphaned div.
+            if (!document.getElementById(`viewer-map-${tileId}`)) return;
+            disposeViewerMap();
+            viewerMap = createLockedMap(`viewer-map-${tileId}`, tileserverUrl,
                 [t.bbox_west, t.bbox_south, t.bbox_east, t.bbox_north], tileserverMaxZoom);
         }, 0);
         const tmp = document.createElement("canvas");
@@ -1072,8 +1093,52 @@ async function openViewer(tileId) {
         mctx.imageSmoothingEnabled = false;
         mctx.drawImage(off, 0, 0, 512, 512);
     } catch (e) {
-        renderError(body, e);
+        renderError(targetBody, e);
     }
+}
+
+async function openViewer(tileId) {
+    const modal = document.getElementById("modal-view-tile");
+    const body = document.getElementById("view-tile-body");
+    document.getElementById("view-tile-title").textContent = `Tile #${tileId}`;
+    modal.classList.remove("hidden");
+    await renderTileInfo(body, tileId, openViewer);
+}
+
+const MAP_PANEL_EMPTY_HTML =
+    `<p class="map-panel-empty-msg">Clique em um tile no mapa para ver detalhes aqui.</p>`;
+
+function getMapPanelEls() {
+    const panel = document.getElementById("map-panel");
+    if (!panel) return null;
+    return {
+        panel,
+        title: document.getElementById("map-panel-title"),
+        body: document.getElementById("map-panel-body"),
+    };
+}
+
+async function showTileInPanel(tileId) {
+    const els = getMapPanelEls();
+    if (!els) return;
+    // Dedupe: skip if the panel is already showing this tile. Also catches
+    // MapLibre firing the click handler twice for tiles-fill + tiles-dot
+    // on a single click in the dot's hitbox.
+    if (els.panel.dataset.tileId === String(tileId)) return;
+    els.panel.dataset.tileId = String(tileId);
+    els.panel.classList.remove("empty");
+    els.title.textContent = `Tile #${tileId}`;
+    await renderTileInfo(els.body, tileId, showTileInPanel);
+}
+
+function closeMapPanel() {
+    const els = getMapPanelEls();
+    if (!els) return;
+    disposeViewerMap();
+    delete els.panel.dataset.tileId;
+    els.panel.classList.add("empty");
+    els.title.textContent = "Detalhes do tile";
+    els.body.innerHTML = MAP_PANEL_EMPTY_HTML;
 }
 
 
@@ -1101,6 +1166,14 @@ async function renderMap(root) {
                         title="Arrastar para selecionar. Shift = adicionar; Alt = remover; Esc = sair.">
                     <span class="map-tool-icon">▭</span> Seleção retangular
                 </button>
+                <button id="map-tool-sat" class="map-tool-btn" type="button"
+                        title="Sobrepõe a imagem de satélite primária sobre o basemap.">
+                    <span class="map-tool-icon">🛰️</span> Imagem de satélite
+                </button>
+                <button id="map-tool-classifs" class="map-tool-btn" type="button"
+                        title="Sobrepõe as classificações (classified/in_review/reviewed) sobre o basemap.">
+                    <span class="map-tool-icon">🎨</span> Mostrar classificações
+                </button>
                 <span id="map-sel-info" class="map-sel-info hidden">
                     <b id="map-sel-count">0</b> tile(s) selecionado(s)
                 </span>
@@ -1110,11 +1183,28 @@ async function renderMap(root) {
                 <button id="map-sel-clear" type="button" disabled>Limpar seleção</button>
             </div>
             <div class="map-tab-legend" id="map-legend"></div>
-            <div class="map-tab-container" id="admin-map">
-                <div id="map-rect-overlay" class="map-rect-overlay hidden"></div>
+            <div class="map-tab-main">
+                <div class="map-tab-container" id="admin-map">
+                    <div id="map-rect-overlay" class="map-rect-overlay hidden"></div>
+                    <!-- Floating overlay so toggling the classification layer
+                         doesn't push the map down. Sits inside the map
+                         container; pointer-events disabled so it never blocks
+                         pan/zoom or rectangle-select. -->
+                    <div class="map-class-legend-floating hidden" id="map-class-legend"></div>
+                </div>
+                <aside class="map-panel" id="map-panel">
+                    <header class="map-panel-header">
+                        <h3 id="map-panel-title"></h3>
+                        <button id="map-panel-close" class="map-panel-close" type="button"
+                                title="Fechar painel" aria-label="Fechar">×</button>
+                    </header>
+                    <div class="map-panel-body" id="map-panel-body"></div>
+                </aside>
             </div>
         </div>
     `;
+    document.getElementById("map-panel-close").addEventListener("click", closeMapPanel);
+    closeMapPanel();  // initialize empty state from the single source of truth
     // All statuses enabled by default. Clicking a legend item toggles — the
     // filter on the three tile layers is recomputed from this set.
     const enabledStatuses = new Set(Object.keys(MAP_STATUS_COLORS));
@@ -1227,11 +1317,29 @@ async function renderMap(root) {
                     attribution: "Tiles © Esri",
                     maxzoom: 19,
                 },
+                // Primary satellite (the same source operators see in the editor).
+                // Toggled by `map-tool-sat`. Empty when tileserverUrl isn't
+                // configured yet — addSource still needs a tiles array, so
+                // fall back to a no-op data URI that 404s safely.
+                "sat-overlay": {
+                    type: "raster",
+                    tiles: [tileserverUrl || "data:,"],
+                    tileSize: 256,
+                    maxzoom: tileserverMaxZoom || 19,
+                },
                 tiles: { type: "geojson", data: polyGeojson },
                 "tile-points": { type: "geojson", data: pointGeojson },
             },
             layers: [
                 { id: "basemap-layer", type: "raster", source: "basemap" },
+                // Satellite sits above the street basemap, below the mask
+                // overlay (which is added dynamically by addClassOverlayLayer
+                // before "tiles-fill"), below the polygons.
+                {
+                    id: "sat-overlay-layer", type: "raster", source: "sat-overlay",
+                    layout: { visibility: "none" },
+                    paint: { "raster-opacity": 1 },
+                },
                 {
                     id: "tiles-fill", type: "fill", source: "tiles",
                     paint: { "fill-color": matchExpr, "fill-opacity": 0.55 },
@@ -1293,11 +1401,151 @@ async function renderMap(root) {
             if (mapRectSelectActive) return;  // suppress viewer while selecting
             const f = ev.features && ev.features[0];
             if (!f) return;
-            openViewer(f.properties.id);
+            showTileInPanel(f.properties.id);
         });
     }
 
     wireMapSelectionTools();
+    wireSatLayerToggle();
+    wireClassOverlayToggle();
+}
+
+// ---------- Map tab: primary satellite overlay ----------
+
+const SAT_LAYER_LS_KEY = "tc_admin_map_sat_on";
+
+function satLayerEnabled() {
+    return localStorage.getItem(SAT_LAYER_LS_KEY) === "1";
+}
+
+function setSatLayerEnabled(on) {
+    if (on) localStorage.setItem(SAT_LAYER_LS_KEY, "1");
+    else localStorage.removeItem(SAT_LAYER_LS_KEY);
+}
+
+function applySatLayerState(on) {
+    const btn = document.getElementById("map-tool-sat");
+    if (btn) btn.classList.toggle("active", on);
+    if (mapView && mapView.getLayer("sat-overlay-layer")) {
+        mapView.setLayoutProperty("sat-overlay-layer", "visibility", on ? "visible" : "none");
+    }
+}
+
+function wireSatLayerToggle() {
+    const btn = document.getElementById("map-tool-sat");
+    if (!btn || !mapView) return;
+    btn.addEventListener("click", () => {
+        const on = !satLayerEnabled();
+        setSatLayerEnabled(on);
+        applySatLayerState(on);
+    });
+    const initial = satLayerEnabled();
+    if (mapView.loaded()) applySatLayerState(initial);
+    else mapView.once("load", () => applySatLayerState(initial));
+}
+
+// ---------- Map tab: classification overlay (server-rendered MBTiles) ----------
+
+// Hard-coded to match config.yaml `mask_overlay.{min,max}_zoom`. Kept in sync
+// manually because the values are stable; if they ever drift, MapLibre will
+// fetch tiles outside the cached range and the server will 404.
+const CLASS_OVERLAY_MIN_ZOOM = 8;
+const CLASS_OVERLAY_MAX_ZOOM = 18;
+const CLASS_OVERLAY_LS_KEY = "tc_admin_map_classifs_on";
+
+function classOverlayEnabled() {
+    return localStorage.getItem(CLASS_OVERLAY_LS_KEY) === "1";
+}
+
+function setClassOverlayEnabled(on) {
+    if (on) localStorage.setItem(CLASS_OVERLAY_LS_KEY, "1");
+    else localStorage.removeItem(CLASS_OVERLAY_LS_KEY);
+}
+
+function addClassOverlayLayer() {
+    if (!mapView || mapView.getSource("mask-overlay")) return;
+    // Cache-busting param so toggling off then on re-fetches anything the
+    // browser cached during the previous session. Server-side MBTiles cache
+    // is unaffected.
+    const stamp = Date.now();
+    mapView.addSource("mask-overlay", {
+        type: "raster",
+        tiles: [`/api/admin/mask-tiles/{z}/{x}/{y}.png?t=${stamp}`],
+        tileSize: 256,
+        minzoom: CLASS_OVERLAY_MIN_ZOOM,
+        maxzoom: CLASS_OVERLAY_MAX_ZOOM,
+    });
+    // Place above the basemap but below the tile-status polygons so the
+    // status fill stays as the topmost cue (admins still need it for bulk
+    // selection by status).
+    mapView.addLayer(
+        {
+            id: "mask-overlay-layer",
+            type: "raster",
+            source: "mask-overlay",
+            paint: { "raster-opacity": 0.85, "raster-resampling": "nearest" },
+        },
+        "tiles-fill",
+    );
+}
+
+function removeClassOverlayLayer() {
+    if (!mapView) return;
+    if (mapView.getLayer("mask-overlay-layer")) mapView.removeLayer("mask-overlay-layer");
+    if (mapView.getSource("mask-overlay")) mapView.removeSource("mask-overlay");
+}
+
+function renderClassLegend(visible) {
+    const legend = document.getElementById("map-class-legend");
+    if (!legend) return;
+    legend.classList.toggle("hidden", !visible);
+    if (!visible) { legend.innerHTML = ""; return; }
+    legend.innerHTML = "";
+    const title = document.createElement("div");
+    title.className = "map-class-legend-title";
+    title.textContent = "Classes";
+    legend.appendChild(title);
+    for (const c of classes) {
+        const row = document.createElement("div");
+        row.className = "map-class-legend-row";
+        const sw = document.createElement("span");
+        sw.className = "map-legend-swatch";
+        sw.style.background = c.color;
+        const lbl = document.createElement("span");
+        lbl.textContent = c.name;
+        row.append(sw, lbl);
+        legend.appendChild(row);
+    }
+}
+
+function applyClassOverlayState(on) {
+    const btn = document.getElementById("map-tool-classifs");
+    if (btn) btn.classList.toggle("active", on);
+    if (on) addClassOverlayLayer();
+    else removeClassOverlayLayer();
+    renderClassLegend(on);
+    // Polygons render outline-only when the overlay is on so the
+    // classification colors aren't covered. Use fill-opacity (instead of
+    // visibility=none) so the layer still receives clicks and shows up in
+    // queryRenderedFeatures for rectangle-select.
+    if (mapView && mapView.getLayer("tiles-fill")) {
+        mapView.setPaintProperty("tiles-fill", "fill-opacity", on ? 0 : 0.55);
+    }
+}
+
+function wireClassOverlayToggle() {
+    const btn = document.getElementById("map-tool-classifs");
+    if (!btn || !mapView) return;
+    btn.addEventListener("click", () => {
+        const on = !classOverlayEnabled();
+        setClassOverlayEnabled(on);
+        applyClassOverlayState(on);
+    });
+    // Restore prior state once the map's initial style is loaded — adding a
+    // source before `load` triggers internal MapLibre warnings.
+    const initial = classOverlayEnabled();
+    if (mapView.loaded()) applyClassOverlayState(initial);
+    else mapView.once("load", () => applyClassOverlayState(initial));
 }
 
 // ---------- Map tab: rectangle selection + bulk actions ----------
@@ -1379,8 +1627,11 @@ function wireMapSelectionTools() {
             ? [[s.x - 3, s.y - 3], [s.x + 3, s.y + 3]]
             : [[Math.min(s.x, end.x), Math.min(s.y, end.y)],
                [Math.max(s.x, end.x), Math.max(s.y, end.y)]];
+        // tiles-outline included so rectangle-select still hits tiles when
+        // the classification overlay hides tiles-fill (visibility=none drops
+        // a layer out of queryRenderedFeatures results).
         const feats = mapView.queryRenderedFeatures(bbox, {
-            layers: ["tiles-fill", "tiles-dot"],
+            layers: ["tiles-fill", "tiles-outline", "tiles-dot"],
         });
         const hitIds = new Set(feats.map(f => f.properties.id));
 
