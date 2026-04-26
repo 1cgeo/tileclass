@@ -311,6 +311,7 @@ async function renderTiles(root) {
         <div id="bulk-bar" class="bulk-bar hidden">
             <span><span id="bulk-count">0</span> selecionados</span>
             <button id="bulk-assign">Atribuir a operador…</button>
+            <button id="bulk-unassign">Liberar operador</button>
             <button id="bulk-reset">Resetar</button>
             <button id="bulk-rereview">Re-revisar</button>
             <button id="bulk-report-problem">Reportar problema…</button>
@@ -335,6 +336,7 @@ async function renderTiles(root) {
         if (ev.key === "Enter") { clearTimeout(qTimer); page = 0; loadAndRender(); }
     });
     document.getElementById("bulk-assign").addEventListener("click", bulkAssign);
+    document.getElementById("bulk-unassign").addEventListener("click", bulkUnassign);
     document.getElementById("bulk-reset").addEventListener("click", bulkReset);
     document.getElementById("bulk-rereview").addEventListener("click", bulkReReview);
     document.getElementById("bulk-report-problem").addEventListener("click", bulkReportProblem);
@@ -359,10 +361,17 @@ async function loadAndRender() {
     // "paused" is a virtual status — backend exposes it via the `paused`
     // boolean query param, not as a real status value. Translate here so the
     // filter behaves like any other selection from the user's perspective.
+    // For in_progress/in_review we must also send paused=false, otherwise
+    // paused tiles (which are technically in_progress|in_review with
+    // paused_at != NULL) leak into those buckets and double-count against
+    // the "paused" virtual status — same split the dashboard already does.
     if (status === "paused") {
         params.set("paused", "true");
     } else if (status) {
         params.set("status", status);
+        if (status === "in_progress" || status === "in_review") {
+            params.set("paused", "false");
+        }
     }
     if (df) params.set("date_from", df);
     if (dt) params.set("date_to", dt);
@@ -1010,6 +1019,40 @@ async function bulkAssign() {
         tile_ids: ids, user_id: r.user_id, reason: r.reason || null,
     });
     showToast(`${resp.affected} tile(s) atribuídos (pausados).`, "success");
+    selectedIds.clear();
+    updateBulkBar();
+    refreshTilesInPlace(ids);
+}
+
+// Bulk release: same backend contract as the map-tab `mapBulkUnassign`. The
+// tiles table doesn't keep a per-id status cache, so we fetch fresh rows to
+// pre-filter — backend `unassign_many` is atomic and 409s the whole batch
+// otherwise. Eligible states are in_progress|in_review (paused tiles count —
+// `paused_at` is orthogonal to `status`).
+async function bulkUnassign() {
+    if (selectedIds.size === 0) return;
+    const ids = [...selectedIds];
+    const tileRows = await Promise.all(ids.map(id => apiGet(`/api/tiles/${id}`)));
+    const eligible = tileRows
+        .filter(t => t.status === "in_progress" || t.status === "in_review")
+        .map(t => t.id);
+    if (!eligible.length) {
+        showToast("Nenhum tile selecionado tem operador atribuído (estados elegíveis: in_progress, in_review).", "error");
+        return;
+    }
+    const skipped = ids.length - eligible.length;
+    const r = await confirmDestructive({
+        title: `Liberar operador de ${eligible.length} tile(s)`,
+        description: (skipped > 0
+            ? `O operador atual é removido e cada tile volta para a fila (in_progress→pending, in_review→classified). A máscara já pintada é preservada. ${skipped} tile(s) selecionado(s) não têm operador atribuído e serão ignorados.`
+            : "O operador atual é removido e cada tile volta para a fila (in_progress→pending, in_review→classified). A máscara já pintada é preservada."),
+        ids: eligible, confirmLabel: `Liberar ${eligible.length}`, danger: false,
+    });
+    if (!r.confirmed) return;
+    const resp = await apiPostJson("/api/admin/tiles/bulk/unassign", {
+        ids: eligible, reason: r.reason,
+    });
+    showToast(`${resp.affected} liberado(s).`, "success");
     selectedIds.clear();
     updateBulkBar();
     refreshTilesInPlace(ids);
