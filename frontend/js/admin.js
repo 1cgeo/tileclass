@@ -38,7 +38,10 @@ let viewerMap = null;
 
 function disposeViewerMap() { viewerMap = disposeMap(viewerMap); }
 
-const BLOCKABLE_STATES = new Set(["pending"]);
+// Mirrors backend `_BLOCKABLE_STATES` in admin_service.py. Backend rejects the
+// whole batch if any tile is outside this set, so the UI must filter the
+// selection before sending — never trust users to know the gate.
+const BLOCKABLE_STATES = new Set(["pending", "classified", "reviewed"]);
 const isBlockable = t => BLOCKABLE_STATES.has(t.status);
 
 let _adminInitialized = false;
@@ -131,14 +134,20 @@ async function renderDashboard(root) {
         (d.totals_by_status.classified || 0)
         + (d.totals_by_status.in_review || 0)
         + (d.totals_by_status.reviewed || 0);
+    // "Em andamento" counts only ACTIVE tiles. Paused tiles (operator left
+    // mid-work) get their own card so the team sees stalled work distinctly.
+    const pausedByStatus = d.paused_by_status || {};
+    const activeInProgress = (d.totals_by_status.in_progress || 0) - (pausedByStatus.in_progress || 0);
+    const activeInReview = (d.totals_by_status.in_review || 0) - (pausedByStatus.in_review || 0);
     grid.append(
         statCard("Total de tiles", d.total_tiles),
         statCard("% concluído", `${d.completion_percent}%`),
         statCard("Classificados", classifiedTotal),
         statCard("Revisados", d.totals_by_status.reviewed || 0),
         statCard("Pendentes", d.totals_by_status.pending || 0),
-        statCard("Em andamento", (d.totals_by_status.in_progress || 0) + (d.totals_by_status.in_review || 0)),
+        statCard("Em andamento", activeInProgress + activeInReview),
         statCard("Pausados", d.paused_count || 0),
+        statCard("Bloqueados", d.totals_by_status.blocked || 0),
         statCard("Problemas", d.totals_by_status.problem || 0),
         statCard("Ritmo (tiles/dia)", d.rate_per_day),
         statCard("ETA (dias)", d.eta_days ?? "—"),
@@ -151,7 +160,25 @@ async function renderDashboard(root) {
     const statusH = document.createElement("h3");
     statusH.textContent = "Distribuição por status";
     root.appendChild(statusH);
+    // Build a display-status breakdown that pulls paused tiles out of
+    // in_progress/in_review and lists them under their own bar. Order matches
+    // the lifecycle (pending → ... → reviewed) plus exception states at the end.
+    const displayCounts = {};
     for (const [k, v] of Object.entries(d.totals_by_status)) {
+        if (k === "in_progress" || k === "in_review") {
+            displayCounts[k] = v - (pausedByStatus[k] || 0);
+        } else {
+            displayCounts[k] = v;
+        }
+    }
+    if (d.paused_count) displayCounts.paused = d.paused_count;
+    const order = ["pending", "in_progress", "paused", "classified", "in_review", "reviewed", "problem", "blocked"];
+    const sortedKeys = [
+        ...order.filter(k => k in displayCounts),
+        ...Object.keys(displayCounts).filter(k => !order.includes(k)),
+    ];
+    for (const k of sortedKeys) {
+        const v = displayCounts[k];
         const row = document.createElement("div");
         row.className = "bar-row";
         const name = document.createElement("span"); name.className = "name"; name.textContent = k;
@@ -267,7 +294,9 @@ async function renderTiles(root) {
             <label>Buscar <input type="search" id="filter-q" placeholder="ID ou nome (parcial)" autocomplete="off"></label>
             <label>Status <select id="filter-status">
                 <option value="">(todos)</option>
-                <option>pending</option><option>in_progress</option><option>classified</option>
+                <option>pending</option><option>in_progress</option>
+                <option value="paused">paused</option>
+                <option>classified</option>
                 <option>in_review</option><option>reviewed</option><option>problem</option>
                 <option>blocked</option>
             </select></label>
@@ -327,7 +356,14 @@ async function loadAndRender() {
     const dt = document.getElementById("filter-to").value;
     const q = document.getElementById("filter-q")?.value.trim();
     const params = new URLSearchParams();
-    if (status) params.set("status", status);
+    // "paused" is a virtual status — backend exposes it via the `paused`
+    // boolean query param, not as a real status value. Translate here so the
+    // filter behaves like any other selection from the user's perspective.
+    if (status === "paused") {
+        params.set("paused", "true");
+    } else if (status) {
+        params.set("status", status);
+    }
     if (df) params.set("date_from", df);
     if (dt) params.set("date_to", dt);
     if (q) params.set("q", q);
@@ -1154,17 +1190,36 @@ function closeMapPanel() {
 }
 
 
-// Status → fill color for the map polygons. Kept in sync with the chip colors
-// in style.css so the map legend matches the tiles-tab status chips.
+// Effective category → fill color for the map polygons. The map keys on
+// `display_status`, not raw `status`, so paused tiles (which are technically
+// in_progress/in_review with paused_at != NULL) render distinctly. Kept in
+// sync with the chip colors in style.css so the map legend matches the
+// tiles-tab status chips.
 const MAP_STATUS_COLORS = {
     pending:     "#9ca3af",
     in_progress: "#3b82f6",
+    paused:      "#a855f7",  // overlay: in_progress|in_review with paused_at != NULL
     classified:  "#eab308",
     in_review:   "#f97316",
     reviewed:    "#22c55e",
     problem:     "#ef4444",
     blocked:     "#4b5563",
 };
+
+// Single source of truth for the rendered category on the map. Paused beats
+// in_progress/in_review; otherwise the raw status wins.
+const displayStatusFor = (p) => (p && p.paused ? "paused" : (p && p.status));
+
+// Apply optimistic status (and optionally paused) to a cached props record
+// and recompute display_status. All bulk-action handlers go through this so
+// the matchExpr/filter wiring stays consistent.
+function setMapTileProps(p, { status, paused, blocked_from } = {}) {
+    if (!p) return;
+    if (status !== undefined) p.status = status;
+    if (paused !== undefined) p.paused = !!paused;
+    if (blocked_from !== undefined) p.blocked_from = blocked_from;
+    p.display_status = displayStatusFor(p);
+}
 
 async function renderMap(root) {
     const tiles = await apiGet("/api/admin/tiles/map");
@@ -1191,7 +1246,10 @@ async function renderMap(root) {
                 </span>
                 <span class="map-toolbar-spacer"></span>
                 <button id="map-bulk-assign" type="button" disabled>Atribuir operador</button>
+                <button id="map-bulk-unassign" type="button" disabled>Liberar operador</button>
                 <button id="map-bulk-rereview" type="button" disabled>Re-revisar selecionados</button>
+                <button id="map-bulk-block" type="button" disabled>Bloquear selecionados</button>
+                <button id="map-bulk-unblock" type="button" disabled>Desbloquear selecionados</button>
                 <button id="map-sel-clear" type="button" disabled>Limpar seleção</button>
             </div>
             <div class="map-tab-legend" id="map-legend"></div>
@@ -1241,7 +1299,7 @@ async function renderMap(root) {
     const applyFilter = () => {
         if (!mapView) return;
         const allowed = [...enabledStatuses];
-        const filter = ["in", ["get", "status"], ["literal", allowed]];
+        const filter = ["in", ["get", "display_status"], ["literal", allowed]];
         for (const id of ["tiles-fill", "tiles-outline", "tiles-dot"]) {
             mapView.setFilter(id, filter);
         }
@@ -1262,12 +1320,14 @@ async function renderMap(root) {
     const polyFeatures = [];
     const pointFeatures = [];
     for (const t of tiles) {
+        const paused = !!t.paused_at;
         const props = {
             id: t.id,
             name: t.name,
             status: t.status,
-            paused: !!t.paused_at,
+            paused,
             blocked_from: t.blocked_from,
+            display_status: paused ? "paused" : t.status,
         };
         mapTilePropsById.set(t.id, props);
         polyFeatures.push({
@@ -1309,7 +1369,7 @@ async function renderMap(root) {
         if (t.bbox_north > n) n = t.bbox_north;
     }
 
-    const matchExpr = ["match", ["get", "status"]];
+    const matchExpr = ["match", ["get", "display_status"]];
     for (const [status, color] of Object.entries(MAP_STATUS_COLORS)) {
         matchExpr.push(status, color);
     }
@@ -1570,10 +1630,16 @@ function wireMapSelectionTools() {
     const overlay = document.getElementById("map-rect-overlay");
 
     const assignBtn = document.getElementById("map-bulk-assign");
+    const unassignBtn = document.getElementById("map-bulk-unassign");
+    const blockBtn = document.getElementById("map-bulk-block");
+    const unblockBtn = document.getElementById("map-bulk-unblock");
     toolBtn.addEventListener("click", () => setRectSelectActive(!mapRectSelectActive));
     clearBtn.addEventListener("click", () => clearMapSelection());
     reReviewBtn.addEventListener("click", () => mapBulkReReview());
     assignBtn.addEventListener("click", () => mapBulkAssign());
+    unassignBtn.addEventListener("click", () => mapBulkUnassign());
+    blockBtn.addEventListener("click", () => mapBulkBlock());
+    unblockBtn.addEventListener("click", () => mapBulkUnblock());
 
     // Esc clears tool/selection. Listener is attached to document but scoped:
     // it bails if the map tab isn't active anymore.
@@ -1696,7 +1762,16 @@ function updateMapSelectionHighlight() {
         const s = mapTilePropsById.get(id)?.status;
         return s === "pending" || s === "classified";
     }).length;
+    const blockableCount = ids.filter(id => BLOCKABLE_STATES.has(mapTilePropsById.get(id)?.status)).length;
+    const blockedCount = ids.filter(id => mapTilePropsById.get(id)?.status === "blocked").length;
+    const unassignableCount = ids.filter(id => {
+        const s = mapTilePropsById.get(id)?.status;
+        return s === "in_progress" || s === "in_review";
+    }).length;
     const assignBtn = document.getElementById("map-bulk-assign");
+    const unassignBtn = document.getElementById("map-bulk-unassign");
+    const blockBtn = document.getElementById("map-bulk-block");
+    const unblockBtn = document.getElementById("map-bulk-unblock");
     if (clearBtn) clearBtn.disabled = ids.length === 0;
     if (reReviewBtn) {
         reReviewBtn.disabled = reviewedCount === 0;
@@ -1709,6 +1784,24 @@ function updateMapSelectionHighlight() {
         assignBtn.textContent = assignableCount
             ? `Atribuir operador (${assignableCount})`
             : "Atribuir operador";
+    }
+    if (unassignBtn) {
+        unassignBtn.disabled = unassignableCount === 0;
+        unassignBtn.textContent = unassignableCount
+            ? `Liberar operador (${unassignableCount})`
+            : "Liberar operador";
+    }
+    if (blockBtn) {
+        blockBtn.disabled = blockableCount === 0;
+        blockBtn.textContent = blockableCount
+            ? `Bloquear selecionados (${blockableCount})`
+            : "Bloquear selecionados";
+    }
+    if (unblockBtn) {
+        unblockBtn.disabled = blockedCount === 0;
+        unblockBtn.textContent = blockedCount
+            ? `Desbloquear selecionados (${blockedCount})`
+            : "Desbloquear selecionados";
     }
 }
 
@@ -1738,9 +1831,9 @@ async function mapBulkReReview() {
     // Refresh the affected features in-place: flip their status to 'classified'
     // in the cached props + geojson sources so the map recolors without a
     // full reload.
+    const eligibleSet = new Set(eligible);
     for (const id of eligible) {
-        const p = mapTilePropsById.get(id);
-        if (p) p.status = "classified";
+        setMapTileProps(mapTilePropsById.get(id), { status: "classified", paused: false });
     }
     if (mapView) {
         const polySrc = mapView.getSource("tiles");
@@ -1750,7 +1843,12 @@ async function mapBulkReReview() {
             const data = src._data;
             if (!data) continue;
             for (const f of data.features) {
-                if (eligible.includes(f.properties.id)) f.properties.status = "classified";
+                if (!eligibleSet.has(f.properties.id)) continue;
+                const p = mapTilePropsById.get(f.properties.id);
+                if (!p) continue;
+                f.properties.status = p.status;
+                f.properties.paused = p.paused;
+                f.properties.display_status = p.display_status;
             }
             src.setData(data);
         }
@@ -1815,10 +1913,11 @@ async function mapBulkAssign() {
     });
     showToast(`${resp.affected} tile(s) atribuídos (pausados).`, "success");
     // Optimistic recolor: pending -> in_progress, classified -> in_review.
+    // Backend marks the tile as paused on assign, so display_status renders
+    // as 'paused' until the operator hits play.
     for (const t of fresh) {
         const newStatus = t.status === "pending" ? "in_progress" : "in_review";
-        const p = mapTilePropsById.get(t.id);
-        if (p) p.status = newStatus;
+        setMapTileProps(mapTilePropsById.get(t.id), { status: newStatus, paused: true });
     }
     if (mapView) {
         const polySrc = mapView.getSource("tiles");
@@ -1829,7 +1928,173 @@ async function mapBulkAssign() {
             if (!data) continue;
             for (const f of data.features) {
                 const p = mapTilePropsById.get(f.properties.id);
-                if (p) f.properties.status = p.status;
+                if (!p) continue;
+                f.properties.status = p.status;
+                f.properties.paused = p.paused;
+                f.properties.display_status = p.display_status;
+            }
+            src.setData(data);
+        }
+    }
+    clearMapSelection();
+}
+
+// Release the assigned operator/reviewer from selected tiles without wiping
+// the mask. Backend `unassign_many` is atomic — anything outside
+// in_progress/in_review aborts the whole batch — so we pre-filter and surface
+// the skipped count, mirroring the assign/block UX.
+async function mapBulkUnassign() {
+    const ids = [...mapSelectedIds];
+    if (!ids.length) return;
+    const eligible = ids.filter(id => {
+        const s = mapTilePropsById.get(id)?.status;
+        return s === "in_progress" || s === "in_review";
+    });
+    if (!eligible.length) {
+        showToast("Nenhum tile selecionado tem operador atribuído (estados elegíveis: in_progress, in_review).", "error");
+        return;
+    }
+    const skipped = ids.length - eligible.length;
+    const r = await confirmDestructive({
+        title: `Liberar operador de ${eligible.length} tile(s)`,
+        description: (skipped > 0
+            ? `O operador atual é removido e cada tile volta para a fila (in_progress→pending, in_review→classified). A máscara já pintada é preservada. ${skipped} tile(s) selecionado(s) não têm operador atribuído e serão ignorados.`
+            : "O operador atual é removido e cada tile volta para a fila (in_progress→pending, in_review→classified). A máscara já pintada é preservada."),
+        ids: eligible, confirmLabel: `Liberar ${eligible.length}`, danger: false,
+    });
+    if (!r.confirmed) return;
+    const resp = await apiPostJson("/api/admin/tiles/bulk/unassign", {
+        ids: eligible, reason: r.reason,
+    });
+    showToast(`${resp.affected} liberado(s).`, "success");
+    // Optimistic recolor matching the backend transitions. Backend clears
+    // paused_at on unassign, so we drop the paused flag too.
+    for (const id of eligible) {
+        const p = mapTilePropsById.get(id);
+        if (!p) continue;
+        const newStatus = p.status === "in_progress" ? "pending"
+                         : p.status === "in_review" ? "classified"
+                         : p.status;
+        setMapTileProps(p, { status: newStatus, paused: false });
+    }
+    if (mapView) {
+        const polySrc = mapView.getSource("tiles");
+        const ptSrc = mapView.getSource("tile-points");
+        for (const src of [polySrc, ptSrc]) {
+            if (!src) continue;
+            const data = src._data;
+            if (!data) continue;
+            for (const f of data.features) {
+                const p = mapTilePropsById.get(f.properties.id);
+                if (!p) continue;
+                f.properties.status = p.status;
+                f.properties.paused = p.paused;
+                f.properties.display_status = p.display_status;
+            }
+            src.setData(data);
+        }
+    }
+    clearMapSelection();
+}
+
+// Block selected tiles. Backend gate (`_BLOCKABLE_STATES`) is atomic: a single
+// in_progress/in_review/problem/blocked tile in the batch 409s the whole call.
+// We pre-filter here and surface the split so admins know what's being skipped.
+async function mapBulkBlock() {
+    const ids = [...mapSelectedIds];
+    if (!ids.length) return;
+    const eligible = ids.filter(id => BLOCKABLE_STATES.has(mapTilePropsById.get(id)?.status));
+    if (!eligible.length) {
+        showToast("Nenhum tile selecionado pode ser bloqueado (estados elegíveis: pending, classified, reviewed).", "error");
+        return;
+    }
+    const skipped = ids.length - eligible.length;
+    const r = await confirmDestructive({
+        title: `Bloquear ${eligible.length} tile(s)`,
+        description: (skipped > 0
+            ? `Os tiles deixam de ser distribuídos até serem desbloqueados (status original guardado em blocked_from). ${skipped} tile(s) selecionado(s) estão em estados não bloqueáveis (in_progress/in_review/problem/blocked) e serão ignorados.`
+            : "Os tiles deixam de ser distribuídos até serem desbloqueados. O status original é guardado em blocked_from para poder restaurar."),
+        ids: eligible, confirmLabel: `Bloquear ${eligible.length}`, danger: false,
+    });
+    if (!r.confirmed) return;
+    const resp = await apiPostJson("/api/admin/tiles/bulk/block", {
+        ids: eligible, reason: r.reason,
+    });
+    showToast(`${resp.affected} bloqueado(s).`, "success");
+    // Optimistic recolor: status -> 'blocked', remember prior in blocked_from
+    // so a follow-up unblock click can restore without a round-trip.
+    for (const id of eligible) {
+        const p = mapTilePropsById.get(id);
+        if (p) setMapTileProps(p, { blocked_from: p.status, status: "blocked", paused: false });
+    }
+    if (mapView) {
+        const polySrc = mapView.getSource("tiles");
+        const ptSrc = mapView.getSource("tile-points");
+        for (const src of [polySrc, ptSrc]) {
+            if (!src) continue;
+            const data = src._data;
+            if (!data) continue;
+            for (const f of data.features) {
+                const p = mapTilePropsById.get(f.properties.id);
+                if (p) {
+                    f.properties.status = p.status;
+                    f.properties.paused = p.paused;
+                    f.properties.display_status = p.display_status;
+                    f.properties.blocked_from = p.blocked_from;
+                }
+            }
+            src.setData(data);
+        }
+    }
+    clearMapSelection();
+}
+
+// Unblock selected tiles. Backend rejects anything not currently 'blocked' —
+// we filter to surface the skipped count rather than letting the batch 409.
+async function mapBulkUnblock() {
+    const ids = [...mapSelectedIds];
+    if (!ids.length) return;
+    const eligible = ids.filter(id => mapTilePropsById.get(id)?.status === "blocked");
+    if (!eligible.length) {
+        showToast("Nenhum tile selecionado está bloqueado.", "error");
+        return;
+    }
+    const skipped = ids.length - eligible.length;
+    const r = await confirmDestructive({
+        title: `Desbloquear ${eligible.length} tile(s)`,
+        description: (skipped > 0
+            ? `Cada tile volta ao status anterior ao bloqueio (blocked_from). ${skipped} tile(s) selecionado(s) não estão bloqueados e serão ignorados.`
+            : "Cada tile volta ao status anterior ao bloqueio (blocked_from)."),
+        ids: eligible, confirmLabel: `Desbloquear ${eligible.length}`, danger: false,
+    });
+    if (!r.confirmed) return;
+    const resp = await apiPostJson("/api/admin/tiles/bulk/unblock", {
+        ids: eligible, reason: r.reason,
+    });
+    showToast(`${resp.affected} desbloqueado(s).`, "success");
+    // Optimistic recolor: status -> blocked_from, clear blocked_from. If the
+    // cached props are missing blocked_from (shouldn't happen for blocked tiles
+    // returned by /tiles/map, but be defensive), fall back to 'pending' so the
+    // tile at least re-enters the queue rather than visually staying blocked.
+    for (const id of eligible) {
+        const p = mapTilePropsById.get(id);
+        if (p) setMapTileProps(p, { status: p.blocked_from || "pending", paused: false, blocked_from: null });
+    }
+    if (mapView) {
+        const polySrc = mapView.getSource("tiles");
+        const ptSrc = mapView.getSource("tile-points");
+        for (const src of [polySrc, ptSrc]) {
+            if (!src) continue;
+            const data = src._data;
+            if (!data) continue;
+            for (const f of data.features) {
+                const p = mapTilePropsById.get(f.properties.id);
+                if (p) {
+                    f.properties.status = p.status;
+                    f.properties.paused = p.paused;
+                    f.properties.display_status = p.display_status;
+                    f.properties.blocked_from = p.blocked_from;
+                }
             }
             src.setData(data);
         }

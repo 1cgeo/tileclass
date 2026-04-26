@@ -75,6 +75,16 @@ def dashboard() -> dict:
         paused_count = conn.execute(
             "SELECT COUNT(*) c FROM tiles WHERE paused_at IS NOT NULL"
         ).fetchone()["c"]
+        # Per-status paused breakdown so the dashboard can show paused as a
+        # distinct category from active in_progress/in_review (paused tiles
+        # are still counted under their raw status in totals_by_status).
+        paused_breakdown_rows = conn.execute(
+            """SELECT status, COUNT(*) c FROM tiles
+               WHERE paused_at IS NOT NULL
+                 AND status IN ('in_progress','in_review')
+               GROUP BY status"""
+        ).fetchall()
+        paused_by_status = {r["status"]: r["c"] for r in paused_breakdown_rows}
 
         daily = conn.execute(
             """SELECT substr(reviewed_at,1,10) d, COUNT(*) c
@@ -149,6 +159,7 @@ def dashboard() -> dict:
         "rate_per_day": round(rate_per_day, 2),
         "eta_days": eta_days,
         "paused_count": paused_count,
+        "paused_by_status": paused_by_status,
     }
 
 
@@ -563,6 +574,39 @@ def unassign_operator(tile_id: int, admin_id: int, reason: str | None = None) ->
         )
         log_action(conn, admin_id, tile_id, "unassign", detail)
     return {"id": tile_id, "status": new_status}
+
+
+def unassign_many(tile_ids: list[int], admin_id: int, reason: str | None = None) -> int:
+    """Bulk variant of `unassign_operator`. Atomic: any tile outside the
+    assigned set (in_progress|in_review) aborts the batch — same contract as
+    `block_many`/`assign_many`, so admins see one error and retry rather than
+    a partial result they can't reason about. Mask data is preserved."""
+    if not tile_ids:
+        return 0
+    detail = _clean_reason(reason)
+    transitions = {"in_progress": "pending", "in_review": "classified"}
+    with transaction("IMMEDIATE") as conn:
+        rows = conn.execute(
+            f"SELECT id, status FROM tiles WHERE id IN ({','.join(['?']*len(tile_ids))})",
+            tile_ids,
+        ).fetchall()
+        found = {r["id"]: r["status"] for r in rows}
+        for tid in tile_ids:
+            if tid not in found:
+                raise HTTPException(404, f"tile {tid} not found")
+            if found[tid] not in transitions:
+                raise HTTPException(
+                    409, f"tile {tid} is not assigned (status={found[tid]})"
+                )
+        for tid in tile_ids:
+            new_status = transitions[found[tid]]
+            conn.execute(
+                "UPDATE tiles SET status=?, assigned_to=NULL, paused_at=NULL, "
+                "version=version+1 WHERE id=?",
+                (new_status, tid),
+            )
+            log_action(conn, admin_id, tid, "unassign", detail)
+    return len(tile_ids)
 
 
 def re_review_tile(tile_id: int, admin_id: int, reason: str | None = None) -> None:

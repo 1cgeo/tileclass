@@ -506,6 +506,14 @@ def admin_bulk_report_problem(body: BulkReportProblemIn,
     return admin_service.report_problem_many(body.ids, u.id, body.note)
 
 
+# Registered before /{tile_id}/unassign so FastAPI matches the literal "bulk"
+# segment instead of trying to coerce it into the int tile_id Path parameter.
+@app.post("/api/admin/tiles/bulk/unassign")
+def admin_bulk_unassign(body: BulkTileIdsIn, u: auth.CurrentUser = Depends(auth.require_admin)):
+    n = admin_service.unassign_many(body.ids, u.id, body.reason)
+    return {"affected": n}
+
+
 @app.post("/api/admin/tiles/{tile_id}/reset")
 def admin_reset(body: ResetReasonIn | None = None, tile_id: int = Path(ge=1),
                 u: auth.CurrentUser = Depends(auth.require_admin)):

@@ -85,6 +85,7 @@ class DashboardOut(BaseModel):
     rate_per_day: float
     eta_days: Optional[float]
     paused_count: int = 0
+    paused_by_status: dict = {}
 
 
 class SetActiveIn(BaseModel):

@@ -193,6 +193,80 @@ def test_unassign_requires_admin(client, admin_user, operators, tiles):
     assert r.status_code == 403
 
 
+def test_bulk_unassign_releases_in_progress_and_in_review(
+    client, admin_user, operators, tiles
+):
+    """Bulk unassign mirrors the single-tile transitions: in_progress→pending
+    and in_review→classified, both preserving the mask."""
+    op1 = token(client, "op1", "secret123")
+    op2 = token(client, "op2", "secret123")
+    op3 = token(client, "op3", "secret123")
+
+    # op1 picks tile A first so the review queue is empty when op3 asks for
+    # work — otherwise op1 (can_review=1) would grab op3's tile for review
+    # before op3 has a chance to classify a different one.
+    a = client.get("/api/tiles/next", headers=headers(op1)).json()
+    assert a["status"] == "in_progress"
+
+    # op3 grabs the next pending tile and classifies it.
+    b = client.get("/api/tiles/next", headers=headers(op3)).json()
+    assert b["id"] != a["id"]
+    raw = np.full(65536, 1, dtype=np.uint8).tobytes()
+    client.post(f"/api/tiles/{b['id']}/classify",
+                headers={**headers(op3), "Content-Type": "application/octet-stream"}, content=raw)
+
+    # op2 picks tile B for review (op3 ≠ op2, so reviewer eligibility holds).
+    in_review = client.get("/api/tiles/next", headers=headers(op2)).json()
+    assert in_review["id"] == b["id"]
+    assert in_review["status"] == "in_review"
+
+    adm = token(client, "admin", "admin123")
+    r = client.post("/api/admin/tiles/bulk/unassign", headers=headers(adm),
+                    json={"ids": [a["id"], b["id"]], "reason": "shift over"})
+    assert r.status_code == 200
+    assert r.json()["affected"] == 2
+
+    after_a = _db_row(a["id"])
+    after_b = _db_row(b["id"])
+    assert after_a["status"] == "pending"
+    assert after_a["assigned_to"] is None
+    assert after_b["status"] == "classified"
+    assert after_b["assigned_to"] is None
+    # Classified mask survived the reviewer release.
+    assert after_b["data_png"] is not None
+
+
+def test_bulk_unassign_is_atomic_on_invalid_state(
+    client, admin_user, operators, tiles
+):
+    """A single unassignable tile in the batch (e.g. pending) must abort the
+    whole call — admins shouldn't get a partial result they can't reason about.
+    Mirrors the contract of bulk/block."""
+    op1 = token(client, "op1", "secret123")
+    a = client.get("/api/tiles/next", headers=headers(op1)).json()  # in_progress
+    adm = token(client, "admin", "admin123")
+    pending_id = next(
+        t["id"] for t in client.get("/api/admin/tiles?status=pending",
+                                    headers=headers(adm)).json()
+        if t["id"] != a["id"]
+    )
+    r = client.post("/api/admin/tiles/bulk/unassign", headers=headers(adm),
+                    json={"ids": [a["id"], pending_id]})
+    assert r.status_code == 409
+    # `a` must still be in_progress — atomic rollback.
+    assert _db_row(a["id"])["status"] == "in_progress"
+
+
+def test_bulk_unassign_requires_admin(
+    client, admin_user, operators, tiles
+):
+    op1 = token(client, "op1", "secret123")
+    tile = client.get("/api/tiles/next", headers=headers(op1)).json()
+    r = client.post("/api/admin/tiles/bulk/unassign", headers=headers(op1),
+                    json={"ids": [tile["id"]]})
+    assert r.status_code == 403
+
+
 def test_list_tiles_exposes_current_assignee(
     client, admin_user, operators, tiles
 ):
