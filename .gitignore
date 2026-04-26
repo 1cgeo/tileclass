@@ -14,6 +14,7 @@ env/
 *.db-shm
 backend/config.yaml
 backend/tileclass.db
+*.db.bak_*
 
 # Node / frontend build
 node_modules/
@@ -38,3 +39,4 @@ exports/
 backend/static_xyz/
 
 .env
+exported_masks_v2
