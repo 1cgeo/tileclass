@@ -30,6 +30,7 @@ Thumbs.db
 
 # Dados locais
 data/
+data_external/
 exports/
 *.tif
 *.tiff

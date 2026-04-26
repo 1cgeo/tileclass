@@ -1,24 +1,20 @@
-"""FastAPI app: auth, tiles, admin, config, static frontend."""
+"""FastAPI app: lifespan + middleware + exception handler + static SPA.
+Endpoints live under backend/routers/{auth,operator,admin,config}.py."""
 from contextlib import asynccontextmanager
-from datetime import datetime
-from enum import Enum
 from pathlib import Path as FsPath
-import jwt as _jwt
-from fastapi import FastAPI, Depends, HTTPException, Path, Query, Request, Response, status
+
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.gzip import GZipMiddleware
 
-from . import auth, tile_service, admin_service, mbtiles_service, mask_tile_service
+from . import mbtiles_service
 from .config import get_config
 from .database import init_db
-from .mask_utils import PIXELS
-from .models import (
-    LoginIn, TokenOut, RefreshIn, UserOut, ClassOut, TileOut,
-    ReportProblemIn, CreateUserIn, DashboardOut, BulkTileIdsIn, SetActiveIn,
-    SetCanReviewIn, SetRoleIn, AssignTileIn, BulkAssignIn, ResetReasonIn,
-    BulkReportProblemIn,
-)
+from .routers import admin as admin_router
+from .routers import auth as auth_router
+from .routers import config as config_router
+from .routers import operator as operator_router
 
 
 # Anything not listed here falls back to the raw message.
@@ -44,25 +40,18 @@ def _friendly(message: str) -> str:
     return _FRIENDLY_ERRORS.get(message, message)
 
 
-class TileStatus(str, Enum):
-    pending = "pending"
-    in_progress = "in_progress"
-    classified = "classified"
-    in_review = "in_review"
-    reviewed = "reviewed"
-    problem = "problem"
-    blocked = "blocked"
-
-
-def _parse_iso_date(value: str, field: str) -> str:
-    try:
-        datetime.fromisoformat(value)
-    except ValueError:
-        raise HTTPException(422, f"invalid {field}: expected YYYY-MM-DD")
-    return value
-
-
 FRONTEND_DIR = FsPath(__file__).parent.parent / "frontend"
+
+
+def _open_optional(section: dict | None, reader: mbtiles_service.MBTilesReader) -> None:
+    path = (section or {}).get("mbtiles_path")
+    if not path:
+        return
+    p = FsPath(path)
+    if not p.is_absolute():
+        p = FsPath(__file__).resolve().parent / p
+    if p.exists():
+        reader.open(p)
 
 
 @asynccontextmanager
@@ -78,17 +67,6 @@ async def lifespan(app: FastAPI):
         mbtiles_service.primary.close()
         mbtiles_service.worldcover.close()
         mbtiles_service.mapbiomas.close()
-
-
-def _open_optional(section: dict | None, reader: mbtiles_service.MBTilesReader) -> None:
-    path = (section or {}).get("mbtiles_path")
-    if not path:
-        return
-    p = FsPath(path)
-    if not p.is_absolute():
-        p = FsPath(__file__).resolve().parent / p
-    if p.exists():
-        reader.open(p)
 
 
 app = FastAPI(title="TileClass", version="1.0.0", lifespan=lifespan)
@@ -130,492 +108,15 @@ async def security_headers(request: Request, call_next):
     return response
 
 
-async def _read_mask_body(request: Request) -> bytes:
-    cl = request.headers.get("content-length")
-    if cl is not None:
-        try:
-            cl_int = int(cl)
-        except ValueError:
-            raise HTTPException(400, "invalid content-length")
-        if cl_int > PIXELS:
-            raise HTTPException(413, "mask body too large")
-    raw = await request.body()
-    if len(raw) != PIXELS:
-        raise HTTPException(
-            422,
-            detail={"error": "invalid_mask_size", "expected": PIXELS, "got": len(raw)},
-        )
-    return raw
-
-
 @app.get("/api/health")
 def health():
     return {"status": "ok"}
 
 
-# ---------- Auth ----------
-
-@app.post("/api/auth/login", response_model=TokenOut)
-def login(body: LoginIn, request: Request):
-    ip = request.client.host if request.client else "unknown"
-    auth.check_login_rate_limit(ip)
-    user = auth.authenticate(body.username, body.password)
-    if not user:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid credentials")
-    return TokenOut(
-        access_token=auth.make_access_token(user.id, user.username, user.role),
-        refresh_token=auth.make_refresh_token(user.id),
-    )
-
-
-@app.post("/api/auth/refresh", response_model=TokenOut)
-def refresh(body: RefreshIn):
-    import jwt
-    try:
-        payload = auth.decode_token(body.refresh_token)
-    except jwt.PyJWTError as e:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, f"invalid refresh: {e}")
-    if payload.get("typ") != "refresh":
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "not a refresh token")
-    user_id = int(payload["sub"])
-    from .database import connect
-    conn = connect()
-    try:
-        row = conn.execute(
-            "SELECT id, username, role, active FROM users WHERE id=?", (user_id,)
-        ).fetchone()
-    finally:
-        conn.close()
-    if not row or not row["active"]:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "user inactive")
-    return TokenOut(
-        access_token=auth.make_access_token(row["id"], row["username"], row["role"]),
-        refresh_token=auth.make_refresh_token(row["id"]),
-    )
-
-
-@app.get("/api/auth/me", response_model=UserOut)
-def me(user: auth.CurrentUser = Depends(auth.get_current_user)):
-    return UserOut(id=user.id, username=user.username, role=user.role)
-
-
-@app.post("/api/auth/logout")
-def logout(request: Request, user: auth.CurrentUser = Depends(auth.get_current_user)):
-    """Revoke access (and optionally refresh) tokens by jti."""
-    creds = request.headers.get("authorization", "")
-    token = creds.split(" ", 1)[1] if creds.startswith("Bearer ") else None
-    if token:
-        try:
-            p = auth.decode_token(token)
-            if p.get("jti"):
-                auth.blacklist_token(p["jti"], user.id, int(p.get("exp", 0)))
-        except _jwt.PyJWTError:
-            pass
-    return {"ok": True}
-
-
-# ---------- Config ----------
-
-@app.get("/api/config/classes", response_model=list[ClassOut])
-def config_classes():
-    return get_config()["classes"]
-
-
-@app.get("/api/config/tileserver")
-def config_tileserver():
-    cfg = get_config()
-    ts = cfg.get("tileserver") or {}
-    ts2 = cfg.get("tileserver_secondary") or {}
-    ts3 = cfg.get("tileserver_tertiary") or {}
-    primary = mbtiles_service.primary
-    wc = mbtiles_service.worldcover
-    mb = mbtiles_service.mapbiomas
-    min_zoom = max_zoom = None
-    if primary.is_open():
-        url = f"/api/xyz/{{z}}/{{x}}/{{y}}.{primary.tile_format()}"
-        min_zoom, max_zoom = primary.zoom_range()
-    else:
-        url = ts.get("url_template", "")
-    wc_url = None
-    wc_min = wc_max = None
-    if wc.is_open():
-        wc_url = f"/api/wc/{{z}}/{{x}}/{{y}}.{wc.tile_format()}"
-        wc_min, wc_max = wc.zoom_range()
-    mb_url = None
-    mb_min = mb_max = None
-    if mb.is_open():
-        mb_url = f"/api/mb/{{z}}/{{x}}/{{y}}.{mb.tile_format()}"
-        mb_min, mb_max = mb.zoom_range()
-    return {
-        "url_template": url,
-        "secondary_url_template": ts2.get("url_template"),
-        "tertiary_url_template": ts3.get("url_template"),
-        "min_zoom": min_zoom,
-        "max_zoom": max_zoom,
-        "secondary_max_zoom": ts2.get("max_zoom", 22),
-        "tertiary_max_zoom": ts3.get("max_zoom", 22),
-        "wc_url_template": wc_url,
-        "wc_min_zoom": wc_min,
-        "wc_max_zoom": wc_max,
-        "mb_url_template": mb_url,
-        "mb_min_zoom": mb_min,
-        "mb_max_zoom": mb_max,
-    }
-
-
-def _serve_mbtiles(reader: mbtiles_service.MBTilesReader, z: int, x: int, y: int, ext: str):
-    if not reader.is_open():
-        raise HTTPException(status_code=404, detail="mbtiles not configured")
-    if ext.lower() != reader.tile_format():
-        raise HTTPException(status_code=404, detail="wrong extension")
-    data = reader.get_tile(z, x, y)
-    if data is None:
-        return Response(status_code=204)
-    media = "image/webp" if ext.lower() == "webp" else f"image/{ext.lower()}"
-    return Response(
-        content=data,
-        media_type=media,
-        headers={"Cache-Control": "public, max-age=86400, immutable"},
-    )
-
-
-@app.get("/api/xyz/{z}/{x}/{y}.{ext}")
-def mbtiles_xyz(z: int, x: int, y: int, ext: str):
-    return _serve_mbtiles(mbtiles_service.primary, z, x, y, ext)
-
-
-@app.get("/api/wc/{z}/{x}/{y}.{ext}")
-def wc_mbtiles_xyz(z: int, x: int, y: int, ext: str):
-    return _serve_mbtiles(mbtiles_service.worldcover, z, x, y, ext)
-
-
-@app.get("/api/mb/{z}/{x}/{y}.{ext}")
-def mb_mbtiles_xyz(z: int, x: int, y: int, ext: str):
-    return _serve_mbtiles(mbtiles_service.mapbiomas, z, x, y, ext)
-
-
-# ---------- Tiles (operator) ----------
-
-@app.get("/api/tiles/next")
-def next_tile(user: auth.CurrentUser = Depends(auth.get_current_user)):
-    t = tile_service.get_next_tile(user.id)
-    if not t:
-        return Response(status_code=204)
-    return t
-
-
-@app.get("/api/tiles/assigned")
-def my_assigned_tile(user: auth.CurrentUser = Depends(auth.get_current_user)):
-    """Return the tile currently assigned to this user (resume target), or 204.
-    Does NOT assign a new tile from the queue."""
-    t = tile_service.get_resume_tile(user.id)
-    if not t:
-        return Response(status_code=204)
-    return t
-
-
-@app.get("/api/tiles/next-preview")
-def next_tile_preview(user: auth.CurrentUser = Depends(auth.get_current_user)):
-    """Peek without assigning — used by the frontend to pre-load the next image."""
-    t = tile_service.peek_next_tile(user.id)
-    if not t:
-        return Response(status_code=204)
-    return t
-
-
-@app.get("/api/me/stats-today")
-def my_stats_today(user: auth.CurrentUser = Depends(auth.get_current_user)):
-    return {"count": tile_service.today_classify_count(user.id)}
-
-
-@app.get("/api/tiles/queue-stats")
-def queue_stats(_: auth.CurrentUser = Depends(auth.get_current_user)):
-    return tile_service.queue_stats()
-
-
-@app.get("/api/tiles/{tile_id}/history")
-def tile_history(tile_id: int = Path(ge=1), _: auth.CurrentUser = Depends(auth.get_current_user)):
-    return tile_service.tile_history(tile_id)
-
-
-@app.get("/api/tiles/{tile_id}", response_model=TileOut)
-def get_tile(tile_id: int = Path(ge=1), user: auth.CurrentUser = Depends(auth.get_current_user)):
-    t = tile_service.get_tile(tile_id)
-    if not t:
-        raise HTTPException(404, "tile not found")
-    return t
-
-
-@app.get("/api/tiles/{tile_id}/image")
-def get_tile_image(tile_id: int = Path(ge=1), user: auth.CurrentUser = Depends(auth.get_current_user)):
-    img = tile_service.get_tile_image(tile_id)
-    if img is None:
-        raise HTTPException(404, "tile not found")
-    return Response(content=img, media_type="image/png")
-
-
-def _expected_version(request: Request) -> int | None:
-    h = request.headers.get("x-tile-version")
-    if not h:
-        return None
-    try:
-        return int(h)
-    except ValueError:
-        raise HTTPException(400, "invalid X-Tile-Version header")
-
-
-async def _submit(tile_id: int, request: Request, user: auth.CurrentUser) -> dict:
-    raw = await _read_mask_body(request)
-    return tile_service.submit_classification(tile_id, user.id, raw, _expected_version(request))
-
-
-@app.post("/api/tiles/{tile_id}/classify")
-async def classify(tile_id: int = Path(ge=1), *, request: Request,
-                   user: auth.CurrentUser = Depends(auth.get_current_user)):
-    return await _submit(tile_id, request, user)
-
-
-@app.post("/api/tiles/{tile_id}/review")
-async def review(tile_id: int = Path(ge=1), *, request: Request,
-                 user: auth.CurrentUser = Depends(auth.get_current_user)):
-    return await _submit(tile_id, request, user)
-
-
-@app.post("/api/tiles/{tile_id}/report-problem")
-def report_problem(body: ReportProblemIn, tile_id: int = Path(ge=1),
-                   user: auth.CurrentUser = Depends(auth.get_current_user)):
-    return tile_service.report_problem(tile_id, user.id, body.note)
-
-
-@app.post("/api/tiles/{tile_id}/pause")
-async def pause_tile(tile_id: int = Path(ge=1), *, request: Request,
-                     user: auth.CurrentUser = Depends(auth.get_current_user)):
-    raw = await _read_mask_body(request)
-    return tile_service.pause_tile(tile_id, user.id, raw, _expected_version(request))
-
-
-@app.post("/api/tiles/{tile_id}/resume")
-def resume_tile(tile_id: int = Path(ge=1),
-                user: auth.CurrentUser = Depends(auth.get_current_user)):
-    return tile_service.resume_tile(tile_id, user.id)
-
-
-# ---------- Admin ----------
-
-@app.get("/api/admin/dashboard", response_model=DashboardOut)
-def admin_dashboard(_: auth.CurrentUser = Depends(auth.require_admin)):
-    return admin_service.dashboard()
-
-
-@app.get("/api/admin/tiles")
-def admin_tiles(status: TileStatus | None = None,
-                user_id: int | None = Query(default=None, ge=1),
-                date_from: str | None = None, date_to: str | None = None,
-                paused: bool | None = None,
-                q: str | None = Query(default=None, max_length=200),
-                limit: int = Query(default=200, ge=1, le=1000),
-                offset: int = Query(default=0, ge=0),
-                _: auth.CurrentUser = Depends(auth.require_admin)):
-    if date_from:
-        date_from = _parse_iso_date(date_from, "date_from")
-    if date_to:
-        date_to = _parse_iso_date(date_to, "date_to")
-    status_v = status.value if status else None
-    q_norm = q.strip() if q else None
-    items = admin_service.list_tiles(
-        status=status_v, user_id=user_id, date_from=date_from, date_to=date_to,
-        paused=paused, q=q_norm, limit=limit, offset=offset,
-    )
-    total = admin_service.count_tiles(
-        status=status_v, user_id=user_id, date_from=date_from, date_to=date_to,
-        paused=paused, q=q_norm,
-    )
-    # Pagination metadata in headers keeps the JSON body a plain list so
-    # existing clients/tests that index into it keep working.
-    return JSONResponse(content=items, headers={"X-Total-Count": str(total)})
-
-
-@app.get("/api/admin/tiles/{tile_id}/thumbnail")
-def admin_tile_thumbnail(tile_id: int = Path(ge=1), size: int = Query(128, ge=16, le=512),
-                         _: auth.CurrentUser = Depends(auth.require_admin)):
-    return Response(
-        content=admin_service.tile_thumbnail(tile_id, size=size),
-        media_type="image/png",
-        headers={"Cache-Control": "no-cache"},
-    )
-
-
-@app.get("/api/admin/tiles/{tile_id}/satellite-thumbnail")
-def admin_tile_satellite_thumbnail(tile_id: int = Path(ge=1),
-                                   size: int = Query(128, ge=16, le=512),
-                                   _: auth.CurrentUser = Depends(auth.require_admin)):
-    return Response(
-        content=admin_service.tile_satellite_thumbnail(tile_id, size=size),
-        media_type="image/png",
-        headers={"Cache-Control": "public, max-age=3600"},
-    )
-
-
-@app.get("/api/admin/tiles/problems")
-def admin_problems(_: auth.CurrentUser = Depends(auth.require_admin)):
-    return admin_service.list_problems()
-
-
-@app.get("/api/admin/tiles/map")
-def admin_tiles_map(_: auth.CurrentUser = Depends(auth.require_admin)):
-    return admin_service.list_tiles_map()
-
-
-@app.get("/api/admin/mask-tiles/{z}/{x}/{y}.png")
-def admin_mask_tile(z: int = Path(ge=0, le=22), x: int = Path(ge=0), y: int = Path(ge=0),
-                    _: auth.CurrentUser = Depends(auth.require_admin)):
-    """Colorized mask overlay for the admin map view. Renders + caches a 256x256
-    RGBA tile composed from every TileClass tile whose bbox intersects (z,x,y).
-    Empty regions return a fully transparent PNG."""
-    if z < mask_tile_service.min_zoom() or z > mask_tile_service.max_zoom():
-        raise HTTPException(404, "zoom out of range")
-    n = 1 << z
-    if x >= n or y >= n:
-        raise HTTPException(404, "tile out of range")
-    png = mask_tile_service.get_tile(z, x, y)
-    return Response(
-        content=png,
-        media_type="image/png",
-        # Server caches indefinitely (invalidated on mutations); client
-        # caches briefly so panning around stays snappy without holding
-        # stale colors after a classify/review.
-        headers={"Cache-Control": "public, max-age=60"},
-    )
-
-
-@app.post("/api/admin/tiles/bulk/reset")
-def admin_bulk_reset(body: BulkTileIdsIn, u: auth.CurrentUser = Depends(auth.require_admin)):
-    n = admin_service.reset_many(body.ids, u.id, body.reason)
-    return {"affected": n}
-
-
-@app.post("/api/admin/tiles/bulk/re-review")
-def admin_bulk_rereview(body: BulkTileIdsIn, u: auth.CurrentUser = Depends(auth.require_admin)):
-    n = admin_service.re_review_many(body.ids, u.id, reason=body.reason)
-    return {"affected": n}
-
-
-@app.post("/api/admin/tiles/bulk/report-problem")
-def admin_bulk_report_problem(body: BulkReportProblemIn,
-                              u: auth.CurrentUser = Depends(auth.require_admin)):
-    return admin_service.report_problem_many(body.ids, u.id, body.note)
-
-
-# Registered before /{tile_id}/unassign so FastAPI matches the literal "bulk"
-# segment instead of trying to coerce it into the int tile_id Path parameter.
-@app.post("/api/admin/tiles/bulk/unassign")
-def admin_bulk_unassign(body: BulkTileIdsIn, u: auth.CurrentUser = Depends(auth.require_admin)):
-    n = admin_service.unassign_many(body.ids, u.id, body.reason)
-    return {"affected": n}
-
-
-@app.post("/api/admin/tiles/{tile_id}/reset")
-def admin_reset(body: ResetReasonIn | None = None, tile_id: int = Path(ge=1),
-                u: auth.CurrentUser = Depends(auth.require_admin)):
-    admin_service.reset_tile(tile_id, u.id, body.reason if body else None)
-    return {"ok": True}
-
-
-@app.post("/api/admin/tiles/assign")
-def admin_bulk_assign(body: BulkAssignIn, u: auth.CurrentUser = Depends(auth.require_admin)):
-    """Pre-load a user's personal queue with many tiles. Every assigned tile
-    enters `paused_at=now()`, so /api/tiles/next serves them FIFO when the
-    user asks for more work."""
-    return admin_service.assign_many(body.tile_ids, body.user_id, u.id, body.reason)
-
-
-@app.post("/api/admin/tiles/{tile_id}/assign")
-def admin_assign(body: AssignTileIn, tile_id: int = Path(ge=1),
-                 u: auth.CurrentUser = Depends(auth.require_admin)):
-    return admin_service.assign_operator(tile_id, body.user_id, u.id, body.reason)
-
-
-@app.post("/api/admin/tiles/{tile_id}/unassign")
-def admin_unassign(body: ResetReasonIn | None = None, tile_id: int = Path(ge=1),
-                   u: auth.CurrentUser = Depends(auth.require_admin)):
-    return admin_service.unassign_operator(tile_id, u.id, body.reason if body else None)
-
-
-@app.post("/api/admin/tiles/{tile_id}/admin-pause")
-def admin_pause(body: ResetReasonIn | None = None, tile_id: int = Path(ge=1),
-                u: auth.CurrentUser = Depends(auth.require_admin)):
-    """Pause an in-progress/in-review tile on behalf of an absent operator so
-    the dashboard cycle timer stops. Keeps the assignment intact."""
-    return admin_service.admin_pause_tile(tile_id, u.id, body.reason if body else None)
-
-
-@app.delete("/api/admin/tiles/{tile_id}")
-def admin_delete_tile(body: ResetReasonIn | None = None, tile_id: int = Path(ge=1),
-                      u: auth.CurrentUser = Depends(auth.require_admin)):
-    """Permanent delete. Only allowed for tiles already flagged as `problem`
-    so an operator's report always precedes the admin's removal."""
-    return admin_service.delete_tile(tile_id, u.id, body.reason if body else None)
-
-
-@app.post("/api/admin/tiles/{tile_id}/re-review")
-def admin_re_review(body: ResetReasonIn | None = None, tile_id: int = Path(ge=1),
-                     u: auth.CurrentUser = Depends(auth.require_admin)):
-    admin_service.re_review_tile(tile_id, u.id, body.reason if body else None)
-    return {"ok": True}
-
-
-@app.post("/api/admin/tiles/bulk/block")
-def admin_bulk_block(body: BulkTileIdsIn, u: auth.CurrentUser = Depends(auth.require_admin)):
-    n = admin_service.block_many(body.ids, u.id, body.reason)
-    return {"affected": n}
-
-
-@app.post("/api/admin/tiles/bulk/unblock")
-def admin_bulk_unblock(body: BulkTileIdsIn, u: auth.CurrentUser = Depends(auth.require_admin)):
-    n = admin_service.unblock_many(body.ids, u.id, body.reason)
-    return {"affected": n}
-
-
-@app.post("/api/admin/tiles/{tile_id}/block")
-def admin_block(body: ResetReasonIn | None = None, tile_id: int = Path(ge=1),
-                u: auth.CurrentUser = Depends(auth.require_admin)):
-    admin_service.block_tile(tile_id, u.id, body.reason if body else None)
-    return {"ok": True}
-
-
-@app.post("/api/admin/tiles/{tile_id}/unblock")
-def admin_unblock(body: ResetReasonIn | None = None, tile_id: int = Path(ge=1),
-                  u: auth.CurrentUser = Depends(auth.require_admin)):
-    admin_service.unblock_tile(tile_id, u.id, body.reason if body else None)
-    return {"ok": True}
-
-
-@app.get("/api/admin/users")
-def admin_users(_: auth.CurrentUser = Depends(auth.require_admin)):
-    return admin_service.list_users()
-
-
-@app.post("/api/admin/users")
-def admin_create_user(body: CreateUserIn, _: auth.CurrentUser = Depends(auth.require_admin)):
-    return admin_service.create_user(body.username, body.password, body.role)
-
-
-@app.patch("/api/admin/users/{user_id}/active")
-def admin_set_user_active(body: SetActiveIn, user_id: int = Path(ge=1),
-                          u: auth.CurrentUser = Depends(auth.require_admin)):
-    return admin_service.set_user_active(user_id, body.active, u.id)
-
-
-@app.patch("/api/admin/users/{user_id}/can-review")
-def admin_set_user_can_review(body: SetCanReviewIn, user_id: int = Path(ge=1),
-                              u: auth.CurrentUser = Depends(auth.require_admin)):
-    return admin_service.set_user_can_review(user_id, body.can_review, u.id)
-
-
-@app.patch("/api/admin/users/{user_id}/role")
-def admin_set_user_role(body: SetRoleIn, user_id: int = Path(ge=1),
-                        u: auth.CurrentUser = Depends(auth.require_admin)):
-    return admin_service.set_user_role(user_id, body.role, u.id)
+app.include_router(auth_router.router)
+app.include_router(config_router.router)
+app.include_router(operator_router.router)
+app.include_router(admin_router.router)
 
 
 # ---------- Static frontend ----------

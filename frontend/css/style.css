@@ -314,12 +314,6 @@ input[type="range"] {
 .shortcuts-quick .sc-row > span:not(.kbd) {
     margin-left: 6px; color: var(--text-muted);
 }
-.link-btn {
-    background: none; border: none; color: var(--accent-hi);
-    padding: 4px 0; font-size: 12px; text-align: left;
-    text-decoration: underline; cursor: pointer;
-}
-.link-btn:hover { color: var(--accent); background: none; }
 
 /* Submit button state: incomplete → warning */
 #btn-submit.incomplete {

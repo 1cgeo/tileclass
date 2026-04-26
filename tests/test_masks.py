@@ -95,3 +95,33 @@ def test_validate_rejects_invalid_class_values(bad):
 def test_validate_rejects_wrong_size():
     with pytest.raises(ValueError):
         validate_submission(b"\x01" * 1024)
+
+
+def test_validate_accepts_class_added_via_config(monkeypatch):
+    """Adicionar uma 7ª classe ao config.yaml deve passar a aceitar valor=7
+    sem mudança de código. Garante que `validate_partial` resolve os IDs em
+    runtime via get_config() (ver mask_utils.py:46)."""
+    import backend.config as config_mod
+    fake_classes = [{"id": i, "name": f"c{i}", "color": "#000"} for i in range(1, 8)]
+    monkeypatch.setattr(
+        config_mod, "get_config",
+        lambda: {"classes": fake_classes, "auth": {"jwt_secret": "x"}, "database": {"path": ":memory:"}},
+    )
+    arr = np.full(PIXELS, 7, dtype=np.uint8)
+    ok, missing = validate_submission(arr.tobytes())
+    assert ok is True and missing == 0
+
+
+def test_validate_rejects_class_removed_via_config(monkeypatch):
+    """Inversa: se a config remove uma classe, máscaras antigas com esse ID
+    são rejeitadas pelo validate. Cobre o cenário de drift de YAML/banco."""
+    import backend.config as config_mod
+    # Apenas classes 1..3 ficam válidas; 4 deixou de existir.
+    fake_classes = [{"id": i, "name": f"c{i}", "color": "#000"} for i in range(1, 4)]
+    monkeypatch.setattr(
+        config_mod, "get_config",
+        lambda: {"classes": fake_classes, "auth": {"jwt_secret": "x"}, "database": {"path": ":memory:"}},
+    )
+    arr = np.full(PIXELS, 4, dtype=np.uint8)
+    with pytest.raises(ValueError):
+        validate_submission(arr.tobytes())

@@ -45,12 +45,32 @@ def _blocked_from(tid):
 # ---------- Happy path ----------
 
 def test_block_pending_tile(client, admin_user, tiles):
+    """Bloquear um tile pending: status, blocked_from, action_log e reason
+    persistidos numa única transação (verificação direta no DB para travar
+    contra regressões silenciosas — só checar HTTP 200 mascarava commits parciais)."""
+    from backend.database import connect
     adm = token(client, "admin", "admin123")
     tid = 1
-    r = client.post(f"/api/admin/tiles/{tid}/block", headers=h(adm), json={"reason": "spurious"})
+    r = client.post(f"/api/admin/tiles/{tid}/block",
+                    headers=h(adm), json={"reason": "spurious"})
     assert r.status_code == 200
-    assert _status(client, adm, tid) == "blocked"
-    assert _blocked_from(tid) == "pending"
+    conn = connect()
+    try:
+        row = conn.execute(
+            "SELECT status, blocked_from, version FROM tiles WHERE id=?", (tid,)
+        ).fetchone()
+        log = conn.execute(
+            "SELECT action, detail FROM action_log WHERE tile_id=? AND action='block'",
+            (tid,),
+        ).fetchall()
+    finally:
+        conn.close()
+    assert row["status"] == "blocked"
+    assert row["blocked_from"] == "pending"
+    assert row["version"] >= 2  # bumped at least once vs initial version=1
+    assert len(log) == 1, f"expected 1 'block' log entry, got {len(log)}"
+    # The reason flows through to action_log.detail (used by admin audit trail).
+    assert log[0]["detail"] is not None and "spurious" in log[0]["detail"]
 
 
 def test_block_classified_tile(client, admin_user, operators, tiles):

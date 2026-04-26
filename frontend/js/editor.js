@@ -25,13 +25,13 @@ import {
     applyPatch as coreApplyPatch,
     screenToLogical as coreScreenToLogical,
 } from "./mask-core.js";
+import { saveBackup as bkSave, loadBackup as bkLoad, clearBackup as bkClear } from "./backup.js";
 
 const TILE = 256;
 const DISPLAY = 768;
 const SCALE = DISPLAY / TILE;
 const PIXELS = TILE * TILE;
 const BRUSH_SIZES = [1, 3, 5, 7, 11];
-const LS_BACKUP_KEY = "tileclass_backup";
 
 // --- State ---
 let currentTile = null;
@@ -407,48 +407,30 @@ async function loadMaskFromServer(tileId) {
 
 function tryRestoreBackup() {
     // Auto-restore: if localStorage holds a different mask for the tile we
-    // just loaded, overwrite in-memory mask silently. The backup is only
-    // written during active painting and cleared on submit, so the only time
-    // it differs from the server blob is exactly when the user had unsaved
-    // work (F5, browser crash). Prompting for confirmation every time
-    // produced more friction than it was worth. Caller is responsible for
-    // re-rendering (loadTile calls renderMaskFull right after).
-    try {
-        const raw = localStorage.getItem(LS_BACKUP_KEY);
-        if (!raw) return;
-        const b = JSON.parse(raw);
-        if (b.tileId !== currentTile.id || !b.mask) return;
-        const restored = Uint8Array.from(atob(b.mask), c => c.charCodeAt(0));
-        if (restored.length !== PIXELS) return;
-        let differs = false;
-        for (let i = 0; i < PIXELS; i++) {
-            if (restored[i] !== mask[i]) { differs = true; break; }
-        }
-        if (!differs) return;
-        mask = restored;
-        recountFilled();
-        showToast("Trabalho local restaurado.", "success", 2500);
-    } catch {}
-}
-
-function uint8ToBase64(arr) {
-    let s = "";
-    const CHUNK = 0x8000;
-    for (let i = 0; i < arr.length; i += CHUNK) {
-        s += String.fromCharCode.apply(null, arr.subarray(i, i + CHUNK));
+    // just loaded, overwrite in-memory mask silently. Backups only exist when
+    // the user had unsynced work (F5, browser crash); the canonical save+clear
+    // path makes server == backup any other time. Caller re-renders.
+    const restored = bkLoad(currentTile.id);
+    if (!restored) return;
+    // Collect diffs once: lets us skip a no-op restore AND seed an undo entry
+    // that reverts to the server state (Ctrl+Z right after a restore).
+    const touched = new Map();
+    for (let i = 0; i < PIXELS; i++) {
+        if (restored[i] !== mask[i]) touched.set(i, mask[i]);
     }
-    return btoa(s);
+    if (touched.size === 0) return;
+    mask = restored;
+    recountFilled();
+    pushUndo(touched);
+    showToast("Trabalho local restaurado.", "success", 2500);
 }
 
 function saveBackup() {
     if (!currentTile) return;
-    try {
-        const b64 = uint8ToBase64(mask);
-        localStorage.setItem(LS_BACKUP_KEY, JSON.stringify({ tileId: currentTile.id, mask: b64 }));
-    } catch {}
+    bkSave(currentTile.id, mask);
 }
 
-function clearBackup() { localStorage.removeItem(LS_BACKUP_KEY); }
+function clearBackup() { bkClear(); }
 
 function recountFilled() {
     let c = 0;

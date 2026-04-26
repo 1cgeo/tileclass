@@ -112,16 +112,18 @@ export function screenToLogical(rect, clientX, clientY) {
 }
 
 // Validate a submission. Same semantics as backend mask_utils.validate_submission.
-// Returns { ok: bool, missing: int } or throws if invalid value present.
-export function validateSubmission(mask) {
+// `validClasses` is an iterable of allowed non-255 class IDs (defaults to 1..6 to
+// preserve callers that don't pass it). Returns { ok, missing } or throws.
+export function validateSubmission(mask, validClasses = [1, 2, 3, 4, 5, 6]) {
     if (mask.length !== PIXELS) {
         throw new Error(`expected ${PIXELS} bytes, got ${mask.length}`);
     }
+    const allowed = validClasses instanceof Set ? validClasses : new Set(validClasses);
     let missing = 0;
     for (let i = 0; i < PIXELS; i++) {
         const v = mask[i];
         if (v === EMPTY) { missing++; continue; }
-        if (v < 1 || v > 6) throw new Error(`invalid class value ${v} at ${i}`);
+        if (!allowed.has(v)) throw new Error(`invalid class value ${v} at ${i}`);
     }
     return { ok: missing === 0, missing };
 }

@@ -3,7 +3,7 @@
 Aplicação web para classificação pixel-a-pixel de tiles de satélite (256×256 @ **2.5 m/pixel** = **640 m × 640 m** no chão, 6 classes).
 Backend FastAPI + SQLite; frontend Vanilla JS com Canvas HTML5. Imagem de fundo via TileServer-GL (XYZ).
 
-**Classes (config.yaml):** Massa d'água, Área edificada, Floresta, Campo, Cultivo, Terreno exposto. Cores contrastantes sobre satélite (azul / vermelho / roxo / amarelo / ciano / laranja — sem verde nem tons escuros por regra de contraste).
+**Classes (config.yaml):** Massa d'água (#377eb8 azul), Área edificada (#e41a1c vermelho), Floresta (#4daf4a verde), Campo (#ffff33 amarelo), Cultivo (#984ea3 roxo), Terreno exposto (#ff7f00 laranja). Paleta ColorBrewer Set1 — contrastantes entre si e visíveis sobre Sentinel-2.
 
 Spec completa: `docs/requirements.md`. Em caso de dúvida, o requirements manda.
 
@@ -28,7 +28,12 @@ uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
 python -m backend.scripts.create_admin
 python -m backend.scripts.import_points --point <lat> <lon> <name>          # um ponto
 python -m backend.scripts.import_points --csv pontos.csv [--block 3]        # CSV lat,lon,name; block NxN
+python -m backend.scripts.import_cq_tiles --geoparquet cq_selection.geoparquet [--seed empty|raw]
+python -m backend.scripts.import_qc_tiles --csv qc_tiles.csv --bdf-dir <dir>
 python -m backend.scripts.export_tiles <out_dir> [--status reviewed|reviewed+classified] [--raw] [--mosaic] [--manifest <path>]
+python -m backend.scripts.build_mbtiles <raster_in> <out.mbtiles>           # raster grande → tiles XYZ
+python -m backend.scripts.build_xyz_pyramid <raster_in> <out_dir>            # alternativa em disco
+python -m backend.scripts.merge_db <other.db>                                # funde tileclass.db de outra equipe
 
 # Testes
 python -m pytest tests/ --ignore=tests/e2e --ignore=tests/frontend -v   # backend
@@ -44,37 +49,58 @@ npm run test:all                                                         # tudo 
 ```
 tileclass/
 ├── backend/
-│   ├── main.py              # FastAPI app + rotas + static files
-│   ├── auth.py              # JWT, bcrypt, rate limit, role middleware
-│   ├── models.py            # Schemas Pydantic
-│   ├── database.py          # Conexão SQLite (WAL), schema, log_action
-│   ├── config.py            # Carrega config.yaml (singleton cache)
-│   ├── tile_service.py      # Fila, atribuição atômica, submit, problema, histórico
-│   ├── admin_service.py     # Dashboard, bulk reset/re-review, users, thumbnail
-│   ├── mask_utils.py        # Uint8Array ↔ PNG "L" + validação
+│   ├── main.py                 # FastAPI app + lifespan + middleware + static SPA
+│   ├── routers/                # FastAPI APIRouters (registrados no main.py)
+│   │   ├── auth.py             # /api/auth/{login,refresh,me,logout}
+│   │   ├── operator.py         # /api/tiles/* + /api/me/stats-today + helpers de body de máscara
+│   │   ├── admin.py            # /api/admin/* (dashboard, tiles, users, mask overlay)
+│   │   └── config.py           # /api/config/{classes,tileserver} + /api/{xyz,wc,mb}/{z}/{x}/{y}.<ext>
+│   ├── auth.py                 # JWT, bcrypt, rate limit, blacklist, role middleware
+│   ├── models.py               # Schemas Pydantic
+│   ├── database.py             # Conexão SQLite (WAL), schema, transaction(), log_action
+│   ├── config.py               # Carrega config.yaml (singleton cache)
+│   ├── tile_service.py         # Fila, atribuição atômica, submit, problema, pause/resume, histórico
+│   ├── admin_service.py        # Fachada — re-exporta de backend/admin/
+│   ├── admin/                  # Submódulos do admin (split de admin_service.py)
+│   │   ├── dashboard.py        # /admin/dashboard + _cycle_durations (CTE pause/resume aware)
+│   │   ├── tiles_query.py      # list_tiles, count_tiles, list_tiles_map, list_problems + _build_tiles_filter
+│   │   ├── tiles_mutations.py  # reset/problem/re-review/assign/unassign/pause/delete/block/unblock (atômicos)
+│   │   ├── users.py            # list/create + can_review/role/active toggles
+│   │   └── thumbnails.py       # tile_thumbnail (mask colorizada) + tile_satellite_thumbnail
+│   ├── mask_utils.py           # Uint8Array ↔ PNG "L" + validação (IDs derivados do config)
+│   ├── mask_tile_service.py    # Cache mbtiles do overlay admin (rasteriza máscaras → XYZ)
+│   ├── mbtiles_service.py      # Reader read-only (singletons primary/wc/mb, conn por thread)
+│   ├── geo.py                  # TILE_PX/METERS_PER_PX/TILE_METERS + bbox_from_center (pyproj.Geod WGS84)
+│   ├── tile_grid.py            # Helpers Web Mercator (build_mbtiles e import_cq)
 │   ├── config.yaml
-│   ├── geo.py               # Constantes TILE_PX/METERS_PER_PX/TILE_METERS + bbox_from_center (pyproj.Geod WGS84)
-│   └── scripts/             # create_admin / import_points / export_tiles
+│   └── scripts/                # create_admin, import_points, import_cq_tiles, import_qc_tiles,
+│                               # export_tiles, build_mbtiles, build_xyz_pyramid, merge_db
+├── data_external/              # MBTiles grandes (gitignored) — tiles/wc_teste/mapbiomas
 ├── frontend/
-│   ├── index.html           # SPA (login / editor / admin)
-│   ├── js/mask-core.js      # Lógica PURA de máscara (paint, bresenham, flood, undo) — testável sem DOM
-│   ├── css/style.css
+│   ├── index.html              # SPA (login / editor / admin)
+│   ├── css/style.css           # Tokens em :root + breakpoints
+│   ├── vendor/maplibre/        # CDN local (.js + .css)
 │   └── js/
-│       ├── app.js           # Router SPA por role
-│       ├── api.js           # Fetch wrapper + JWT refresh (reativo + proativo)
-│       ├── auth.js          # (reservado; auth está em api.js + app.js)
-│       ├── editor.js        # Canvas, ferramentas, undo/redo, submit
-│       ├── admin.js         # Dashboard, tiles (lista+grade), users, viewer
-│       ├── minimap.js       # MapLibre 3×3 com highlight do tile atual
-│       ├── maplib.js        # Helpers MapLibre (createLockedMap, setMapBbox)
-│       ├── utils.js         # hexToRgb, blobToImage, escapeHtml
-│       └── toast.js         # Notificações
+│       ├── app.js              # Router SPA por role
+│       ├── api.js              # Fetch wrapper + JWT refresh (reativo + proativo)
+│       ├── editor.js           # Canvas, ferramentas, undo/redo, submit
+│       ├── mask-core.js        # Lógica PURA (paint, Bresenham, flood, undo, screenToLogical) — testável sem DOM
+│       ├── backup.js           # localStorage backup (round-trip Uint8Array ↔ base64) — testável sem DOM
+│       ├── admin.js            # Dashboard, tiles (lista+grade+mapa), users, viewer
+│       ├── minimap.js          # MapLibre 3×3 com highlight do tile atual
+│       ├── maplib.js           # Helpers MapLibre (createLockedMap, setMapBbox)
+│       ├── utils.js            # hexToRgb, blobToImage, escapeHtml
+│       └── toast.js            # Notificações
 ├── docs/
 │   ├── requirements.md          # Spec completa
 │   └── implementation_plan.md   # Plano em fases
-├── tests/                   # pytest + TestClient (auth, tiles, admin, concorrência)
+├── tests/                       # pytest + TestClient (auth, tiles, admin, concorrência, geo, raster)
+│   ├── frontend/                # Vitest + jsdom (mask-core, api-refresh, utils, localstorage-backup)
+│   └── e2e/runner.mjs           # Puppeteer + uvicorn real
 └── requirements.txt
 ```
+
+**Convenção de paths grandes:** `.mbtiles` (GBs) ficam em `data_external/` na raiz; o `config.yaml` aponta com `../data_external/<arquivo>.mbtiles` (relativo a `backend/` por convenção do `_open_optional` no `main.py`). Mantém o pacote `backend/` enxuto.
 
 ## Regras de idioma
 
@@ -86,7 +112,7 @@ tileclass/
 
 - **Geometria do tile (backend/geo.py):** `TILE_PX=256`, `METERS_PER_PX=2.5`, `TILE_METERS=640`. Cada tile é definido **pelo centro geodésico**. `bbox_from_center(lat, lon)` usa `pyproj.Geod` (WGS84) para calcular ±320 m em cada direção cardeal — precisão < 1 mm em qualquer latitude. Schema de `tiles` tem apenas `bbox_*`; zoom/tile_x/tile_y/context_tiles foram removidos.
 - **Adjacência sem gap:** `offset_center(lat, lon, dx, dy)` caminha `dx*640m` e `dy*640m` por geodésica, garantindo que tiles vizinhos do `--block NxN` compartilhem arestas exatamente (gap < 1 mm, validado por teste).
-- **Fonte de verdade da máscara:** `Uint8Array(65536)` no cliente. Valores válidos: `1..6` (classes) e `255` (não preenchido). O canvas é apenas visualização.
+- **Fonte de verdade da máscara:** `Uint8Array(65536)` no cliente. Valores válidos: IDs definidos em `config.yaml` (`classes[].id`, hoje `1..6`) + `255` (não preenchido). `mask_utils.validate_partial` deriva os IDs do config — adicionar/remover classe é só edição YAML, sem código. O canvas é apenas visualização.
 - **PNG do backend:** banda única (grayscale "L"), 8 bits, 256×256, sem compressão com perda. Pillow faz a conversão `bytes ↔ PNG`.
 - **Protocolo wire:** frontend envia **raw bytes** (Uint8Array, 65536 bytes) no body do classify/review; nunca PNG. Backend converte.
 - **Submissão:** rejeitar se houver `255` no array. Resposta de erro traz a contagem.

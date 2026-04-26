@@ -1,8 +1,13 @@
 // Admin panel: dashboard, tiles (list+grid+bulk+filters+viewer), problems, users.
+// Dashboard tab + shared modals live in ./admin/ submodules; the rest stays
+// here because tiles/map/actions/viewer share so much state that splitting
+// them costs more readability than it gains.
 import { apiGet, apiGetBlob, apiGetWithHeaders, apiPostJson, apiPatchJson, apiJson, logout as apiLogout } from "./api.js";
 import { showToast } from "./toast.js";
 import { createLockedMap, disposeMap, tileTransformRequest } from "./maplib.js";
 import { hexToRgb, blobToImage, escapeHtml as escape, fmtDate } from "./utils.js";
+import { renderDashboard, fmtDuration } from "./admin/dashboard.js";
+import { wireConfirmModal, confirmDestructive, promptAssign } from "./admin/modals.js";
 
 let tileserverUrl = "";
 let tileserverMaxZoom = 22;
@@ -16,6 +21,10 @@ let listView = "table"; // "table" | "grid"
 // handler on tile layers can suppress the viewer while the tool is active.
 let mapSelectedIds = new Set();
 let mapTilePropsById = new Map();   // id -> feature properties (for status filtering)
+// GeoJSON sources held in scope so bulk actions can mutate features and call
+// setData(geojson) on the public API instead of reaching into src._data.
+let mapPolyGeojson = null;
+let mapPointGeojson = null;
 let mapRectSelectActive = false;
 
 // Sort + pagination state for the tiles tab
@@ -24,10 +33,6 @@ let sortDir = "asc";
 let page = 0;
 const PAGE_SIZE = 100;
 let totalTiles = 0;
-
-// Sort state for dashboard per-operator table
-let opSortKey = "username";
-let opSortDir = "asc";
 
 // Active MapLibre instance for the "Mapa" tab, disposed on tab change.
 let mapView = null;
@@ -97,6 +102,11 @@ async function selectTab(tab) {
     selectedIds.clear();
     page = 0;
     mapView = disposeMap(mapView);
+    // Drop the GeoJSON references when leaving the map tab — these hold one
+    // feature per tile and pin tile-row-sized objects in memory while admin
+    // sessions stay open.
+    mapPolyGeojson = null;
+    mapPointGeojson = null;
     disposeViewerMap();
     document.querySelectorAll(".admin-nav button").forEach(b => {
         b.classList.toggle("active", b.dataset.tab === tab);
@@ -120,172 +130,6 @@ function renderError(target, e) {
     p.className = "error";
     p.textContent = `Erro: ${e.message}`;
     target.appendChild(p);
-}
-
-async function renderDashboard(root) {
-    const d = await apiGet("/api/admin/dashboard");
-    root.innerHTML = "";
-    const grid = document.createElement("div");
-    grid.className = "stats-grid";
-    // Cumulative classified count: every tile that finished the classify step.
-    // status='classified' awaits review, 'in_review' is under review, 'reviewed'
-    // completed it — all three imply the classify happened.
-    const classifiedTotal =
-        (d.totals_by_status.classified || 0)
-        + (d.totals_by_status.in_review || 0)
-        + (d.totals_by_status.reviewed || 0);
-    // "Em andamento" counts only ACTIVE tiles. Paused tiles (operator left
-    // mid-work) get their own card so the team sees stalled work distinctly.
-    const pausedByStatus = d.paused_by_status || {};
-    const activeInProgress = (d.totals_by_status.in_progress || 0) - (pausedByStatus.in_progress || 0);
-    const activeInReview = (d.totals_by_status.in_review || 0) - (pausedByStatus.in_review || 0);
-    grid.append(
-        statCard("Total de tiles", d.total_tiles),
-        statCard("% concluído", `${d.completion_percent}%`),
-        statCard("Classificados", classifiedTotal),
-        statCard("Revisados", d.totals_by_status.reviewed || 0),
-        statCard("Pendentes", d.totals_by_status.pending || 0),
-        statCard("Em andamento", activeInProgress + activeInReview),
-        statCard("Pausados", d.paused_count || 0),
-        statCard("Bloqueados", d.totals_by_status.blocked || 0),
-        statCard("Problemas", d.totals_by_status.problem || 0),
-        statCard("Ritmo (tiles/dia)", d.rate_per_day),
-        statCard("ETA (dias)", d.eta_days ?? "—"),
-        statCard("Tempo médio / classificação", fmtDuration(d.avg_classify_seconds)),
-        statCard("Tempo médio / revisão", fmtDuration(d.avg_review_seconds)),
-    );
-    root.appendChild(grid);
-
-    const total = d.total_tiles || 1;
-    const statusH = document.createElement("h3");
-    statusH.textContent = "Distribuição por status";
-    root.appendChild(statusH);
-    // Build a display-status breakdown that pulls paused tiles out of
-    // in_progress/in_review and lists them under their own bar. Order matches
-    // the lifecycle (pending → ... → reviewed) plus exception states at the end.
-    const displayCounts = {};
-    for (const [k, v] of Object.entries(d.totals_by_status)) {
-        if (k === "in_progress" || k === "in_review") {
-            displayCounts[k] = v - (pausedByStatus[k] || 0);
-        } else {
-            displayCounts[k] = v;
-        }
-    }
-    if (d.paused_count) displayCounts.paused = d.paused_count;
-    const order = ["pending", "in_progress", "paused", "classified", "in_review", "reviewed", "problem", "blocked"];
-    const sortedKeys = [
-        ...order.filter(k => k in displayCounts),
-        ...Object.keys(displayCounts).filter(k => !order.includes(k)),
-    ];
-    for (const k of sortedKeys) {
-        const v = displayCounts[k];
-        const row = document.createElement("div");
-        row.className = "bar-row";
-        const name = document.createElement("span"); name.className = "name"; name.textContent = k;
-        const wrap = document.createElement("span"); wrap.className = "bar-wrap";
-        const bar = document.createElement("span"); bar.className = "bar";
-        bar.style.width = `${(v / total) * 100}%`;
-        wrap.appendChild(bar);
-        const count = document.createElement("span"); count.className = "count"; count.textContent = v;
-        row.append(name, wrap, count);
-        root.appendChild(row);
-    }
-
-    const opH = document.createElement("h3");
-    opH.textContent = "Por operador";
-    opH.style.marginTop = "16px";
-    root.appendChild(opH);
-    renderPerOperator(root, d.per_operator);
-
-    const dayH = document.createElement("h3");
-    dayH.textContent = "Tiles revisados por dia";
-    dayH.style.marginTop = "16px";
-    root.appendChild(dayH);
-    const maxDaily = Math.max(1, ...d.daily_completed.map(r => r.count));
-    for (const r of d.daily_completed) {
-        const row = document.createElement("div");
-        row.className = "bar-row";
-        const name = document.createElement("span"); name.className = "name"; name.textContent = r.date;
-        const wrap = document.createElement("span"); wrap.className = "bar-wrap";
-        const bar = document.createElement("span"); bar.className = "bar";
-        bar.style.width = `${(r.count / maxDaily) * 100}%`;
-        wrap.appendChild(bar);
-        const count = document.createElement("span"); count.className = "count"; count.textContent = r.count;
-        row.append(name, wrap, count);
-        root.appendChild(row);
-    }
-}
-
-function renderPerOperator(root, rows) {
-    // Remove previous table if any (re-sort re-renders in place)
-    const prev = root.querySelector(".per-op-wrap");
-    if (prev) prev.remove();
-    const wrap = document.createElement("div");
-    wrap.className = "per-op-wrap";
-    const table = document.createElement("table");
-    table.className = "admin-table";
-    const cols = [
-        ["username", "Usuário"],
-        ["classified", "Classificados"],
-        ["reviewed", "Revisados"],
-        ["problems", "Problemas"],
-        ["avg_classify_seconds", "Tempo médio classificação"],
-        ["avg_review_seconds", "Tempo médio revisão"],
-    ];
-    const thead = document.createElement("thead");
-    const trh = document.createElement("tr");
-    for (const [k, lbl] of cols) {
-        const th = document.createElement("th");
-        th.textContent = lbl;
-        th.style.cursor = "pointer";
-        th.title = "Clique para ordenar";
-        if (opSortKey === k) th.textContent += opSortDir === "asc" ? " ▲" : " ▼";
-        th.addEventListener("click", () => {
-            if (opSortKey === k) opSortDir = opSortDir === "asc" ? "desc" : "asc";
-            else { opSortKey = k; opSortDir = "asc"; }
-            renderPerOperator(root, rows);
-        });
-        trh.appendChild(th);
-    }
-    thead.appendChild(trh);
-    table.appendChild(thead);
-    const sorted = [...rows].sort((a, b) => {
-        const va = a[opSortKey] ?? 0, vb = b[opSortKey] ?? 0;
-        if (va < vb) return opSortDir === "asc" ? -1 : 1;
-        if (va > vb) return opSortDir === "asc" ? 1 : -1;
-        return 0;
-    });
-    const tbody = document.createElement("tbody");
-    for (const op of sorted) {
-        const tr = document.createElement("tr");
-        [op.username, op.classified || 0, op.reviewed || 0, op.problems || 0,
-         fmtDuration(op.avg_classify_seconds), fmtDuration(op.avg_review_seconds)]
-            .forEach(v => { const td = document.createElement("td"); td.textContent = v; tr.appendChild(td); });
-        tbody.appendChild(tr);
-    }
-    table.appendChild(tbody);
-    wrap.appendChild(table);
-    root.appendChild(wrap);
-}
-
-function fmtDuration(sec) {
-    const s = Number(sec) || 0;
-    if (s <= 0) return "—";
-    if (s < 60) return `${s.toFixed(1)}s`;
-    const m = Math.floor(s / 60);
-    const r = Math.round(s - m * 60);
-    if (m < 60) return `${m}m ${r}s`;
-    const h = Math.floor(m / 60);
-    return `${h}h ${m - h * 60}m`;
-}
-
-function statCard(label, value) {
-    const d = document.createElement("div");
-    d.className = "stat-card";
-    const v = document.createElement("div"); v.className = "value"; v.textContent = value;
-    const l = document.createElement("div"); l.className = "label"; l.textContent = label;
-    d.append(v, l);
-    return d;
 }
 
 async function renderTiles(root) {
@@ -699,75 +543,6 @@ function btn(label, fn, cls) {
     return b;
 }
 
-// ---------- Custom confirm modal for destructive bulk ops ----------
-function wireConfirmModal() {
-    const modal = document.getElementById("modal-confirm");
-    if (!modal) return;
-    const reason = document.getElementById("confirm-reason");
-    if (reason) reason.addEventListener("keydown", (e) => {
-        if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
-            e.preventDefault();
-            document.getElementById("confirm-ok")?.click();
-        }
-    });
-}
-
-function confirmDestructive({
-    title, description, ids, confirmLabel = "Confirmar", danger = true,
-    reasonLabel, reasonPlaceholder, reasonRequired = false, reasonMaxLength = 500,
-}) {
-    return new Promise((resolve) => {
-        const modal = document.getElementById("modal-confirm");
-        document.getElementById("confirm-title").textContent = title;
-        document.getElementById("confirm-description").textContent = description;
-        const list = document.getElementById("confirm-ids");
-        list.innerHTML = "";
-        const preview = ids.slice(0, 20);
-        list.textContent = `IDs: ${preview.join(", ")}${ids.length > 20 ? ` … (+${ids.length - 20})` : ""}`;
-        const reason = document.getElementById("confirm-reason");
-        const reasonLabelEl = modal.querySelector(".confirm-reason-label");
-        // Remember original label/placeholder/maxlength so we can restore them
-        // on close — other callers share this modal and expect the defaults.
-        const origLabelText = reasonLabelEl?.firstChild?.nodeValue;
-        const origPlaceholder = reason.placeholder;
-        const origMaxLength = reason.maxLength;
-        if (reasonLabel && reasonLabelEl?.firstChild) reasonLabelEl.firstChild.nodeValue = reasonLabel;
-        if (reasonPlaceholder !== undefined) reason.placeholder = reasonPlaceholder;
-        if (reasonMaxLength) reason.maxLength = reasonMaxLength;
-        reason.value = "";
-        const ok = document.getElementById("confirm-ok");
-        ok.textContent = confirmLabel;
-        ok.classList.toggle("danger", !!danger);
-        const cancel = document.getElementById("confirm-cancel");
-        const updateOkState = () => {
-            ok.disabled = reasonRequired && !reason.value.trim();
-        };
-        updateOkState();
-
-        const cleanup = (result) => {
-            modal.classList.add("hidden");
-            ok.removeEventListener("click", onOk);
-            cancel.removeEventListener("click", onCancel);
-            reason.removeEventListener("input", updateOkState);
-            ok.disabled = false;
-            if (origLabelText && reasonLabelEl?.firstChild) reasonLabelEl.firstChild.nodeValue = origLabelText;
-            reason.placeholder = origPlaceholder;
-            reason.maxLength = origMaxLength;
-            resolve(result);
-        };
-        const onOk = () => {
-            if (reasonRequired && !reason.value.trim()) return;
-            cleanup({ confirmed: true, reason: reason.value.trim() });
-        };
-        const onCancel = () => cleanup({ confirmed: false });
-        ok.addEventListener("click", onOk);
-        cancel.addEventListener("click", onCancel);
-        reason.addEventListener("input", updateOkState);
-        modal.classList.remove("hidden");
-        setTimeout(() => reason.focus(), 50);
-    });
-}
-
 async function resetOne(id) {
     const r = await confirmDestructive({
         title: `Resetar tile #${id}`,
@@ -807,40 +582,6 @@ async function assignOne(tile) {
     });
     showToast("Tile atribuído.", "success");
     refreshTileInPlace(tile.id);
-}
-
-function promptAssign({ title, description, users }) {
-    return new Promise((resolve) => {
-        const modal = document.getElementById("modal-assign");
-        document.getElementById("assign-title").textContent = title;
-        document.getElementById("assign-description").textContent = description;
-        const sel = document.getElementById("assign-user");
-        sel.innerHTML = "";
-        for (const u of users) {
-            const opt = document.createElement("option");
-            opt.value = String(u.id);
-            const tags = [];
-            if (u.role === "admin") tags.push("admin");
-            else if (u.can_review) tags.push("revisor");
-            opt.textContent = u.username + (tags.length ? ` (${tags.join(", ")})` : "");
-            sel.appendChild(opt);
-        }
-        const reason = document.getElementById("assign-reason"); reason.value = "";
-        const ok = document.getElementById("assign-ok");
-        const cancel = document.getElementById("assign-cancel");
-        const cleanup = (result) => {
-            modal.classList.add("hidden");
-            ok.removeEventListener("click", onOk);
-            cancel.removeEventListener("click", onCancel);
-            resolve(result);
-        };
-        const onOk = () => cleanup({ confirmed: true, user_id: Number(sel.value), reason: reason.value.trim() });
-        const onCancel = () => cleanup({ confirmed: false });
-        ok.addEventListener("click", onOk);
-        cancel.addEventListener("click", onCancel);
-        modal.classList.remove("hidden");
-        setTimeout(() => sel.focus(), 50);
-    });
 }
 
 async function deleteOne(id, name) {
@@ -1264,6 +1005,29 @@ function setMapTileProps(p, { status, paused, blocked_from } = {}) {
     p.display_status = displayStatusFor(p);
 }
 
+// Re-sync feature properties from `mapTilePropsById` (the bulk-action source of
+// truth) onto both stored GeoJSONs and push to MapLibre. Called after every bulk
+// mutation so the map recolors without a full reload.
+function refreshMapFeatureProps() {
+    if (!mapView) return;
+    const sources = [
+        [mapPolyGeojson, mapView.getSource("tiles")],
+        [mapPointGeojson, mapView.getSource("tile-points")],
+    ];
+    for (const [geojson, src] of sources) {
+        if (!geojson || !src) continue;
+        for (const f of geojson.features) {
+            const p = mapTilePropsById.get(f.properties.id);
+            if (!p) continue;
+            f.properties.status = p.status;
+            f.properties.paused = p.paused;
+            f.properties.display_status = p.display_status;
+            f.properties.blocked_from = p.blocked_from;
+        }
+        src.setData(geojson);
+    }
+}
+
 async function renderMap(root) {
     const tiles = await apiGet("/api/admin/tiles/map");
     mapSelectedIds = new Set();
@@ -1399,9 +1163,8 @@ async function renderMap(root) {
             },
         });
     }
-    const polyGeojson = { type: "FeatureCollection", features: polyFeatures };
-    const pointGeojson = { type: "FeatureCollection", features: pointFeatures };
-    console.log(`[admin/map] rendering ${tiles.length} tiles`);
+    mapPolyGeojson = { type: "FeatureCollection", features: polyFeatures };
+    mapPointGeojson = { type: "FeatureCollection", features: pointFeatures };
 
     // Overall extent for fitBounds.
     let w = Infinity, s = Infinity, e = -Infinity, n = -Infinity;
@@ -1442,8 +1205,8 @@ async function renderMap(root) {
                     tileSize: 256,
                     maxzoom: tileserverMaxZoom || 19,
                 },
-                tiles: { type: "geojson", data: polyGeojson },
-                "tile-points": { type: "geojson", data: pointGeojson },
+                tiles: { type: "geojson", data: mapPolyGeojson },
+                "tile-points": { type: "geojson", data: mapPointGeojson },
             },
             layers: [
                 { id: "basemap-layer", type: "raster", source: "basemap" },
@@ -1871,31 +1634,10 @@ async function mapBulkReReview() {
         ids: eligible, reason: r.reason,
     });
     showToast(`${resp.affected} enviados para nova revisão.`, "success");
-    // Refresh the affected features in-place: flip their status to 'classified'
-    // in the cached props + geojson sources so the map recolors without a
-    // full reload.
-    const eligibleSet = new Set(eligible);
     for (const id of eligible) {
         setMapTileProps(mapTilePropsById.get(id), { status: "classified", paused: false });
     }
-    if (mapView) {
-        const polySrc = mapView.getSource("tiles");
-        const ptSrc = mapView.getSource("tile-points");
-        for (const src of [polySrc, ptSrc]) {
-            if (!src) continue;
-            const data = src._data;
-            if (!data) continue;
-            for (const f of data.features) {
-                if (!eligibleSet.has(f.properties.id)) continue;
-                const p = mapTilePropsById.get(f.properties.id);
-                if (!p) continue;
-                f.properties.status = p.status;
-                f.properties.paused = p.paused;
-                f.properties.display_status = p.display_status;
-            }
-            src.setData(data);
-        }
-    }
+    refreshMapFeatureProps();
     clearMapSelection();
 }
 
@@ -1962,23 +1704,7 @@ async function mapBulkAssign() {
         const newStatus = t.status === "pending" ? "in_progress" : "in_review";
         setMapTileProps(mapTilePropsById.get(t.id), { status: newStatus, paused: true });
     }
-    if (mapView) {
-        const polySrc = mapView.getSource("tiles");
-        const ptSrc = mapView.getSource("tile-points");
-        for (const src of [polySrc, ptSrc]) {
-            if (!src) continue;
-            const data = src._data;
-            if (!data) continue;
-            for (const f of data.features) {
-                const p = mapTilePropsById.get(f.properties.id);
-                if (!p) continue;
-                f.properties.status = p.status;
-                f.properties.paused = p.paused;
-                f.properties.display_status = p.display_status;
-            }
-            src.setData(data);
-        }
-    }
+    refreshMapFeatureProps();
     clearMapSelection();
 }
 
@@ -2020,23 +1746,7 @@ async function mapBulkUnassign() {
                          : p.status;
         setMapTileProps(p, { status: newStatus, paused: false });
     }
-    if (mapView) {
-        const polySrc = mapView.getSource("tiles");
-        const ptSrc = mapView.getSource("tile-points");
-        for (const src of [polySrc, ptSrc]) {
-            if (!src) continue;
-            const data = src._data;
-            if (!data) continue;
-            for (const f of data.features) {
-                const p = mapTilePropsById.get(f.properties.id);
-                if (!p) continue;
-                f.properties.status = p.status;
-                f.properties.paused = p.paused;
-                f.properties.display_status = p.display_status;
-            }
-            src.setData(data);
-        }
-    }
+    refreshMapFeatureProps();
     clearMapSelection();
 }
 
@@ -2070,25 +1780,7 @@ async function mapBulkBlock() {
         const p = mapTilePropsById.get(id);
         if (p) setMapTileProps(p, { blocked_from: p.status, status: "blocked", paused: false });
     }
-    if (mapView) {
-        const polySrc = mapView.getSource("tiles");
-        const ptSrc = mapView.getSource("tile-points");
-        for (const src of [polySrc, ptSrc]) {
-            if (!src) continue;
-            const data = src._data;
-            if (!data) continue;
-            for (const f of data.features) {
-                const p = mapTilePropsById.get(f.properties.id);
-                if (p) {
-                    f.properties.status = p.status;
-                    f.properties.paused = p.paused;
-                    f.properties.display_status = p.display_status;
-                    f.properties.blocked_from = p.blocked_from;
-                }
-            }
-            src.setData(data);
-        }
-    }
+    refreshMapFeatureProps();
     clearMapSelection();
 }
 
@@ -2123,25 +1815,7 @@ async function mapBulkUnblock() {
         const p = mapTilePropsById.get(id);
         if (p) setMapTileProps(p, { status: p.blocked_from || "pending", paused: false, blocked_from: null });
     }
-    if (mapView) {
-        const polySrc = mapView.getSource("tiles");
-        const ptSrc = mapView.getSource("tile-points");
-        for (const src of [polySrc, ptSrc]) {
-            if (!src) continue;
-            const data = src._data;
-            if (!data) continue;
-            for (const f of data.features) {
-                const p = mapTilePropsById.get(f.properties.id);
-                if (p) {
-                    f.properties.status = p.status;
-                    f.properties.paused = p.paused;
-                    f.properties.display_status = p.display_status;
-                    f.properties.blocked_from = p.blocked_from;
-                }
-            }
-            src.setData(data);
-        }
-    }
+    refreshMapFeatureProps();
     clearMapSelection();
 }
 

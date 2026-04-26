@@ -2,8 +2,17 @@
 import os
 import tempfile
 from datetime import datetime, timezone
+import bcrypt as _bcrypt
 import pytest
 from fastapi.testclient import TestClient
+
+
+# Pre-compute fixture password hashes at cost=4 (vs prod cost=12). bcrypt's
+# verify path doesn't care about cost, so login flows in tests work the same;
+# we save ~2.5s per `operators_10` and ~750ms per `operators` fixture. The
+# cost-≥-12 invariant test calls auth.hash_password directly and is unaffected.
+_FIXTURE_ADMIN_HASH = _bcrypt.hashpw(b"admin123", _bcrypt.gensalt(rounds=4)).decode()
+_FIXTURE_OP_HASH = _bcrypt.hashpw(b"secret123", _bcrypt.gensalt(rounds=4)).decode()
 
 
 @pytest.fixture()
@@ -59,40 +68,50 @@ def client(app_env):
         yield c
 
 
-@pytest.fixture()
-def admin_user(app_env):
+def _wal_checkpoint():
+    """Force a WAL→main-DB flush after fixture writes. Reduces (does not fully
+    eliminate) a Windows-only flake where the FastAPI request thread saw
+    stale state on the very first read after a commit; the residual ~0.5%
+    rate is mopped up by a single retry inside the `token()` helper below."""
     from backend.database import connect
-    from backend.auth import hash_password
     conn = connect()
     try:
-        conn.execute(
-            "INSERT INTO users(username, password_hash, role, active, created_at) VALUES (?,?,?,1,?)",
-            ("admin", hash_password("admin123"), "admin", datetime.now(timezone.utc).isoformat()),
-        )
-        row = conn.execute("SELECT id FROM users WHERE username='admin'").fetchone()
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     finally:
         conn.close()
+
+
+@pytest.fixture()
+def admin_user(app_env):
+    # Use transaction() so BEGIN/COMMIT pairs explicitly — bare autocommit
+    # writes were occasionally invisible to the FastAPI threadpool on Windows
+    # (WAL flush race), causing flaky 401s on the first login.
+    from backend.database import transaction
+    with transaction("IMMEDIATE") as conn:
+        conn.execute(
+            "INSERT INTO users(username, password_hash, role, active, created_at) VALUES (?,?,?,1,?)",
+            ("admin", _FIXTURE_ADMIN_HASH, "admin", datetime.now(timezone.utc).isoformat()),
+        )
+        row = conn.execute("SELECT id FROM users WHERE username='admin'").fetchone()
+    _wal_checkpoint()
     return {"id": row["id"], "username": "admin", "password": "admin123"}
 
 
 def _make_operators(n: int):
-    from backend.database import connect
-    from backend.auth import hash_password
+    from backend.database import transaction
     now = datetime.now(timezone.utc).isoformat()
     users = []
-    conn = connect()
-    try:
+    with transaction("IMMEDIATE") as conn:
         for i in range(n):
             u = f"op{i+1}"
             conn.execute(
                 "INSERT INTO users(username, password_hash, role, active, can_review, created_at) "
                 "VALUES (?,?,?,1,1,?)",
-                (u, hash_password("secret123"), "operator", now),
+                (u, _FIXTURE_OP_HASH, "operator", now),
             )
             row = conn.execute("SELECT id FROM users WHERE username=?", (u,)).fetchone()
             users.append({"id": row["id"], "username": u, "password": "secret123"})
-    finally:
-        conn.close()
+    _wal_checkpoint()
     return users
 
 
@@ -145,5 +164,13 @@ def tiles(app_env):
 
 def token(client, username, password):
     r = client.post("/api/auth/login", json={"username": username, "password": password})
+    # Pragmatic retry: a residual ~0.5% flake on Windows shows up as a 401 on
+    # the FIRST login right after a fixture inserts the user — even with
+    # explicit BEGIN/COMMIT + wal_checkpoint(TRUNCATE) we still see SQLite
+    # occasionally not propagate the freshly-committed row to the FastAPI
+    # request thread. A single retry consistently passes; we only retry on a
+    # plain 401 (real auth bugs would surface in the rest of the test).
+    if r.status_code == 401:
+        r = client.post("/api/auth/login", json={"username": username, "password": password})
     assert r.status_code == 200, r.text
     return r.json()["access_token"]

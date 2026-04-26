@@ -69,13 +69,28 @@ def test_pause_persists_partial_mask_and_sets_paused_at(client, operators, tiles
 
 
 def test_pause_accepts_partial_mask(client, operators, tiles):
-    """Pause must NOT require all-filled (unlike classify/review)."""
+    """Pause must NOT require all-filled (unlike classify/review). Beyond the
+    HTTP 200, validate the body really got persisted as the new data_png and
+    paused_at is set — empty body was a corner case that previously committed
+    only the timestamp."""
+    from backend.database import connect
+    from backend.mask_utils import decode_mask
     t = token(client, "op1", "secret123")
     tile = client.get("/api/tiles/next", headers=h(t)).json()
-    # All 255 (totally empty) is still valid for pause
     body = np.full(65536, 255, dtype=np.uint8).tobytes()
     r = _pause(client, t, tile["id"], body, version=tile["version"])
     assert r.status_code == 200
+    conn = connect()
+    try:
+        row = conn.execute(
+            "SELECT data_png, paused_at, status FROM tiles WHERE id=?",
+            (tile["id"],),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row["status"] == "in_progress"
+    assert row["paused_at"] is not None
+    assert decode_mask(row["data_png"]) == body
 
 
 def test_pause_rejects_non_assignee(client, operators, tiles):
@@ -340,3 +355,65 @@ def test_admin_tiles_filter_paused(client, admin_user, operators, tiles):
     items = r.json()
     assert len(items) == 9
     assert all(it["id"] != tile["id"] for it in items)
+
+
+# ---------- Pause → classify direto (sem chamar /next) ----------
+
+def test_classify_paused_tile_directly_clears_pause_and_succeeds(
+    client, admin_user, operators, tiles
+):
+    """Operador pausa o próprio tile e submete /classify direto, sem /next.
+    A submissão é válida porque o tile continua atribuído a ele — o frontend
+    pode pular o auto-resume manual nesse caminho. Garante que paused_at é
+    zerado, status vai a 'classified' e a máscara final é a submetida."""
+    from backend.database import connect
+    from backend.mask_utils import decode_mask
+    t = token(client, "op1", "secret123")
+    tile = client.get("/api/tiles/next", headers=h(t)).json()
+    # Pause com máscara incompleta (metade 255), depois submit completa.
+    paused_body = _mask(fill=3, missing=True)
+    r = _pause(client, t, tile["id"], paused_body, version=tile["version"])
+    assert r.status_code == 200, r.text
+    new_version = r.json()["version"]
+
+    final = _mask(fill=4)
+    r = client.post(
+        f"/api/tiles/{tile['id']}/classify",
+        headers={**h(t), "Content-Type": "application/octet-stream",
+                 "X-Tile-Version": str(new_version)},
+        content=final,
+    )
+    assert r.status_code == 200, r.text
+
+    conn = connect()
+    try:
+        row = conn.execute(
+            "SELECT status, paused_at, assigned_to, classified_by, data_png "
+            "FROM tiles WHERE id=?", (tile["id"],),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row["status"] == "classified"
+    assert row["paused_at"] is None, "submit must clear paused_at"
+    assert row["assigned_to"] is None
+    assert row["classified_by"] == operators[0]["id"]
+    assert decode_mask(row["data_png"]) == final
+
+
+def test_classify_paused_tile_owned_by_other_user_is_rejected(
+    client, admin_user, operators, tiles
+):
+    """Mesmo cenário, mas op2 tenta classify o tile pausado de op1.
+    Continua sendo bloqueado por 'not assigned to you' — o pause não muda
+    a regra de autorização."""
+    t1 = token(client, "op1", "secret123")
+    tile = client.get("/api/tiles/next", headers=h(t1)).json()
+    _pause(client, t1, tile["id"], _mask(missing=True), version=tile["version"])
+
+    t2 = token(client, "op2", "secret123")
+    r = client.post(
+        f"/api/tiles/{tile['id']}/classify",
+        headers={**h(t2), "Content-Type": "application/octet-stream"},
+        content=_mask(fill=1),
+    )
+    assert r.status_code == 403

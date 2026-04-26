@@ -357,6 +357,53 @@ def safe_invalidate_bbox(west: float, south: float, east: float, north: float) -
         pass
 
 
+def safe_invalidate_tiles(tile_ids: list[int]) -> None:
+    """Bulk variant of safe_invalidate_tile: 1 main-DB read for the bboxes,
+    then 1 cache connection for the whole loop, vs N opens. Bboxes are
+    processed individually (no union — would over-invalidate when the batch
+    spans disjoint regions)."""
+    if not tile_ids:
+        return
+    try:
+        main = connect_main()
+        try:
+            placeholders = ",".join("?" * len(tile_ids))
+            rows = main.execute(
+                f"SELECT bbox_west, bbox_south, bbox_east, bbox_north "
+                f"FROM tiles WHERE id IN ({placeholders})",
+                tile_ids,
+            ).fetchall()
+        finally:
+            main.close()
+        if not rows:
+            return
+        z_lo, z_hi = min_zoom(), max_zoom()
+        cache = _open_cache()
+        try:
+            for r in rows:
+                for z in range(z_lo, z_hi + 1):
+                    x_min, y_min, x_max, y_max = wm_tiles_for_bbox(
+                        z, r["bbox_west"], r["bbox_south"],
+                        r["bbox_east"], r["bbox_north"],
+                    )
+                    x_min = max(0, x_min - 1)
+                    y_min = max(0, y_min - 1)
+                    x_max = min((1 << z) - 1, x_max + 1)
+                    y_max = min((1 << z) - 1, y_max + 1)
+                    tms_min = _tms_row(z, y_max)
+                    tms_max = _tms_row(z, y_min)
+                    cache.execute(
+                        """DELETE FROM tiles WHERE zoom_level=?
+                           AND tile_column BETWEEN ? AND ?
+                           AND tile_row BETWEEN ? AND ?""",
+                        (z, x_min, x_max, tms_min, tms_max),
+                    )
+        finally:
+            cache.close()
+    except Exception:
+        pass
+
+
 def clear_cache() -> int:
     """Wipe every cached tile. Useful for admin tooling and tests."""
     conn = _open_cache()

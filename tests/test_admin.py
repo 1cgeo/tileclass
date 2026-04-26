@@ -5,13 +5,9 @@ from tests.conftest import token
 def headers(t): return {"Authorization": f"Bearer {t}"}
 
 
-def test_dashboard(client, admin_user, tiles):
-    t = token(client, "admin", "admin123")
-    r = client.get("/api/admin/dashboard", headers=headers(t))
-    assert r.status_code == 200
-    d = r.json()
-    assert d["total_tiles"] == 10
-    assert d["totals_by_status"].get("pending") == 10
+# `test_dashboard` (tautológico — só espelhava a fixture) foi removido;
+# `test_dashboard_real.py::test_dashboard_reflects_real_actions` cobre o caminho
+# de verdade (atua antes de checar).
 
 
 def test_bulk_reset(client, admin_user, operators, tiles):

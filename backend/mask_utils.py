@@ -43,7 +43,10 @@ def validate_partial(raw: bytes) -> int:
     if len(raw) != PIXELS:
         raise ValueError(f"expected {PIXELS} bytes, got {len(raw)}")
     arr = np.frombuffer(raw, dtype=np.uint8)
-    valid = np.isin(arr, [1, 2, 3, 4, 5, 6, 255])
+    # Derive valid IDs from config so adding/removing a class only requires a YAML edit.
+    from .config import get_config
+    allowed = [c["id"] for c in get_config()["classes"]] + [255]
+    valid = np.isin(arr, allowed)
     if not valid.all():
         raise ValueError("invalid class values present")
     return int((arr == 255).sum())
