@@ -388,6 +388,18 @@ input[type="range"] {
     border-radius: 50%; background: var(--ok); color: #fff;
     font-size: 36px; font-weight: 700; line-height: 64px;
 }
+.no-tiles-icon.hidden { display: none; }
+.tile-preview {
+    display: block;
+    width: 240px; height: 240px;
+    margin: 0 auto var(--space-3);
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    object-fit: cover;
+    background: var(--bg-2);
+    image-rendering: auto;
+}
+.tile-preview.hidden { display: none; }
 .no-tiles-box h2 { margin: 0 0 var(--space-2); }
 .no-tiles-box p { margin: 0 0 var(--space-4); color: var(--text-muted); }
 .no-tiles-actions { display: flex; gap: var(--space-2); justify-content: center; }

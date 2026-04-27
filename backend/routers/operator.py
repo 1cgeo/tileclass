@@ -1,9 +1,9 @@
 """Operator-facing tile endpoints: queue, resume, classify/review, problem,
 pause/resume, history, image. The mask-body helpers are local since only
 operator-side mutations carry a 65536-byte payload."""
-from fastapi import APIRouter, Depends, HTTPException, Path, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response
 
-from .. import auth, tile_service
+from .. import admin_service, auth, tile_service
 from ..mask_utils import PIXELS
 from ..models import ReportProblemIn, TileOut
 
@@ -102,6 +102,17 @@ def get_tile_image(tile_id: int = Path(ge=1),
     if img is None:
         raise HTTPException(404, "tile not found")
     return Response(content=img, media_type="image/png")
+
+
+@router.get("/tiles/{tile_id}/satellite-thumbnail")
+def get_tile_satellite_thumbnail(tile_id: int = Path(ge=1),
+                                 size: int = Query(256, ge=16, le=512),
+                                 _: auth.CurrentUser = Depends(auth.get_current_user)):
+    return Response(
+        content=admin_service.tile_satellite_thumbnail(tile_id, size=size),
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
 
 
 @router.post("/tiles/{tile_id}/classify")

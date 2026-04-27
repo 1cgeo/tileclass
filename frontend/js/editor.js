@@ -1177,6 +1177,8 @@ function flashMissing() {
 
 function showIdleScreen(title, message, { previewNext = false } = {}) {
     hidePausedResumeScreen();
+    _previewToken++;
+    resetPreview("idle-preview", "idle-icon");
     document.getElementById("idle-title").textContent = title;
     const msgEl = document.getElementById("idle-message");
     msgEl.textContent = message;
@@ -1198,6 +1200,47 @@ function showIdleScreen(title, message, { previewNext = false } = {}) {
     if (previewNext) updateIdleNextHint();
 }
 
+// Each idle/paused show bumps a token — async preview fetches that started
+// before the screen was dismissed (or replaced) check the token before
+// touching the DOM, so a slow load never paints onto a screen the user has
+// already left.
+let _previewToken = 0;
+
+function resetPreview(imgId, iconId) {
+    const img = document.getElementById(imgId);
+    const icon = iconId ? document.getElementById(iconId) : null;
+    if (img) {
+        // Revoke any previous blob URL so we don't leak object URLs across
+        // back-to-back idle/paused transitions.
+        const prev = img.getAttribute("src");
+        if (prev && prev.startsWith("blob:")) URL.revokeObjectURL(prev);
+        img.classList.add("hidden");
+        img.removeAttribute("src");
+    }
+    if (icon) icon.classList.remove("hidden");
+}
+
+async function loadTilePreview(tileId, imgId, iconId, token) {
+    const img = document.getElementById(imgId);
+    const icon = iconId ? document.getElementById(iconId) : null;
+    if (!img || !tileId) return;
+    let blob;
+    try {
+        // Auth-protected endpoint — must go through apiGetBlob to attach the
+        // Bearer token (a plain <img src=...> would 401).
+        blob = await apiGetBlob(`/api/tiles/${tileId}/satellite-thumbnail?size=320`);
+    } catch {
+        // Satellite source unavailable (no MBTiles, network) — keep the
+        // fallback icon, no toast since the prompt itself still works.
+        return;
+    }
+    if (token !== _previewToken) return;
+    const url = URL.createObjectURL(blob);
+    img.src = url;
+    img.classList.remove("hidden");
+    if (icon) icon.classList.add("hidden");
+}
+
 function describeNextPreview(t) {
     if (!t) return { label: "Fila vazia", kind: null };
     // status='classified' → /next will promote to 'in_review' for this user.
@@ -1215,21 +1258,25 @@ async function updateIdleNextHint() {
     const msg = document.getElementById("idle-message");
     const idle = document.getElementById("idle-screen");
     if (!msg || !idle) return;
+    const token = _previewToken;
     try {
         const next = await apiGet("/api/tiles/next-preview");
         // Avoid overwriting if the user already left the idle screen while the
         // preview was in flight (e.g. clicked "Iniciar tile" quickly).
-        if (idle.classList.contains("hidden")) return;
+        if (idle.classList.contains("hidden") || token !== _previewToken) return;
         const { label, kind } = describeNextPreview(next);
         msg.textContent = label;
         msg.classList.remove("idle-hint-classify", "idle-hint-review");
         if (kind === "review") msg.classList.add("idle-hint-review");
         else if (kind === "classify") msg.classList.add("idle-hint-classify");
+        if (next?.id) loadTilePreview(next.id, "idle-preview", "idle-icon", token);
     } catch {}
 }
 
 function hideIdleScreen() {
     document.getElementById("idle-screen").classList.add("hidden");
+    _previewToken++;
+    resetPreview("idle-preview", "idle-icon");
 }
 
 function showNoTilesScreen() {
@@ -1332,6 +1379,8 @@ async function pauseTile() {
 }
 
 function showPausedResumeScreen(tile) {
+    _previewToken++;
+    resetPreview("paused-preview", "paused-icon");
     const msg = document.getElementById("paused-resume-message");
     if (msg) {
         msg.textContent = `Tile: ${truncateName(tile.name)} (#${tile.id}). Deseja continuar de onde parou?`;
@@ -1344,6 +1393,7 @@ function showPausedResumeScreen(tile) {
     const el = document.getElementById("paused-resume-screen");
     if (el) el.classList.remove("hidden");
     setTimeout(() => btn?.focus(), 0);
+    loadTilePreview(tile.id, "paused-preview", "paused-icon", _previewToken);
 }
 
 function hidePausedResumeScreen() {
@@ -1351,6 +1401,8 @@ function hidePausedResumeScreen() {
     if (el) el.classList.add("hidden");
     const btn = document.getElementById("paused-resume-continue");
     if (btn) delete btn.dataset.tileId;
+    _previewToken++;
+    resetPreview("paused-preview", "paused-icon");
 }
 
 async function continuePausedTile() {
