@@ -5,7 +5,7 @@ from enum import Enum
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response
 from fastapi.responses import JSONResponse
 
-from .. import auth, admin_service, mask_tile_service
+from .. import auth, admin_service, mask_tile_service, mbtiles_service
 from ..models import (
     AssignTileIn, BulkAssignIn, BulkReportProblemIn, BulkTileIdsIn,
     CreateUserIn, DashboardOut, ResetReasonIn, SetActiveIn, SetCanReviewIn,
@@ -258,3 +258,42 @@ def admin_set_user_can_review(body: SetCanReviewIn, user_id: int = Path(ge=1),
 def admin_set_user_role(body: SetRoleIn, user_id: int = Path(ge=1),
                         u: auth.CurrentUser = Depends(auth.require_admin)):
     return admin_service.set_user_role(user_id, body.role, u.id)
+
+
+# ---------- Maintenance ----------
+
+def _mbtiles_info(reader: mbtiles_service.MBTilesReader) -> dict:
+    if not reader.is_open():
+        return {"open": False}
+    lo, hi = reader.zoom_range()
+    p = reader.path()
+    return {
+        "open": True,
+        "format": reader.tile_format(),
+        "min_zoom": lo,
+        "max_zoom": hi,
+        "path": str(p) if p else None,
+    }
+
+
+@router.get("/maintenance/overview")
+def admin_maintenance_overview():
+    """State of the optional MBTiles readers + size/contents of the on-disk
+    overlay cache. Powers the admin Manutenção tab; safe to poll."""
+    return {
+        "mbtiles": {
+            "primary": _mbtiles_info(mbtiles_service.primary),
+            "worldcover": _mbtiles_info(mbtiles_service.worldcover),
+            "mapbiomas": _mbtiles_info(mbtiles_service.mapbiomas),
+        },
+        "overlay_cache": mask_tile_service.cache_stats(),
+    }
+
+
+@router.post("/maintenance/overlay-cache/clear")
+def admin_clear_overlay_cache(u: auth.CurrentUser = Depends(auth.require_admin)):
+    """Wipe every cached overlay tile. Renderings restart on the next admin
+    map view; mutation hooks keep invalidation correct so this is rarely
+    needed (use after a bulk import or palette change)."""
+    deleted = mask_tile_service.clear_cache()
+    return {"deleted": deleted}

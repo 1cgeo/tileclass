@@ -34,6 +34,18 @@ export function escapeHtml(s) {
     );
 }
 
+// Human-readable byte size: 0 → "0 B", 1500 → "1.5 KB", 2.6e9 → "2.4 GB".
+export function fmtBytes(n) {
+    const v = Number(n);
+    if (!Number.isFinite(v) || v < 0) return "—";
+    if (v < 1024) return `${v | 0} B`;
+    const units = ["KB", "MB", "GB", "TB"];
+    let i = -1;
+    let x = v;
+    do { x /= 1024; i++; } while (x >= 1024 && i < units.length - 1);
+    return `${x.toFixed(x < 10 ? 2 : 1)} ${units[i]}`;
+}
+
 // Clip a tile name for inline display ("Tile: X (#42)", etc.). Imported CSVs
 // can carry long descriptive names that blow up header/idle-screen layouts.
 // Uses an actual ellipsis char to keep the visual width closer to `max`.

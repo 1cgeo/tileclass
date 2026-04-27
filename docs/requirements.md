@@ -1,602 +1,455 @@
-# TileClass - Aplicação Web de Classificação de Tiles de Satélite
+# TileClass — Especificação
+
+Spec de referência. Contratos de API, modelo de dados e invariantes; detalhes
+de UI/UX vivem no código e em `CLAUDE.md`.
 
 ## 1. Visão Geral
 
-Aplicação web para classificação pixel-a-pixel de tiles de imagens de satélite. Operadores recebem tiles 256×256 pixels (resolução 2.5m) e atribuem uma das 6 classes a cada pixel usando ferramentas de pintura. O sistema gerencia a fila de trabalho, revisão por pares e acompanhamento de progresso.
+Aplicação web para classificação pixel-a-pixel de tiles de imagens de satélite.
+Operadores recebem tiles 256×256 (resolução 2.5 m/pixel = 640 m × 640 m no
+chão) e atribuem uma das 6 classes a cada pixel. O sistema gerencia a fila de
+trabalho, revisão por pares e acompanhamento de progresso.
 
-**Stack:** Python (FastAPI) + Vanilla JS + SQLite
+**Stack:** Python 3.11+ (FastAPI, sqlite3 nativo — sem ORM, Pillow, NumPy,
+PyJWT, bcrypt, PyYAML, pyproj, rasterio) + Vanilla JS (sem framework, Canvas
+HTML5, MapLibre GL JS).
 
-**Escopo:** 1000 tiles, até 10 operadores simultâneos, uso em rede local.
+**Escopo alvo:** ~1000 tiles, até 10 operadores simultâneos, intranet.
 
----
+## 2. Arquitetura
 
-## 2. Arquitetura Geral
-
-### 2.1 Backend (Python / FastAPI)
-
-- API REST com FastAPI
-- Autenticação JWT (access token + refresh token)
-- SQLite como banco único (controle + armazenamento de dados classificados)
-- Tiles classificados armazenados como PNG de banda única dentro do SQLite (coluna BLOB)
-- Servir arquivos estáticos do frontend (HTML, JS, CSS)
-
-### 2.2 Frontend (Vanilla JS)
-
-- SPA simples sem framework
-- Canvas HTML5 para o editor de classificação
-- Comunicação com backend via fetch API
-- Duas views principais: editor (operador) e painel admin
-
-### 2.3 Imagem de Fundo
-
-- Consumida diretamente de um TileServer-GL já configurado na rede via protocolo XYZ
-- O frontend carrega os tiles XYZ como imagem de fundo do canvas usando a URL template configurável
-- O backend fornece os metadados de georreferência de cada tile (bounding box, zoom, coordenadas XYZ do TileServer) para o frontend saber quais tiles XYZ carregar como fundo
-
-### 2.4 Armazenamento
-
-Tudo em SQLite, um único arquivo .db:
-
-- Tabela de usuários (credenciais, role)
-- Tabela de tiles (metadados, status, atribuição, PNG classificado como BLOB)
-- Tabela de log de ações (quem fez o quê, quando)
-
----
+- API REST (FastAPI) servindo o frontend estático.
+- SQLite WAL como banco único; máscaras como PNG single-band (BLOB).
+- Imagem de fundo via tiles XYZ (MBTiles local servido por
+  `/api/xyz/{z}/{x}/{y}.{ext}` ou TileServer-GL externo). Overlays opcionais:
+  ArcGIS World Imagery (secundário/terciário), WorldCover, MapBiomas.
+- JWT (access 8h, refresh 24h, HS256). Role `operator|admin` + flag
+  `can_review`.
 
 ## 3. Modelo de Dados (SQLite)
 
-### 3.1 Tabela `users`
+### 3.1 `users`
 
-| Coluna       | Tipo    | Descrição                              |
-|-------------|---------|----------------------------------------|
-| id          | INTEGER | PK autoincrement                       |
-| username    | TEXT    | Único, login do operador               |
-| password_hash | TEXT  | Hash bcrypt da senha                   |
-| role        | TEXT    | "operator" ou "admin"                  |
-| created_at  | TEXT    | ISO 8601                               |
+| Coluna          | Tipo    | Notas                                 |
+|-----------------|---------|---------------------------------------|
+| id              | INTEGER | PK                                    |
+| username        | TEXT    | Único                                 |
+| password_hash   | TEXT    | bcrypt (cost ≥ 12)                    |
+| role            | TEXT    | `operator` ou `admin`                 |
+| active          | INTEGER | 0/1; default 1                        |
+| can_review      | INTEGER | 0/1; admins recebem 1 automático      |
+| created_at      | TEXT    | ISO 8601                              |
 
-### 3.2 Tabela `tiles`
+### 3.2 `tiles`
 
-| Coluna         | Tipo    | Descrição                                             |
-|---------------|---------|-------------------------------------------------------|
-| id            | INTEGER | PK autoincrement                                      |
-| name          | TEXT    | Identificador legível do tile (ex: "tile_0042")       |
-| bbox_west     | REAL    | Bounding box - longitude oeste                        |
-| bbox_south    | REAL    | Bounding box - latitude sul                           |
-| bbox_east     | REAL    | Bounding box - longitude leste                        |
-| bbox_north    | REAL    | Bounding box - latitude norte                         |
-| zoom          | INTEGER | Nível de zoom do TileServer para este tile            |
-| tile_x        | INTEGER | Coordenada X no grid XYZ                              |
-| tile_y        | INTEGER | Coordenada Y no grid XYZ                              |
-| status        | TEXT    | Ver seção 3.4                                         |
-| assigned_to   | INTEGER | FK users.id - operador atualmente atribuído           |
-| classified_by | INTEGER | FK users.id - quem classificou                        |
-| reviewed_by   | INTEGER | FK users.id - quem revisou                            |
-| classified_at | TEXT    | ISO 8601                                              |
-| reviewed_at   | TEXT    | ISO 8601                                              |
-| data_png      | BLOB    | PNG de banda única 256×256, valores 0-6 e 255         |
-| problem_note  | TEXT    | Descrição do problema (se reportado)                  |
-| context_tiles | TEXT    | JSON com os tile_x/tile_y vizinhos para contexto      |
+| Coluna         | Tipo    | Notas                                                    |
+|----------------|---------|----------------------------------------------------------|
+| id             | INTEGER | PK                                                       |
+| name           | TEXT    | Identificador legível                                    |
+| bbox_west      | REAL    | Longitude oeste (graus)                                  |
+| bbox_south     | REAL    | Latitude sul                                             |
+| bbox_east      | REAL    | Longitude leste                                          |
+| bbox_north     | REAL    | Latitude norte                                           |
+| status         | TEXT    | Ver 3.4                                                  |
+| assigned_to    | INTEGER | FK users.id                                              |
+| classified_by  | INTEGER | FK users.id                                              |
+| reviewed_by    | INTEGER | FK users.id                                              |
+| classified_at  | TEXT    | ISO 8601                                                 |
+| reviewed_at    | TEXT    | ISO 8601                                                 |
+| data_png       | BLOB    | PNG single-band 256×256, valores `1..6` e `255`          |
+| problem_note   | TEXT    | Nota livre quando `status='problem'`                     |
+| version        | INTEGER | Incrementado a cada mutação; usado em CAS                |
+| paused_at      | TEXT    | ISO 8601 quando o tile está pausado                      |
+| blocked_from   | TEXT    | Status original guardado durante `status='blocked'`      |
 
-### 3.3 Tabela `action_log`
+**Geometria do tile.** Cada tile é definido pelo **centro geodésico**.
+`backend/geo.bbox_from_center(lat, lon)` calcula ±320 m em cada direção
+cardeal usando `pyproj.Geod` (WGS84). Pixel = 2.5 m em qualquer latitude.
+Não há `zoom`/`tile_x`/`tile_y` no schema — composição XYZ é resolvida no
+frontend pelo MapLibre a partir da bbox.
 
-| Coluna    | Tipo    | Descrição                                      |
-|----------|---------|------------------------------------------------|
-| id       | INTEGER | PK autoincrement                               |
-| user_id  | INTEGER | FK users.id                                    |
-| tile_id  | INTEGER | FK tiles.id                                    |
-| action   | TEXT    | "classify", "review", "report_problem", "reset", "request_review" |
-| detail   | TEXT    | Detalhes adicionais (JSON livre)               |
-| created_at | TEXT  | ISO 8601                                       |
+### 3.3 `action_log`
 
-### 3.4 Status do Tile (máquina de estados)
+| Coluna     | Tipo    | Notas                                                 |
+|------------|---------|-------------------------------------------------------|
+| id         | INTEGER | PK                                                    |
+| user_id    | INTEGER | FK users.id                                           |
+| tile_id    | INTEGER | FK tiles.id (nullable)                                |
+| action     | TEXT    | Ver lista abaixo                                      |
+| detail     | TEXT    | JSON livre                                            |
+| created_at | TEXT    | ISO 8601                                              |
+
+Ações principais: `assign_classify`, `assign_review`, `classify`, `review`,
+`pause`, `resume`, `report_problem`, `reset`, `re_review`, `block`,
+`unblock`, `assign`, `unassign`, `delete_tile`, `create_user`,
+`set_user_active`, `set_user_role`, `set_user_can_review`.
+
+Pareamento `assign_*→classify/review` em pares por `(user_id, tile_id)` é o
+que alimenta as métricas de duração no dashboard.
+
+### 3.4 Status do Tile
 
 ```
 pending ──> in_progress ──> classified ──> in_review ──> reviewed
-                │                │              │
-                v                v              v
-            problem          problem        problem
+              │               │              │
+              ▼               ▼              ▼
+            problem        problem        problem
 ```
 
-Estados possíveis:
+Estados:
+- `pending`: nenhum operador atribuído.
+- `in_progress`: operador classificando.
+- `classified`: aguardando revisão.
+- `in_review`: revisor atribuído.
+- `reviewed`: aprovado.
+- `problem`: classificador ou revisor reportou problema.
+- `blocked`: admin removeu da fila temporariamente; o status original fica
+  em `blocked_from`.
 
-- **pending**: nenhum operador pegou ainda
-- **in_progress**: atribuído a um operador, em edição
-- **classified**: operador submeteu a classificação
-- **in_review**: atribuído a um revisor
-- **reviewed**: revisor aprovou
-- **problem**: operador ou revisor reportou problema
-
-Transições importantes:
-
-- `pending -> in_progress`: sistema atribui ao operador que pediu próximo tile
-- `in_progress -> classified`: operador submete
-- `in_progress -> problem`: operador reporta problema
-- `classified -> in_review`: sistema atribui a um revisor (diferente do classificador original)
-- `in_review -> reviewed`: revisor aprova
-- `in_review -> problem`: revisor reporta problema
-- `problem -> pending`: admin reseta o tile (limpa dados, volta pra fila)
-- `reviewed -> in_review`: admin manda para nova revisão
-
----
+Transições de admin: `problem → pending` (reset), `reviewed → in_review`
+(re-review), `pending|classified|reviewed → blocked` e
+`blocked → <blocked_from>`. `in_progress`/`in_review`/`problem` **não**
+podem ser bloqueados.
 
 ## 4. API REST
 
-### 4.1 Autenticação
-
-| Endpoint             | Método | Descrição                    |
-|---------------------|--------|------------------------------|
-| /api/auth/login     | POST   | Recebe username/password, retorna JWT |
-| /api/auth/refresh   | POST   | Renova token                 |
-| /api/auth/me        | GET    | Retorna dados do usuário logado |
-
-O JWT deve conter: user_id, username, role, exp. Expiração de 8 horas (turno de trabalho). O refresh token expira em 24h.
-
-### 4.2 Operador
-
-| Endpoint                        | Método | Descrição                                |
-|--------------------------------|--------|------------------------------------------|
-| /api/tiles/next                | GET    | Retorna próximo tile disponível (revisão tem prioridade sobre classificação) |
-| /api/tiles/{id}                | GET    | Retorna metadados do tile + PNG classificado atual |
-| /api/tiles/{id}/classify       | POST   | Recebe PNG classificado, muda status para "classified" |
-| /api/tiles/{id}/review         | POST   | Revisor aprova, muda status para "reviewed" |
-| /api/tiles/{id}/report-problem | POST   | Reporta problema com nota, muda status   |
-| /api/tiles/{id}/image          | GET    | Retorna o PNG de classificação atual (para renderizar no canvas) |
-
-**Regra do endpoint /api/tiles/next:**
-
-1. Primeiro, buscar tiles com status `in_review` não atribuídos (prioridade para revisão)
-2. Se não houver, buscar tiles com status `pending`
-3. Um revisor nunca recebe um tile que ele mesmo classificou
-4. Ao atribuir, mudar status para `in_progress` ou `in_review` e registrar assigned_to
-5. Retornar os metadados necessários para o frontend montar a visualização (bbox, coordenadas XYZ, tile_x, tile_y, zoom)
-
-**Regra de classificação:**
-
-- O body do POST /api/tiles/{id}/classify deve ser o array binário (Uint8Array, 65536 bytes) com valores de cada pixel (0-6 para classes, 255 para não preenchido)
-- O backend converte para PNG de banda única e salva no campo data_png
-- Validação: rejeitar se ainda houver pixels com valor 255 (não preenchidos). Retornar erro com a contagem de pixels faltantes.
-
-### 4.3 Admin
-
-| Endpoint                         | Método | Descrição                                |
-|---------------------------------|--------|------------------------------------------|
-| /api/admin/dashboard            | GET    | Estatísticas gerais de progresso         |
-| /api/admin/tiles                | GET    | Lista tiles com filtros (status, user, etc) |
-| /api/admin/tiles/{id}/reset     | POST   | Reseta tile: limpa data_png (volta tudo pra 255), status -> pending |
-| /api/admin/tiles/{id}/re-review | POST   | Manda tile reviewed de volta pra revisão |
-| /api/admin/tiles/problems       | GET    | Lista tiles com status "problem"         |
-| /api/admin/users                | GET    | Lista usuários e suas estatísticas       |
-| /api/admin/users                | POST   | Cria novo usuário                        |
-
-### 4.4 Configurações
-
-| Endpoint                | Método | Descrição                                  |
-|------------------------|--------|--------------------------------------------|
-| /api/config/classes    | GET    | Retorna as 6 classes (id, nome, cor)       |
-| /api/config/tileserver | GET    | Retorna URL template do TileServer-GL      |
-
-A configuração das classes e do TileServer deve ser feita via um arquivo de configuração no backend (JSON ou YAML), não hardcoded.
-
----
-
-## 5. Frontend - Editor de Classificação
-
-### 5.1 Layout da Tela do Editor
-
-```
-┌──────────────────────────────────────────────────────────────┐
-│  Header: logo, username, tiles feitos hoje, botão logout     │
-├──────────────┬───────────────────────────┬───────────────────┤
-│              │                           │                   │
-│  Painel de   │    Canvas Principal       │   Mini-mapa de    │
-│  Classes     │    (tile 256×256          │   Contexto        │
-│              │     renderizado em        │   (imagem maior   │
-│  [1] Classe  │     ~640×640 na tela)     │   com tile        │
-│  [2] Classe  │                           │   destacado)      │
-│  [3] Classe  │                           │                   │
-│  [4] Classe  │                           │                   │
-│  [5] Classe  │                           │                   │
-│  [6] Classe  │                           │                   │
-│              │                           │                   │
-│  ─────────── │                           │                   │
-│  Ferramentas │                           │                   │
-│  [Brush]     │                           │                   │
-│  [Borracha]  │                           │                   │
-│  Tamanho: ── │                           │                   │
-│              │                           │                   │
-│  ─────────── │                           │                   │
-│  Opacidade   │                           │                   │
-│  da máscara  │                           │                   │
-│  ──────────  │                           │                   │
-│              │                           │                   │
-├──────────────┴───────────────────────────┴───────────────────┤
-│  Footer: [Undo] [Redo] | [Reportar Problema] | [Submeter]   │
-└──────────────────────────────────────────────────────────────┘
-```
-
-### 5.2 Canvas Principal
-
-O canvas principal é composto por **três camadas sobrepostas**, todas do tamanho de exibição (ex: 640×640 ou 768×768 pixels na tela):
-
-1. **Camada de fundo (imagem de satélite):** canvas que renderiza os tiles XYZ do TileServer-GL correspondentes à área do tile de trabalho. Fica sempre embaixo.
-
-2. **Camada de classificação (máscara):** canvas onde o operador pinta. Cada "pixel lógico" (correspondente a 1 pixel do tile 256×256) é renderizado como um quadrado de N×N pixels na tela (ex: se o canvas tem 640px de lado, cada pixel lógico ocupa ~2.5px). As cores das classes devem ser aplicadas com transparência controlável pelo operador. Este canvas tem `globalAlpha` ajustável.
-
-3. **Camada de interação (cursor):** canvas transparente por cima dos outros, usado apenas para renderizar o cursor do brush (círculo indicando tamanho) e receber eventos de mouse. Nenhum conteúdo persistente.
-
-**Mapeamento de coordenadas:** cada evento de mouse na camada de interação deve ser convertido para coordenadas lógicas (0-255, 0-255) do tile 256×256. Isso é o que determina qual pixel está sendo pintado.
-
-**Renderização da máscara:** ao pintar, o operador modifica um array interno `Uint8Array(65536)` com os valores de classe (0-6, 255). A renderização visual no canvas de classificação converte cada valor do array para a cor correspondente da classe. Pixels com valor 255 (não preenchido) devem ser renderizados como totalmente transparentes.
-
-### 5.3 Problema da Visibilidade (Pintura sobre Imagem)
-
-Esta é uma preocupação central de UX. Quando o operador pinta classes sobre a imagem de satélite, as cores da classificação podem dificultar a visualização dos detalhes da imagem abaixo. Soluções obrigatórias:
-
-1. **Slider de opacidade da máscara:** permite ao operador ajustar a transparência da camada de classificação de 0% (invisível, só vê o satélite) a 100% (opaco, só vê as classes). Valor padrão: 50%. Atalho de teclado: roda do mouse com Ctrl pressionado, ou teclas `[` e `]`.
-
-2. **Toggle rápido de visibilidade:** tecla `Space` (barra de espaço) esconde completamente a máscara enquanto pressionada. Ao soltar, a máscara volta. Isso permite ao operador "espiar" a imagem de satélite sem alterar o slider. Esse é o mecanismo mais importante para produtividade.
-
-3. **Cores das classes com boa diferenciação:** as 6 cores das classes devem ser altamente contrastantes entre si E razoavelmente visíveis sobre imagens de satélite (que tendem a ter tons de verde, marrom e cinza). Sugestão de paleta: vermelho vivo, azul royal, amarelo, magenta, ciano, laranja. Evitar verde (confunde com vegetação) e tons escuros (somem sobre sombras).
-
-4. **Contorno de classe:** cada pixel classificado deve ter um contorno fino (1px na escala lógica) ligeiramente mais escuro que a cor de preenchimento. Isso ajuda a distinguir os limites entre classes adjacentes mesmo com opacidade baixa.
-
-5. **Modo "só contornos":** atalho de teclado `O` alterna entre modo preenchido (com opacidade) e modo só contornos (sem preenchimento, apenas bordas das regiões classificadas). Útil para verificar limites sem obstruir a imagem.
-
-### 5.4 Ferramentas
-
-#### 5.4.1 Brush (Pincel)
-
-- Pinta pixels com a classe selecionada
-- Tamanho ajustável: 1×1, 3×3, 5×5, 7×7, 11×11 pixels lógicos (slider ou teclas `+`/`-`)
-- Formato: quadrado (mais previsível em grid de pixels do que círculo)
-- Ao clicar: pinta os pixels dentro da área do brush
-- Ao arrastar: pinta continuamente ao longo do caminho do mouse (interpolar pontos entre eventos mousemove para não deixar buracos)
-
-#### 5.4.2 Borracha
-
-- Funciona como o brush, mas atribui valor 255 (não preenchido) aos pixels
-- Mesmo controle de tamanho do brush
-- Atalho: tecla `E` para alternar entre brush e borracha
-
-#### 5.4.3 Undo/Redo
-
-- Cada ação de pintura (mousedown até mouseup) é uma entrada no histórico
-- Armazenar no mínimo 50 níveis de undo
-- Cada entrada do histórico guarda: cópia dos pixels alterados (posição + valor anterior), não o array inteiro, para economia de memória
-- Atalhos: `Ctrl+Z` (undo), `Ctrl+Shift+Z` ou `Ctrl+Y` (redo)
-- Ao fazer nova pintura após um undo, descartar o histórico de redo
-
-#### 5.4.4 Flood Fill (Balde de Tinta) - Opcional mas Recomendado
-
-- Preenche região contígua de mesma classe (ou não preenchida) com a classe selecionada
-- Conectividade 4 (cima, baixo, esquerda, direita)
-- Atalho: tecla `G`
-- Extremamente útil para classificar regiões grandes homogêneas rapidamente
-- Se implementado, conta como uma única ação para undo
-
-### 5.5 Seleção de Classe
-
-- Painel lateral com as 6 classes, cada uma com cor e nome
-- Atalhos numéricos: teclas `1` a `6` selecionam a classe correspondente
-- A classe ativa deve ter destaque visual claro (borda, tamanho maior, indicador)
-- Ao passar o mouse sobre um pixel classificado, mostrar o nome da classe em um tooltip ou na barra de status
-
-### 5.6 Mini-mapa de Contexto
-
-- Posicionado à direita do canvas principal
-- Mostra uma área maior ao redor do tile atual (ex: 3×3 tiles) usando o TileServer-GL
-- O tile atual é destacado com uma borda vermelha semitransparente
-- Não é editável, serve apenas para referência visual
-- Deve ser menor que o canvas principal (ex: 300×300 px)
-
-### 5.7 Indicadores de Progresso no Editor
-
-- Barra ou número mostrando "X/65536 pixels classificados (Y%)" no tile atual
-- Mudar a cor do indicador quando atingir 100%
-- Mostrar "Tile N de 1000" e "Seus tiles hoje: X" no header
-
-### 5.8 Fluxo de Submissão
-
-1. Operador clica "Submeter"
-2. Frontend verifica se todos os 65536 pixels foram classificados (nenhum com valor 255)
-3. Se houver pixels não preenchidos: mostrar alerta com a contagem e destacar os pixels faltantes no canvas (piscar os pixels 255 em vermelho por 2 segundos)
-4. Se completo: enviar o Uint8Array para o backend via POST
-5. Backend valida novamente, salva como PNG, registra no log
-6. Frontend automaticamente carrega o próximo tile (sem interação extra)
-7. Se não houver mais tiles: mostrar mensagem "Todos os tiles foram processados!"
-
-### 5.9 Fluxo de Revisão
-
-Quando o operador recebe um tile para revisão (status `in_review`):
-
-1. O editor carrega normalmente, mas com a classificação anterior já pintada
-2. Um banner visível indica "MODO REVISÃO - Classificado por [username]"
-3. O revisor pode editar a classificação livremente (corrigir erros)
-4. Ao submeter, o tile vai para status "reviewed"
-5. O revisor também pode reportar problema
-
-### 5.10 Fluxo de Reportar Problema
-
-1. Operador clica "Reportar Problema"
-2. Abre um modal com campo de texto para descrever o problema (ex: "imagem com nuvens", "tile fora da área de interesse", "artefato na imagem")
-3. Ao confirmar: o tile vai para status "problem", a nota é salva, o operador recebe o próximo tile
-4. Qualquer classificação parcial feita até o momento é descartada (volta para 255)
-
----
-
-## 6. Frontend - Painel Admin
-
-### 6.1 Dashboard de Progresso
-
-- Total de tiles por status (pending, in_progress, classified, in_review, reviewed, problem) com gráfico de barras ou pizza
-- Percentual geral de conclusão (reviewed / total)
-- Gráfico de evolução diária (tiles concluídos por dia)
-- Tiles por operador (tabela: nome, classificados, revisados, problemas reportados, média de tempo por tile)
-- Estimativa de conclusão baseada no ritmo atual
-
-### 6.2 Lista de Tiles com Problema
-
-- Tabela com: id do tile, quem reportou, quando, nota do problema
-- Para cada tile: botão "Resetar" (limpa a classificação, volta para pending) e botão "Visualizar" (abre a imagem de satélite do tile para o admin avaliar)
-
-### 6.3 Gestão de Tiles
-
-- Filtro por status, por operador, por data
-- Visualização em lista e em grade (thumbnails mostrando a classificação)
-- Ações em lote: selecionar múltiplos tiles e resetar ou mandar para revisão
-- Ao clicar num tile: ver detalhes (quem classificou, quem revisou, histórico de ações, preview da classificação sobre a imagem)
-
-### 6.4 Gestão de Usuários
-
-- Criar novos usuários (username, senha temporária, role)
-- Desativar usuários
-- Ver estatísticas individuais
-
----
-
-## 7. Atalhos de Teclado (Referência Completa)
-
-| Tecla            | Ação                                   |
-|-----------------|-----------------------------------------|
-| 1-6             | Selecionar classe                       |
-| E               | Alternar para borracha                  |
-| B               | Alternar para brush                     |
-| G               | Alternar para flood fill (se implementado) |
-| +/-             | Aumentar/diminuir tamanho do brush      |
-| Ctrl+Z          | Undo                                    |
-| Ctrl+Shift+Z    | Redo                                    |
-| Space (segurar) | Esconder máscara temporariamente        |
-| O               | Alternar modo só contornos              |
-| [ / ]           | Diminuir/aumentar opacidade da máscara  |
-| Ctrl+S          | Submeter tile (prevenir save do browser)|
-
-Todos os atalhos devem ser desabilitados quando um modal ou campo de texto estiver ativo.
-
----
-
-## 8. Arquivo de Configuração
-
-O backend deve carregar configurações de um arquivo `config.yaml` (ou `config.json`):
+Todos os endpoints fora de `/api/auth/login` exigem `Authorization: Bearer
+<access_token>`. `403` em rota admin para operador; `401` se token expirou
+ou foi revogado.
+
+### 4.1 Auth (`/api/auth`)
+
+| Método | Path        | Descrição                                            |
+|--------|-------------|------------------------------------------------------|
+| POST   | `/login`    | `{username, password}` → `{access_token, refresh_token}`. Rate-limit 5/min/IP. |
+| POST   | `/refresh`  | `{refresh_token}` → novo par.                        |
+| GET    | `/me`       | Dados do usuário logado.                             |
+| POST   | `/logout`   | Revoga `jti` do access (e do refresh, se enviado).   |
+
+JWT carrega `sub` (user_id), `username`, `role`, `typ` (`access`/`refresh`),
+`jti`, `exp`. Tipo errado em refresh → 401.
+
+### 4.2 Operador (`/api/tiles`)
+
+| Método | Path                         | Descrição                                                       |
+|--------|------------------------------|-----------------------------------------------------------------|
+| GET    | `/next`                      | Próximo tile (resume → revisão → pending). 204 se vazio.        |
+| GET    | `/assigned`                  | Tile atualmente atribuído (para resume sem puxar fila).         |
+| GET    | `/next-preview`              | Peek sem atribuir (pré-carga).                                  |
+| GET    | `/queue-stats`               | Tamanhos de fila por status.                                    |
+| GET    | `/{id}`                      | Metadados (`TileOut`).                                          |
+| GET    | `/{id}/image`                | PNG da máscara atual.                                           |
+| GET    | `/{id}/history`              | Linha do tempo de ações.                                        |
+| POST   | `/{id}/classify`             | Body: 65536 bytes raw. Header opcional `X-Tile-Version`.        |
+| POST   | `/{id}/review`               | Idem, valida que `assigned_to == user` e tile em `in_review`.   |
+| POST   | `/{id}/report-problem`       | `{note}` → status `problem`.                                    |
+| POST   | `/{id}/pause`                | Body: 65536 bytes (snapshot). Solta atribuição preservando trabalho. |
+| POST   | `/{id}/resume`               | Reatribui um tile pausado pelo próprio usuário.                 |
+
+| Método | Path                  | Descrição                                  |
+|--------|-----------------------|--------------------------------------------|
+| GET    | `/api/me/stats-today` | `{count}` — classificados hoje pelo user.  |
+
+**Regras de `/next`:**
+1. Resume: se o user tem tile em `in_progress`/`in_review`, devolve esse.
+2. Tile pausado pelo próprio user (FIFO por `paused_at`).
+3. Fila de revisão: `classified` cujo `classified_by != user`.
+4. Fila pending.
+5. 204 se nada.
+
+Atribuição é transacional (`BEGIN IMMEDIATE` + `SELECT … LIMIT 1` + `UPDATE`)
+— dois usuários nunca recebem o mesmo tile.
+
+**Regras de classificação/revisão:**
+- Body é **raw bytes** (`Uint8Array` de 65536 bytes), não PNG. Backend
+  converte com Pillow.
+- Validação: tamanho exato + valores em `{1..6, 255}`. Submit rejeita se
+  houver `255`; resposta traz a contagem.
+- Autorização: `assigned_to == current_user`.
+- Concorrência otimista: header `X-Tile-Version`. Se diferente de
+  `tiles.version`, retorna `409` com `error=tile_modified` — o frontend
+  decide se sobrescreve.
+
+### 4.3 Admin (`/api/admin`)
+
+Todos atrás de `Depends(auth.require_admin)`.
+
+| Método | Path                                   | Descrição                                              |
+|--------|----------------------------------------|--------------------------------------------------------|
+| GET    | `/dashboard`                           | Totais, completion%, daily, per-operator, médias de duração, paused. |
+| GET    | `/tiles`                               | Lista com filtros `status`, `user_id`, `date_from/to`, `paused`, `q`, `limit`, `offset`. Header `X-Total-Count`. |
+| GET    | `/tiles/map`                           | Lista enxuta para o mapa admin.                        |
+| GET    | `/tiles/problems`                      | Atalho para `status=problem`.                          |
+| GET    | `/tiles/{id}/thumbnail`                | PNG colorizado da máscara (param `size`).              |
+| GET    | `/tiles/{id}/satellite-thumbnail`      | PNG do satélite recortado pela bbox.                   |
+| GET    | `/mask-tiles/{z}/{x}/{y}.png`          | Overlay XYZ rasterizado on-the-fly + cache mbtiles.    |
+| POST   | `/tiles/{id}/reset`                    | Limpa máscara, volta para `pending`.                   |
+| POST   | `/tiles/{id}/re-review`                | `reviewed → in_review`.                                |
+| POST   | `/tiles/{id}/assign`                   | Atribui a um user específico.                          |
+| POST   | `/tiles/{id}/unassign`                 | Solta atribuição.                                      |
+| POST   | `/tiles/{id}/admin-pause`              | Pausa em nome do operador ausente.                     |
+| POST   | `/tiles/{id}/block`                    | Bloqueia (guarda status em `blocked_from`).            |
+| POST   | `/tiles/{id}/unblock`                  | Restaura ao `blocked_from`.                            |
+| DELETE | `/tiles/{id}`                          | Apaga tile; só permitido se já está em `problem`.      |
+| POST   | `/tiles/bulk/{reset,re-review,report-problem,unassign,block,unblock}` | Ações em massa. |
+| POST   | `/tiles/assign`                        | Pré-carga FIFO de fila pessoal (multi-tile).           |
+| GET    | `/users`                               | Lista com stats.                                       |
+| POST   | `/users`                               | Cria usuário.                                          |
+| PATCH  | `/users/{id}/active`                   | Liga/desliga conta.                                    |
+| PATCH  | `/users/{id}/role`                     | Promove/rebaixa.                                       |
+| PATCH  | `/users/{id}/can-review`               | Habilita/desabilita revisão.                           |
+
+### 4.4 Config (`/api/config`)
+
+| Método | Path           | Descrição                                                  |
+|--------|----------------|------------------------------------------------------------|
+| GET    | `/classes`     | Lista das classes (id/nome/cor) do `config.yaml`.          |
+| GET    | `/tileserver`  | URLs e zoom ranges (primário, secundário, terciário, WC, MB). |
+
+### 4.5 MBTiles passthrough
+
+| Método | Path                          | Descrição                                  |
+|--------|-------------------------------|--------------------------------------------|
+| GET    | `/api/xyz/{z}/{x}/{y}.{ext}`  | Tile do MBTiles primário.                  |
+| GET    | `/api/wc/{z}/{x}/{y}.{ext}`   | WorldCover.                                |
+| GET    | `/api/mb/{z}/{x}/{y}.{ext}`   | MapBiomas.                                 |
+
+## 5. Frontend
+
+Detalhes (layout, atalhos, comportamento de canvas, undo, backup local) vivem
+em `CLAUDE.md` (seções "Regras críticas de frontend" e "UX — inegociáveis")
+e no código (`frontend/js/`). Pontos contratuais:
+
+- Três camadas sobrepostas: MapLibre (satélite, `interactive: false`),
+  canvas da máscara (`globalAlpha`), canvas de cursor (recebe eventos).
+- `Uint8Array(65536)` é a fonte de verdade da máscara. Canvas é só
+  visualização.
+- Atalho hold `Space` esconde a máscara (keydown/keyup, não toggle).
+- Sem auto-avanço pós-submit: idle screen com "Tile enviado ✓"; o operador
+  clica para puxar o próximo (respiro entre cartas).
+- Backup do `Uint8Array` em `localStorage` durante edição; restore silencioso
+  no F5 com toast "Trabalho local restaurado." (sem banner de confirmação).
+- JWT refresh proativo (60s antes de expirar) + reativo no 401.
+
+## 6. Configuração (`backend/config.yaml`)
 
 ```yaml
 tileserver:
-  url_template: "http://192.168.1.100:8080/styles/satellite/{z}/{x}/{y}.png"
+  url_template: "https://server.arcgisonline.com/.../{z}/{y}/{x}"
+  mbtiles_path: "../data_external/tiles.mbtiles"   # opcional, override do url_template
+tileserver_secondary:
+  url_template: "https://server.arcgisonline.com/.../{z}/{y}/{x}"
+  max_zoom: 19
+tileserver_tertiary:
+  url_template: "bingmaps://{z}/{x}/{y}"           # quadkey reescrito no frontend
+  max_zoom: 19
+worldcover:
+  mbtiles_path: "../data_external/wc_teste.mbtiles"
+mapbiomas:
+  mbtiles_path: "../data_external/mapbiomas.mbtiles"
 
 classes:
-  - id: 1
-    name: "Classe A"
-    color: "#FF3B30"
-  - id: 2
-    name: "Classe B"
-    color: "#007AFF"
-  - id: 3
-    name: "Classe C"
-    color: "#FFCC00"
-  - id: 4
-    name: "Classe D"
-    color: "#FF2D92"
-  - id: 5
-    name: "Classe E"
-    color: "#00CED1"
-  - id: 6
-    name: "Classe F"
-    color: "#FF9500"
+  - { id: 1, name: "Massa d'água",     color: "#377eb8" }
+  - { id: 2, name: "Área edificada",   color: "#e41a1c" }
+  - { id: 3, name: "Floresta",         color: "#4daf4a" }
+  - { id: 4, name: "Campo",            color: "#ffff33" }
+  - { id: 5, name: "Cultivo",          color: "#984ea3" }
+  - { id: 6, name: "Terreno exposto",  color: "#ff7f00" }
 
-tiles:
-  source: "tiles_index.csv"  # CSV com id, bbox_west, bbox_south, bbox_east, bbox_north, zoom, tile_x, tile_y
+mask_overlay:
+  cache_path: "data/mask_overlay_cache.mbtiles"
+  min_zoom: 8
+  max_zoom: 18
 
 auth:
-  jwt_secret: "trocar-em-producao"
-  token_expiry_hours: 8
+  jwt_secret: "<gerar>"           # ou via env TILECLASS_JWT_SECRET
+  access_token_expiry_hours: 8
+  refresh_token_expiry_hours: 24
 
 database:
   path: "tileclass.db"
 ```
 
----
+**Convenção de paths grandes:** `.mbtiles` (GBs) ficam em `data_external/`
+na raiz; o `config.yaml` aponta com `../data_external/<arquivo>.mbtiles`
+(relativo a `backend/`). Override do arquivo de config via env
+`TILECLASS_CONFIG=<path>` (E2E). Rate limit desligável via
+`TILECLASS_DISABLE_RATE_LIMIT=1` (apenas E2E).
 
-## 9. Inicialização e Setup
+## 7. Scripts CLI
 
-### 9.1 Script de Importação de Tiles
+Rodar como módulo (`python -m backend.scripts.<name>`) para imports
+relativos funcionarem.
 
-Um script CLI (`import_tiles.py`) que:
+- `create_admin` — cria usuário admin inicial (interativo).
+- `import_points --point <lat> <lon> <name> | --csv pontos.csv [--block N]` —
+  importa tiles a partir de pontos centrais; `--block N` gera bloco N×N
+  contíguo (gap < 1 mm validado).
+- `import_cq_tiles --geoparquet <file> [--seed empty|raw]` — importa de
+  geoparquet do CQ.
+- `import_qc_tiles --csv qc_tiles.csv --bdf-dir <dir>` — importa lote do
+  QC com seed mask do argmax.
+- `export_tiles <out_dir> [--status reviewed|reviewed+classified] [--raw]
+  [--mosaic] [--manifest <path>]` — GT extractor (ver §8).
+- `build_mbtiles <raster_in> <out.mbtiles>` — converte raster → MBTiles XYZ.
+- `build_xyz_pyramid <raster_in> <out_dir>` — pirâmide XYZ em disco.
+- `merge_db <other.db>` — funde `tileclass.db` de outra equipe.
 
-1. Lê o CSV de índice de tiles
-2. Cria registros na tabela `tiles` com status "pending"
-3. Inicializa o campo `data_png` com um PNG 256×256 todo preenchido com valor 255
-4. Reporta quantos tiles foram importados
+## 8. GT Extractor (`export_tiles.py`)
 
-### 9.2 Script de Criação de Admin
+Interface canônica para outras aplicações consumirem máscaras finalizadas.
+Output bit-a-bit compatível com `treinamento_6c/<split>/<split>_masks/`.
 
-Um script CLI (`create_admin.py`) que cria o primeiro usuário admin.
+- Output: `<out_dir>/gt_<tile.name>.tif` — GeoTIFF single-band uint8 256×256,
+  EPSG:4326, deflate, NODATA=255. Transform via
+  `rasterio.transform.from_bounds(west, south, east, north, 256, 256)`
+  (pixel ≈ 2.5 m na latitude do centro).
+- `manifest.csv` — uma linha por tile com filename, tile_id, name, status,
+  classified_by, reviewed_by, classified_at, reviewed_at, bbox_*.
+- Filtros de status: `reviewed` (padrão, GT estrito) ou `reviewed+classified`
+  (inclui não-revisados, dataset preliminar).
+- Remap canônico TileClass → EDGV (ativo por padrão; `--raw` desativa):
 
-### 9.3 Script de Exportação
+  | TileClass | Nome              | EDGV | Nome EDGV       |
+  |-----------|-------------------|------|-----------------|
+  | 1         | Massa d'água      | 0    | agua            |
+  | 2         | Área edificada    | 1    | edif            |
+  | 3         | Floresta          | 4    | floresta        |
+  | 4         | Campo             | 3    | campo           |
+  | 5         | Cultivo           | 5    | veg_cultivada   |
+  | 6         | Terreno exposto   | 2    | terr_exp        |
+  | 255       | NODATA            | 255  | (ignore_index)  |
 
-Um script CLI (`export_tiles.py`) que:
+  Constante `EDGV_REMAP_LUT` no topo do script — único ponto de verdade.
 
-1. Lê todos os tiles com status "reviewed" do banco
-2. Exporta cada um como GeoTIFF de banda única com georreferência correta (a partir do bbox)
-3. Opcionalmente, cria um mosaico único com gdal_merge ou rasterio
+## 9. Cuidados Técnicos Críticos
 
----
+### 9.1 Concorrência
+- `/api/tiles/next` é `BEGIN IMMEDIATE` + SELECT + UPDATE atômico. Garantido
+  por teste com 10 operadores em paralelo (`threading.Barrier`).
+- WAL ligado (`PRAGMA journal_mode=WAL`).
 
-## 10. Cuidados Técnicos
+### 9.2 Geometria
+- `TILE_PX=256`, `METERS_PER_PX=2.5`, `TILE_METERS=640`.
+- `bbox_from_center` usa `pyproj.Geod` (WGS84) — precisão < 1 mm em qualquer
+  latitude. `offset_center(lat, lon, dx, dy)` garante adjacência sem gap.
+- Validado em `test_geo.py` (14 testes) e `test_raster_worldwide.py` (22
+  testes em 20 pontos mundiais, equador → Antártica).
 
-### 10.1 Concorrência
+### 9.3 Performance do Canvas
+- Não redesenhar inteiro; dirty rectangle por gesture.
+- `drawOutlines` itera 65k pixels — só roda quando `!drawing`.
+- Undo armazena só pixels alterados (`Uint32Array positions` +
+  `Uint8Array prevValues`), 50 níveis.
 
-- O endpoint `/api/tiles/next` deve usar transação com lock para evitar que dois operadores recebam o mesmo tile ao mesmo tempo
-- SQLite suporta WAL mode, ativar para melhor performance com leituras concorrentes
-- Com até 10 operadores, SQLite é suficiente se as escritas forem serializadas via transaction
+### 9.4 Mapeamento de Coordenadas
+- `getBoundingClientRect()` → fração → `Math.floor(frac * 256)` com clamp
+  em `[0..255]`. Canto inferior-direito deve dar `(255, 255)`.
 
-### 10.2 Performance do Canvas
+### 9.5 Integridade
+- Validar 65536 bytes exatos e valores em `{1..6, 255}` no backend
+  (`mask_utils.validate_partial`, IDs derivados do config).
+- PNG armazenado: single-band ("L"), 8 bits, 256×256, sem compressão com
+  perda. Pillow faz a conversão `bytes ↔ PNG`.
 
-- Não redesenhar o canvas inteiro a cada evento de mouse. Apenas redesenhar a região afetada pelo brush (dirty rectangle)
-- O array de classificação (Uint8Array 65536) é a fonte de verdade. O canvas é só a visualização.
-- Ao carregar um tile com classificação existente (revisão), decodificar o PNG recebido para preencher o Uint8Array, depois renderizar
-- A imagem de satélite de fundo é carregada uma vez e não muda durante a edição do tile
+### 9.6 Segurança
+- bcrypt cost ≥ 12; JWT HS256; rate limit 5/min/IP em login; endpoints admin
+  atrás de `Depends(auth.require_admin)`. Sem `innerHTML` com dados de
+  usuário (use `escapeHtml` ou `textContent`).
+- Logout revoga `jti` em `token_blacklist`.
 
-### 10.3 Mapeamento de Coordenadas
-
-O ponto mais crítico de implementação é o mapeamento correto entre:
-
-- Posição do mouse na tela (pixels CSS)
-- Posição no canvas (pixels do canvas, atenção ao devicePixelRatio)
-- Coordenada lógica no tile (0-255, 0-255)
-
-Usar `Math.floor()` para converter coordenada de canvas para coordenada lógica. Testar que pintar no canto inferior-direito do canvas resulta na coordenada (255, 255) e não (256, 256) ou (254, 254).
-
-### 10.4 Integridade dos Dados
-
-- Antes de salvar, validar que o Uint8Array recebido tem exatamente 65536 bytes
-- Validar que todos os valores estão no range permitido (1-6 para classes, 255 não deveria chegar no submit mas validar mesmo assim)
-- O PNG armazenado no SQLite deve ser de banda única (grayscale), 8 bits, 256×256, sem compressão com perda
-- Ao recarregar um tile (revisão ou retomada), decodificar o PNG e verificar que resulta em 65536 pixels
-
-### 10.5 Segurança
-
-- Senhas armazenadas com bcrypt (custo mínimo 12)
-- JWT assinado com HS256 e secret do config
-- Endpoints admin protegidos por verificação de role no middleware
-- Rate limiting no endpoint de login (máximo 5 tentativas por minuto por IP)
-- Validar que o operador que submete um tile é o mesmo que foi atribuído a ele
-
-### 10.6 Encoding do PNG no SQLite
-
-Usar a biblioteca Pillow (PIL) no backend:
-
-- Para salvar: converter Uint8Array para imagem PIL mode "L" (grayscale), salvar como PNG em BytesIO, gravar o bytes no campo BLOB
-- Para carregar: ler BLOB, abrir com PIL, converter para array numpy, serializar como bytes para enviar ao frontend
-- O frontend envia raw bytes (Uint8Array), não PNG. A conversão para PNG é responsabilidade do backend.
-
----
-
-## 11. Critérios de Aceitação
-
-### 11.1 Autenticação
-
-- [ ] Operador consegue fazer login com username e senha
-- [ ] Token JWT é renovado automaticamente antes de expirar durante o uso
-- [ ] Operador é redirecionado para login se token expirar
-- [ ] Admin e operador veem interfaces diferentes após login
-
-### 11.2 Fila de Tiles
-
-- [ ] Ao clicar "Próximo tile", o operador recebe um tile que ninguém mais está editando
-- [ ] Dois operadores nunca recebem o mesmo tile simultaneamente
-- [ ] Tiles de revisão têm prioridade sobre tiles novos
-- [ ] Operador nunca recebe para revisão um tile que ele mesmo classificou
-- [ ] Quando não há mais tiles disponíveis, o sistema informa claramente
-
-### 11.3 Editor de Classificação
-
-- [ ] A imagem de satélite carrega corretamente como fundo via TileServer-GL
-- [ ] O operador consegue pintar com brush em todos os 6 classes
-- [ ] O tamanho do brush é ajustável e o cursor reflete o tamanho atual
-- [ ] A borracha remove classificação (volta para 255 / transparente)
-- [ ] Undo desfaz a última ação de pintura completa (mousedown-mouseup)
-- [ ] Redo refaz a ação desfeita
-- [ ] O slider de opacidade ajusta a transparência da máscara de classificação em tempo real
-- [ ] Segurar Space esconde a máscara completamente e soltar restaura
-- [ ] Os atalhos de teclado funcionam conforme documentado
-- [ ] O indicador mostra quantos pixels foram classificados
-- [ ] Não é possível submeter com pixels não preenchidos (valor 255)
-- [ ] Pixels não preenchidos são destacados visualmente ao tentar submeter incompleto
-- [ ] Ao submeter com sucesso, o próximo tile carrega automaticamente
-- [ ] O mini-mapa de contexto mostra a área ao redor do tile atual
-
-### 11.4 Revisão
-
-- [ ] O editor carrega a classificação anterior para edição
-- [ ] Banner de revisão é visível e mostra quem classificou
-- [ ] Revisor pode editar e submeter a revisão
-- [ ] Revisor pode reportar problema
-
-### 11.5 Reportar Problema
-
-- [ ] Modal abre com campo de texto para descrição
-- [ ] Ao confirmar, tile vai para status "problem" e operador recebe próximo tile
-- [ ] Classificação parcial é descartada
-
-### 11.6 Admin
-
-- [ ] Dashboard mostra totais corretos por status
-- [ ] Dashboard mostra gráfico de evolução diária
-- [ ] Dashboard mostra estatísticas por operador
-- [ ] Lista de problemas mostra todos os tiles com problema e suas notas
-- [ ] Admin consegue resetar tile (volta pra pending com classificação limpa)
-- [ ] Admin consegue mandar tile reviewed para nova revisão
-- [ ] Admin consegue criar novos usuários
-- [ ] Ações em lote funcionam (selecionar múltiplos, resetar)
-
-### 11.7 Performance
-
-- [ ] Pintar com brush não apresenta lag perceptível (< 16ms por frame)
-- [ ] Carregar próximo tile leva menos de 2 segundos
-- [ ] O sistema suporta 10 operadores simultâneos sem degradação
-
-### 11.8 Dados
-
-- [ ] O PNG armazenado no SQLite reconstrói corretamente o array de classificação
-- [ ] O script de exportação gera GeoTIFFs georreferenciados corretos
-- [ ] O log de ações registra toda atividade relevante com timestamps
-
----
-
-## 12. Estrutura de Diretórios do Projeto
+## 10. Estrutura de Diretórios
 
 ```
 tileclass/
 ├── backend/
-│   ├── main.py              # FastAPI app, rotas, startup
-│   ├── auth.py              # JWT, login, middleware
-│   ├── models.py            # Schemas Pydantic
-│   ├── database.py          # Conexão SQLite, inicialização de tabelas
-│   ├── tile_service.py      # Lógica de fila, atribuição, salvamento
-│   ├── admin_service.py     # Lógica do painel admin
-│   ├── config.yaml          # Configuração
-│   └── scripts/
-│       ├── import_tiles.py  # Importação do CSV
-│       ├── create_admin.py  # Criação do admin inicial
-│       └── export_tiles.py  # Exportação para GeoTIFF
+│   ├── main.py                 # FastAPI app + lifespan + middleware + static SPA
+│   ├── routers/                # auth, operator, admin, config
+│   ├── auth.py                 # JWT, bcrypt, rate limit, blacklist, role middleware
+│   ├── models.py               # Schemas Pydantic
+│   ├── database.py             # Conexão SQLite (WAL), schema, transaction(), log_action
+│   ├── config.py               # Loader de config.yaml (singleton)
+│   ├── tile_service.py         # Fila, atribuição, submit, problema, pause/resume
+│   ├── admin_service.py        # Fachada que re-exporta backend/admin/
+│   ├── admin/                  # dashboard, tiles_query, tiles_mutations, users, thumbnails
+│   ├── mask_utils.py           # Uint8Array ↔ PNG "L" + validação
+│   ├── mask_tile_service.py    # Cache mbtiles do overlay admin
+│   ├── mbtiles_service.py      # Reader read-only (singletons primary/wc/mb)
+│   ├── geo.py                  # bbox_from_center (pyproj.Geod WGS84)
+│   ├── tile_grid.py            # Helpers Web Mercator
+│   ├── config.yaml
+│   └── scripts/                # create_admin, import_points/cq/qc, export_tiles,
+│                               # build_mbtiles, build_xyz_pyramid, merge_db
+├── data_external/              # MBTiles grandes (gitignored)
 ├── frontend/
-│   ├── index.html           # SPA principal
-│   ├── css/
-│   │   └── style.css
+│   ├── index.html              # SPA (login / editor / admin)
+│   ├── css/style.css
+│   ├── vendor/maplibre/
 │   └── js/
-│       ├── app.js           # Roteamento SPA, inicialização
-│       ├── auth.js          # Login, gestão de token
-│       ├── editor.js        # Canvas, ferramentas, pintura
-│       ├── minimap.js       # Mini-mapa de contexto
-│       ├── admin.js         # Painel admin
-│       └── api.js           # Fetch wrapper com auth headers
-├── requirements.txt
-└── README.md
+│       ├── app.js              # Router por role
+│       ├── api.js              # fetch wrapper + JWT refresh
+│       ├── editor.js           # Canvas, ferramentas, undo/redo, submit
+│       ├── mask-core.js        # Lógica pura (paint, flood, screenToLogical)
+│       ├── backup.js           # localStorage backup
+│       ├── admin.js / admin/   # Dashboard, tiles, users, viewer
+│       ├── minimap.js          # MapLibre 3×3
+│       ├── maplib.js           # Helpers MapLibre
+│       ├── utils.js            # hexToRgb, blobToImage, escapeHtml
+│       └── toast.js
+├── docs/requirements.md        # Este arquivo
+├── tests/                      # pytest + Vitest + Puppeteer (ver CLAUDE.md)
+└── requirements.txt
 ```
 
----
+## 11. Critérios de Aceitação
 
-## 13. Dependências Python
+### 11.1 Auth
+- Login válido devolve par `{access, refresh}`; inválido → 401.
+- Refresh proativo evita expiração durante uso contínuo.
+- Logout revoga o `jti`; chamadas seguintes com o mesmo token → 401.
+- Roles enforçados em todos os endpoints admin.
+
+### 11.2 Fila
+- Dois operadores nunca recebem o mesmo tile.
+- Fila de revisão tem prioridade sobre pending.
+- Revisor nunca recebe um tile que ele próprio classificou.
+- F5 não perde trabalho: `/next` devolve o tile atribuído.
+- 204 quando vazio; UI mostra estado claro.
+
+### 11.3 Editor
+- Pintar com brush não tem lag (< 16 ms por frame, sem outline durante
+  gesture).
+- Borracha volta para 255.
+- Undo/Redo byte-exato (50 níveis, patches).
+- Slider de opacidade + Space (hold) + modo contornos (`O`).
+- Submit rejeita `255` no array; pisca pixels faltantes 2 s.
+
+### 11.4 Revisão
+- Banner "MODO REVISÃO" + nome do classificador.
+- Botão de submit muda para "Aprovar revisão".
+- Revisor pode editar antes de aprovar.
+
+### 11.5 Admin
+- Dashboard: totais, completion %, série diária, per-operator, médias de
+  duração `assign→classify` e `assign→review`.
+- Bulk actions atômicas (`reset_many`, `re_review_many`, `assign_many`,
+  `block_many`, `unblock_many`, `unassign_many`, `report_problem_many`).
+- Block guarda status original em `blocked_from`; unblock restaura.
+- Delete só permitido se `status='problem'`.
+
+### 11.6 Geometria/Export
+- Tile sempre 640 m × 640 m em qualquer latitude (pixel = 2.5 m em ambos
+  eixos).
+- GeoTIFF exportado tem CRS=EPSG:4326, NODATA=255, bbox correta para 20
+  pontos mundiais.
+
+### 11.7 Performance
+- `/next` < 2 s; pintura < 16 ms/frame; 10 operadores simultâneos sem
+  degradação (validado por testes de concorrência).
+
+## 12. Dependências
+
+`requirements.txt`:
 
 ```
 fastapi
@@ -607,39 +460,8 @@ pillow
 pyyaml
 numpy
 python-multipart
+pyproj
+rasterio
 ```
 
-Não usar ORM. Usar sqlite3 nativo do Python com queries SQL diretas.
-
----
-
-## 14. Notas de UX Adicionais
-
-### 14.1 Produtividade
-
-- O fluxo principal deve ser: abrir o browser, logar, e já estar pintando em menos de 5 segundos
-- Transição entre tiles deve ser instantânea (pré-carregar o próximo tile enquanto o operador pinta o atual, se possível)
-- Evitar modais e confirmações desnecessárias. A única confirmação deve ser no "Reportar Problema"
-- O botão "Submeter" deve ser grande e acessível, posicionado de forma que não exija scroll
-
-### 14.2 Feedback Visual
-
-- Ao mudar de classe, dar feedback visual imediato (flash na borda do canvas ou mudança do cursor)
-- Ao submeter com sucesso, mostrar um breve flash verde no canvas (200ms) antes de carregar o próximo tile
-- Ao reportar problema, mostrar feedback de confirmação
-
-### 14.3 Responsividade
-
-- O layout deve funcionar em monitores 1920×1080 (mais comum) e 1366×768
-- O canvas principal deve ser o maior possível, o mini-mapa e as ferramentas ocupam o espaço restante
-- Não é necessário suportar mobile
-
-### 14.4 Estado Local
-
-- Se o operador recarregar a página (F5) enquanto edita um tile, ao logar novamente ele deve receber o mesmo tile que estava editando (não perder o trabalho se já não submeteu)
-- Considerar salvar o estado atual do Uint8Array no localStorage como backup. Ao reconectar, comparar com o estado no servidor e oferecer restaurar.
-
-### 14.5 Tecla de Atalho de Referência
-
-- Incluir um botão "?" que abre um overlay mostrando todos os atalhos de teclado disponíveis
-- Este overlay deve ser fechável com Escape ou clicando fora
+Sem ORM. `sqlite3` nativo com queries SQL parametrizadas (`?`).

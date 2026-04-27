@@ -5,7 +5,7 @@
 import { apiGet, apiGetBlob, apiGetWithHeaders, apiPostJson, apiPatchJson, apiJson, logout as apiLogout } from "./api.js";
 import { showToast } from "./toast.js";
 import { createLockedMap, disposeMap, tileTransformRequest } from "./maplib.js";
-import { hexToRgb, blobToImage, escapeHtml as escape, fmtDate } from "./utils.js";
+import { hexToRgb, blobToImage, escapeHtml as escape, fmtDate, fmtBytes } from "./utils.js";
 import { renderDashboard, fmtDuration } from "./admin/dashboard.js";
 import { wireConfirmModal, confirmDestructive, promptAssign } from "./admin/modals.js";
 
@@ -119,6 +119,7 @@ async function selectTab(tab) {
         else if (tab === "map") await renderMap(content);
         else if (tab === "problems") await renderProblems(content);
         else if (tab === "users") await renderUsers(content);
+        else if (tab === "maintenance") await renderMaintenance(content);
     } catch (e) {
         renderError(content, e);
     }
@@ -1941,4 +1942,91 @@ async function toggleActive(userId, active) {
         showToast(active ? "Usuário ativado." : "Usuário desativado.", "success");
         selectTab("users");
     } catch (e) { showToast(`Erro: ${e.message}`, "error"); }
+}
+
+
+// ---------- Maintenance ----------
+// Operational read-only view of MBTiles state + on-disk overlay cache, with a
+// single destructive action (wipe overlay cache). Editing config.yaml itself
+// stays out of band — class palette / mbtiles paths are restart-only and the
+// invariants aren't hot-reload safe.
+
+const _MBTILES_LABELS = {
+    primary: "Imagem principal (satélite)",
+    worldcover: "Overlay WorldCover",
+    mapbiomas: "Overlay MapBiomas",
+};
+
+function _mbtilesCard(key, info) {
+    const title = _MBTILES_LABELS[key] || key;
+    if (!info.open) {
+        return `<div class="maint-card">
+            <h4>${escape(title)}</h4>
+            <p class="muted">Não configurado ou arquivo ausente.</p>
+        </div>`;
+    }
+    return `<div class="maint-card">
+        <h4>${escape(title)}</h4>
+        <dl class="maint-kv">
+            <dt>Status</dt><dd>aberto</dd>
+            <dt>Formato</dt><dd>${escape(info.format)}</dd>
+            <dt>Zooms</dt><dd>${info.min_zoom ?? "?"}–${info.max_zoom ?? "?"}</dd>
+            <dt>Arquivo</dt><dd><code>${escape(info.path || "")}</code></dd>
+        </dl>
+    </div>`;
+}
+
+async function renderMaintenance(root) {
+    root.innerHTML = `<div class="loading-text"><span class="loading"></span> Carregando…</div>`;
+    const data = await apiGet("/api/admin/maintenance/overview");
+    const cache = data.overlay_cache;
+    root.innerHTML = `
+        <div class="maint-section">
+            <h3>Imagens (MBTiles)</h3>
+            <p class="muted">Configurado em <code>backend/config.yaml</code>; alterações exigem reiniciar o servidor.</p>
+            <div class="maint-grid">
+                ${_mbtilesCard("primary", data.mbtiles.primary)}
+                ${_mbtilesCard("worldcover", data.mbtiles.worldcover)}
+                ${_mbtilesCard("mapbiomas", data.mbtiles.mapbiomas)}
+            </div>
+        </div>
+
+        <div class="maint-section">
+            <h3>Cache do overlay administrativo</h3>
+            <p class="muted">Tiles do mapa do admin são rasterizados sob demanda e armazenados aqui. A cache é invalidada automaticamente a cada mutação de máscara — limpe manualmente apenas após mudança de paleta ou importação em massa.</p>
+            <div class="maint-grid">
+                <div class="maint-card">
+                    <h4>Estado</h4>
+                    <dl class="maint-kv">
+                        <dt>Tiles renderizados</dt><dd>${cache.rendered_tiles.toLocaleString("pt-BR")}</dd>
+                        <dt>Tiles vazios cacheados</dt><dd>${cache.empty_tiles.toLocaleString("pt-BR")}</dd>
+                        <dt>Tamanho em disco</dt><dd>${fmtBytes(cache.file_size_bytes)}</dd>
+                        <dt>Zooms</dt><dd>${cache.min_zoom}–${cache.max_zoom}</dd>
+                        <dt>Arquivo</dt><dd><code>${escape(cache.path)}</code></dd>
+                    </dl>
+                </div>
+                <div class="maint-card">
+                    <h4>Ações</h4>
+                    <button id="maint-clear-cache" class="danger">Limpar cache</button>
+                    <button id="maint-refresh">Atualizar</button>
+                    <p class="muted maint-hint">A cache se reconstrói à medida que você navega no mapa do admin.</p>
+                </div>
+            </div>
+        </div>
+    `;
+    document.getElementById("maint-refresh").addEventListener("click", () => selectTab("maintenance"));
+    document.getElementById("maint-clear-cache").addEventListener("click", async () => {
+        const r = await confirmDestructive({
+            title: "Limpar cache do overlay?",
+            description: `Vai apagar ${cache.rendered_tiles + cache.empty_tiles} entrada(s) (${fmtBytes(cache.file_size_bytes)}). A próxima navegação no mapa do admin recria conforme a área visualizada.`,
+            confirmLabel: "Limpar",
+            danger: true,
+        });
+        if (!r.confirmed) return;
+        try {
+            const res = await apiPostJson("/api/admin/maintenance/overlay-cache/clear", {});
+            showToast(`Cache limpa: ${res.deleted} entrada(s) removida(s).`, "success");
+            selectTab("maintenance");
+        } catch (e) { showToast(`Erro: ${e.message}`, "error"); }
+    });
 }

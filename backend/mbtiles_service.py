@@ -86,6 +86,9 @@ class MBTilesReader:
     def zoom_range(self) -> tuple[Optional[int], Optional[int]]:
         return self._min_zoom, self._max_zoom
 
+    def path(self) -> Optional[Path]:
+        return self._path
+
 
 primary = MBTilesReader("webp")
 worldcover = MBTilesReader("png")

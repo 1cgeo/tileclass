@@ -86,14 +86,14 @@ tileclass/
 │       ├── editor.js           # Canvas, ferramentas, undo/redo, submit
 │       ├── mask-core.js        # Lógica PURA (paint, Bresenham, flood, undo, screenToLogical) — testável sem DOM
 │       ├── backup.js           # localStorage backup (round-trip Uint8Array ↔ base64) — testável sem DOM
-│       ├── admin.js            # Dashboard, tiles (lista+grade+mapa), users, viewer
+│       ├── admin.js            # Orquestrador admin (tiles, users, viewer)
+│       ├── admin/               # Submódulos: dashboard.js, modals.js
 │       ├── minimap.js          # MapLibre 3×3 com highlight do tile atual
 │       ├── maplib.js           # Helpers MapLibre (createLockedMap, setMapBbox)
 │       ├── utils.js            # hexToRgb, blobToImage, escapeHtml
 │       └── toast.js            # Notificações
 ├── docs/
-│   ├── requirements.md          # Spec completa
-│   └── implementation_plan.md   # Plano em fases
+│   └── requirements.md          # Spec completa
 ├── tests/                       # pytest + TestClient (auth, tiles, admin, concorrência, geo, raster)
 │   ├── frontend/                # Vitest + jsdom (mask-core, api-refresh, utils, localstorage-backup)
 │   └── e2e/runner.mjs           # Puppeteer + uvicorn real

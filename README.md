@@ -127,7 +127,6 @@ frontend/
   vendor/maplibre/     CDN local
 docs/
   requirements.md          Spec completa
-  implementation_plan.md   Plano em fases
 tests/
   conftest.py, test_*.py   Backend (pytest + TestClient)
   frontend/*.test.js       Frontend unit (Vitest + jsdom)

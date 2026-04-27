@@ -412,3 +412,30 @@ def clear_cache() -> int:
         return cur.rowcount or 0
     finally:
         conn.close()
+
+
+def cache_stats() -> dict:
+    """Return cache file metrics for the maintenance dashboard. `rendered` are
+    rows whose render produced painted pixels; `empty` are rows we already
+    visited and confirmed are blank (stored as NULL so future requests skip
+    rendering)."""
+    path = _resolve_cache_path()
+    conn = _open_cache()
+    try:
+        rendered = conn.execute(
+            "SELECT COUNT(*) FROM tiles WHERE tile_data IS NOT NULL"
+        ).fetchone()[0]
+        empty = conn.execute(
+            "SELECT COUNT(*) FROM tiles WHERE tile_data IS NULL"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    file_size = path.stat().st_size if path.exists() else 0
+    return {
+        "path": str(path),
+        "file_size_bytes": file_size,
+        "rendered_tiles": int(rendered),
+        "empty_tiles": int(empty),
+        "min_zoom": min_zoom(),
+        "max_zoom": max_zoom(),
+    }
