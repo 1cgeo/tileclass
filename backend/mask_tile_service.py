@@ -23,12 +23,22 @@ from pathlib import Path
 # PostgreSQL/PostGIS, pyproj and rasterio). Point PROJ_DATA at rasterio's
 # bundled directory BEFORE importing anything that touches CRS, otherwise
 # `rasterio.crs.CRS.from_epsg(4326)` fails with a database-version mismatch
-# at request time. Same fix used by backend/scripts/export_tiles.py.
-_PY_SP = Path(sys.executable).parent / "Lib" / "site-packages"
-_RASTERIO_PROJ = _PY_SP / "rasterio" / "proj_data"
-if _RASTERIO_PROJ.exists():
-    os.environ.setdefault("PROJ_DATA", str(_RASTERIO_PROJ))
-    os.environ.setdefault("PROJ_LIB", str(_RASTERIO_PROJ))
+# at request time.
+#
+# Detection via `importlib.util.find_spec` so we resolve rasterio's actual
+# install path in any environment (system Python, venv, conda) — the older
+# `Path(sys.executable).parent / "Lib" / "site-packages"` heuristic was
+# wrong on Windows venvs (`<venv>\Scripts\python.exe` → `Scripts\Lib\…`).
+# Override (not setdefault): if the user has a system-wide PROJ_LIB pointing
+# at an old proj.db (PostgreSQL/PostGIS ships one), setdefault leaves the
+# poisoned value and every reproject 500s.
+import importlib.util as _iu
+_spec = _iu.find_spec("rasterio")
+if _spec and _spec.origin:
+    _RASTERIO_PROJ = Path(_spec.origin).parent / "proj_data"
+    if _RASTERIO_PROJ.exists():
+        os.environ["PROJ_DATA"] = str(_RASTERIO_PROJ)
+        os.environ["PROJ_LIB"] = str(_RASTERIO_PROJ)
 
 import numpy as np
 from PIL import Image

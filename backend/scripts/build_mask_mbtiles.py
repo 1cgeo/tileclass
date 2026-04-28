@@ -24,9 +24,17 @@ import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
-# PROJ fix (Windows tem 3 proj.db conflitantes)
-_PY_SP = Path(sys.executable).parent / "Lib" / "site-packages"
-os.environ.setdefault("PROJ_DATA", str(_PY_SP / "rasterio" / "proj_data"))
+# PROJ fix (Windows tem 3 proj.db conflitantes — PostgreSQL/PostGIS,
+# pyproj, rasterio). Detecta via importlib (funciona em venv e conda) e
+# sobrescreve PROJ_DATA/PROJ_LIB — `setdefault` deixa um PROJ_LIB poluído
+# system-wide (proj.db antigo do Postgres) e qualquer reproject quebra.
+import importlib.util as _iu
+_spec = _iu.find_spec("rasterio")
+if _spec and _spec.origin:
+    _RASTERIO_PROJ = Path(_spec.origin).parent / "proj_data"
+    if _RASTERIO_PROJ.exists():
+        os.environ["PROJ_DATA"] = str(_RASTERIO_PROJ)
+        os.environ["PROJ_LIB"] = str(_RASTERIO_PROJ)
 
 import numpy as np
 import rasterio
