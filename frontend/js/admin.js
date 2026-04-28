@@ -141,6 +141,7 @@ async function renderTiles(root) {
                 <option value="">(todos)</option>
                 <option>pending</option><option>in_progress</option>
                 <option value="paused">paused</option>
+                <option value="paused_review">paused (revisão)</option>
                 <option>classified</option>
                 <option>in_review</option><option>reviewed</option><option>problem</option>
                 <option>blocked</option>
@@ -211,6 +212,9 @@ async function loadAndRender() {
     // paused_at != NULL) leak into those buckets and double-count against
     // the "paused" virtual status — same split the dashboard already does.
     if (status === "paused") {
+        params.set("paused", "true");
+    } else if (status === "paused_review") {
+        params.set("status", "in_review");
         params.set("paused", "true");
     } else if (status) {
         params.set("status", status);
