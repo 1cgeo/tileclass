@@ -44,7 +44,7 @@ def test_overview_shape(client, admin_user):
     tok = token(client, admin_user["username"], admin_user["password"])
     body = client.get("/api/admin/maintenance/overview", headers=h(tok)).json()
     assert set(body.keys()) == {"mbtiles", "overlay_cache"}
-    for key in ("primary", "worldcover", "mapbiomas"):
+    for key in ("primary", "dsg", "mapbiomas"):
         info = body["mbtiles"][key]
         assert "open" in info, key
         if info["open"]:

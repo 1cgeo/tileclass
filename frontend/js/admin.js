@@ -1957,7 +1957,7 @@ async function toggleActive(userId, active) {
 
 const _MBTILES_LABELS = {
     primary: "Imagem principal (satélite)",
-    worldcover: "Overlay WorldCover",
+    dsg: "Overlay DSG",
     mapbiomas: "Overlay MapBiomas",
 };
 
@@ -1990,7 +1990,7 @@ async function renderMaintenance(root) {
             <p class="muted">Configurado em <code>backend/config.yaml</code>; alterações exigem reiniciar o servidor.</p>
             <div class="maint-grid">
                 ${_mbtilesCard("primary", data.mbtiles.primary)}
-                ${_mbtilesCard("worldcover", data.mbtiles.worldcover)}
+                ${_mbtilesCard("dsg", data.mbtiles.dsg)}
                 ${_mbtilesCard("mapbiomas", data.mbtiles.mapbiomas)}
             </div>
         </div>

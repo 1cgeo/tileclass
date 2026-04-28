@@ -1,4 +1,4 @@
-"""Read-only config endpoints + raw MBTiles passthroughs (sat/wc/mb)."""
+"""Read-only config endpoints + raw MBTiles passthroughs (sat/dsg/mb)."""
 from fastapi import APIRouter, HTTPException, Path, Response
 
 from .. import mbtiles_service
@@ -20,7 +20,7 @@ def config_tileserver():
     ts2 = cfg.get("tileserver_secondary") or {}
     ts3 = cfg.get("tileserver_tertiary") or {}
     primary = mbtiles_service.primary
-    wc = mbtiles_service.worldcover
+    dsg = mbtiles_service.dsg
     mb = mbtiles_service.mapbiomas
     min_zoom = max_zoom = None
     if primary.is_open():
@@ -28,11 +28,11 @@ def config_tileserver():
         min_zoom, max_zoom = primary.zoom_range()
     else:
         url = ts.get("url_template", "")
-    wc_url = None
-    wc_min = wc_max = None
-    if wc.is_open():
-        wc_url = f"/api/wc/{{z}}/{{x}}/{{y}}.{wc.tile_format()}"
-        wc_min, wc_max = wc.zoom_range()
+    dsg_url = None
+    dsg_min = dsg_max = None
+    if dsg.is_open():
+        dsg_url = f"/api/dsg/{{z}}/{{x}}/{{y}}.{dsg.tile_format()}"
+        dsg_min, dsg_max = dsg.zoom_range()
     mb_url = None
     mb_min = mb_max = None
     if mb.is_open():
@@ -46,9 +46,9 @@ def config_tileserver():
         "max_zoom": max_zoom,
         "secondary_max_zoom": ts2.get("max_zoom", 22),
         "tertiary_max_zoom": ts3.get("max_zoom", 22),
-        "wc_url_template": wc_url,
-        "wc_min_zoom": wc_min,
-        "wc_max_zoom": wc_max,
+        "dsg_url_template": dsg_url,
+        "dsg_min_zoom": dsg_min,
+        "dsg_max_zoom": dsg_max,
         "mb_url_template": mb_url,
         "mb_min_zoom": mb_min,
         "mb_max_zoom": mb_max,
@@ -76,9 +76,9 @@ def mbtiles_xyz(z: int, x: int, y: int, ext: str):
     return _serve_mbtiles(mbtiles_service.primary, z, x, y, ext)
 
 
-@router.get("/api/wc/{z}/{x}/{y}.{ext}")
-def wc_mbtiles_xyz(z: int, x: int, y: int, ext: str):
-    return _serve_mbtiles(mbtiles_service.worldcover, z, x, y, ext)
+@router.get("/api/dsg/{z}/{x}/{y}.{ext}")
+def dsg_mbtiles_xyz(z: int, x: int, y: int, ext: str):
+    return _serve_mbtiles(mbtiles_service.dsg, z, x, y, ext)
 
 
 @router.get("/api/mb/{z}/{x}/{y}.{ext}")

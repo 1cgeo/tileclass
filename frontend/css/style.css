@@ -430,11 +430,11 @@ input[type="range"] {
 }
 #canvas-cursor { pointer-events: auto; }
 #canvas-viewport.space-held #canvas-cursor { pointer-events: none; }
-/* T-hold (WC) / Y-hold (MapBiomas): hide user mask/grid so the categorical
+/* T-hold (DSG) / Y-hold (MapBiomas): hide user mask/grid so the categorical
    overlay (rendered by MapLibre) shows clean. */
-#canvas-viewport.wc-held #canvas-mask,
+#canvas-viewport.dsg-held #canvas-mask,
 #canvas-viewport.mb-held #canvas-mask,
-#canvas-viewport.wc-held #canvas-grid,
+#canvas-viewport.dsg-held #canvas-grid,
 #canvas-viewport.mb-held #canvas-grid { visibility: hidden; }
 /* Paint area highlight — bright border on the 256x256 area, plus an outer
    dim wash so the context imagery is visibly "read-only". */

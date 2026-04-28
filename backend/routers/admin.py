@@ -283,7 +283,7 @@ def admin_maintenance_overview():
     return {
         "mbtiles": {
             "primary": _mbtiles_info(mbtiles_service.primary),
-            "worldcover": _mbtiles_info(mbtiles_service.worldcover),
+            "dsg": _mbtiles_info(mbtiles_service.dsg),
             "mapbiomas": _mbtiles_info(mbtiles_service.mapbiomas),
         },
         "overlay_cache": mask_tile_service.cache_stats(),

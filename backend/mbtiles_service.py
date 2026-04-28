@@ -5,7 +5,7 @@ thread (FastAPI runs sync endpoints in a thread pool, and a single sqlite3
 connection cannot serve concurrent queries even with check_same_thread=False).
 
 Three pre-instantiated singletons are exported: `primary` (the satellite/imagery
-mbtiles, default WebP), `worldcover` (the WC overlay, PNG), and `mapbiomas`
+mbtiles, default WebP), `dsg` (the DSG categorical overlay, PNG), and `mapbiomas`
 (the MapBiomas overlay, PNG, mapped to TileClass palette).
 """
 from __future__ import annotations
@@ -91,5 +91,5 @@ class MBTilesReader:
 
 
 primary = MBTilesReader("webp")
-worldcover = MBTilesReader("png")
+dsg = MBTilesReader("png")
 mapbiomas = MBTilesReader("png")

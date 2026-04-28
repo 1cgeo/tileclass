@@ -18,7 +18,7 @@ npm install   # opcional, só pros testes frontend
 
 `backend/config.yaml` controla:
 - `tileserver` / `tileserver_secondary` / `tileserver_tertiary` — fontes de imagem
-- `worldcover` / `mapbiomas` — overlays mbtiles opcionais
+- `dsg` / `mapbiomas` — overlays mbtiles opcionais
 - `mask_overlay` — cache do overlay admin
 - `auth.jwt_secret` — troque em produção (ou via env `TILECLASS_JWT_SECRET`)
 - `classes` — IDs/nomes/cores
@@ -107,7 +107,7 @@ backend/
   admin_service.py     Dashboard, listagem, bulk actions, users, thumbnails
   mask_utils.py        encode/decode PNG ↔ Uint8Array, validação
   mask_tile_service.py Cache mbtiles do overlay admin (rasteriza máscaras → XYZ)
-  mbtiles_service.py   Reader read-only (singletons primary/wc/mb)
+  mbtiles_service.py   Reader read-only (singletons primary/dsg/mb)
   config.yaml
   scripts/             create_admin, import_*, export_tiles, build_*, merge_db
 
@@ -144,7 +144,7 @@ tests/
 | C | Pular para próximo pixel faltante |
 | F | Highlight pixels faltantes (toggle) |
 | D / R | Imagem secundária / terciária (segurar) |
-| T / Y | Overlay WorldCover / MapBiomas (segurar) |
+| T / Y | Overlay DSG / MapBiomas (segurar) |
 | Espaço (segurar) | Esconder máscara |
 | Ctrl+Z | Desfazer |
 | Ctrl+Y / Ctrl+Shift+Z | Refazer |

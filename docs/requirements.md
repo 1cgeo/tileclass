@@ -22,7 +22,7 @@ HTML5, MapLibre GL JS).
 - SQLite WAL como banco único; máscaras como PNG single-band (BLOB).
 - Imagem de fundo via tiles XYZ (MBTiles local servido por
   `/api/xyz/{z}/{x}/{y}.{ext}` ou TileServer-GL externo). Overlays opcionais:
-  ArcGIS World Imagery (secundário/terciário), WorldCover, MapBiomas.
+  ArcGIS World Imagery (secundário/terciário), DSG, MapBiomas.
 - JWT (access 8h, refresh 24h, HS256). Role `operator|admin` + flag
   `can_review`.
 
@@ -211,7 +211,7 @@ Todos atrás de `Depends(auth.require_admin)`.
 | Método | Path                          | Descrição                                  |
 |--------|-------------------------------|--------------------------------------------|
 | GET    | `/api/xyz/{z}/{x}/{y}.{ext}`  | Tile do MBTiles primário.                  |
-| GET    | `/api/wc/{z}/{x}/{y}.{ext}`   | WorldCover.                                |
+| GET    | `/api/dsg/{z}/{x}/{y}.{ext}`  | DSG (overlay categórico).                  |
 | GET    | `/api/mb/{z}/{x}/{y}.{ext}`   | MapBiomas.                                 |
 
 ## 5. Frontend
@@ -243,8 +243,8 @@ tileserver_secondary:
 tileserver_tertiary:
   url_template: "bingmaps://{z}/{x}/{y}"           # quadkey reescrito no frontend
   max_zoom: 19
-worldcover:
-  mbtiles_path: "../data_external/wc_teste.mbtiles"
+dsg:
+  mbtiles_path: "../data_external/dsg.mbtiles"
 mapbiomas:
   mbtiles_path: "../data_external/mapbiomas.mbtiles"
 
@@ -374,7 +374,7 @@ tileclass/
 │   ├── admin/                  # dashboard, tiles_query, tiles_mutations, users, thumbnails
 │   ├── mask_utils.py           # Uint8Array ↔ PNG "L" + validação
 │   ├── mask_tile_service.py    # Cache mbtiles do overlay admin
-│   ├── mbtiles_service.py      # Reader read-only (singletons primary/wc/mb)
+│   ├── mbtiles_service.py      # Reader read-only (singletons primary/dsg/mb)
 │   ├── geo.py                  # bbox_from_center (pyproj.Geod WGS84)
 │   ├── tile_grid.py            # Helpers Web Mercator
 │   ├── config.yaml

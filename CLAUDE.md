@@ -54,7 +54,7 @@ tileclass/
 │   │   ├── auth.py             # /api/auth/{login,refresh,me,logout}
 │   │   ├── operator.py         # /api/tiles/* + /api/me/stats-today + helpers de body de máscara
 │   │   ├── admin.py            # /api/admin/* (dashboard, tiles, users, mask overlay)
-│   │   └── config.py           # /api/config/{classes,tileserver} + /api/{xyz,wc,mb}/{z}/{x}/{y}.<ext>
+│   │   └── config.py           # /api/config/{classes,tileserver} + /api/{xyz,dsg,mb}/{z}/{x}/{y}.<ext>
 │   ├── auth.py                 # JWT, bcrypt, rate limit, blacklist, role middleware
 │   ├── models.py               # Schemas Pydantic
 │   ├── database.py             # Conexão SQLite (WAL), schema, transaction(), log_action
@@ -69,7 +69,7 @@ tileclass/
 │   │   └── thumbnails.py       # tile_thumbnail (mask colorizada) + tile_satellite_thumbnail
 │   ├── mask_utils.py           # Uint8Array ↔ PNG "L" + validação (IDs derivados do config)
 │   ├── mask_tile_service.py    # Cache mbtiles do overlay admin (rasteriza máscaras → XYZ)
-│   ├── mbtiles_service.py      # Reader read-only (singletons primary/wc/mb, conn por thread)
+│   ├── mbtiles_service.py      # Reader read-only (singletons primary/dsg/mb, conn por thread)
 │   ├── geo.py                  # TILE_PX/METERS_PER_PX/TILE_METERS + bbox_from_center (pyproj.Geod WGS84)
 │   ├── tile_grid.py            # Helpers Web Mercator (build_mbtiles e import_cq)
 │   ├── config.yaml

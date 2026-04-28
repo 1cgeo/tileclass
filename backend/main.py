@@ -59,13 +59,13 @@ async def lifespan(app: FastAPI):
     init_db()
     cfg = get_config()
     _open_optional(cfg.get("tileserver"), mbtiles_service.primary)
-    _open_optional(cfg.get("worldcover"), mbtiles_service.worldcover)
+    _open_optional(cfg.get("dsg"), mbtiles_service.dsg)
     _open_optional(cfg.get("mapbiomas"), mbtiles_service.mapbiomas)
     try:
         yield
     finally:
         mbtiles_service.primary.close()
-        mbtiles_service.worldcover.close()
+        mbtiles_service.dsg.close()
         mbtiles_service.mapbiomas.close()
 
 
