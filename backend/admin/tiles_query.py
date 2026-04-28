@@ -50,14 +50,39 @@ def _build_tiles_filter(
     return (" WHERE " + " AND ".join(where)) if where else "", args
 
 
+# Whitelist mapping `sort_by` API value → safe SQL expression.
+# Never interpolate user input into ORDER BY directly — only values from this
+# dict reach the query. NULLs go last so unclassified/unreviewed tiles don't
+# crowd the top of asc sorts on classified_at/reviewed_at/usernames.
+_TILE_SORT_COLUMNS: dict[str, str] = {
+    "id": "t.id",
+    "name": "t.name",
+    "status": "t.status",
+    "classified_by_username": "uc.username",
+    "reviewed_by_username": "ur.username",
+    "classified_at": "t.classified_at",
+    "reviewed_at": "t.reviewed_at",
+}
+
+
+def _build_order_by(sort_by: str | None, sort_dir: str | None) -> str:
+    col = _TILE_SORT_COLUMNS.get(sort_by or "", "t.id")
+    direction = "DESC" if (sort_dir or "").lower() == "desc" else "ASC"
+    nulls = "NULLS LAST" if direction == "ASC" else "NULLS FIRST"
+    # Tie-break by id so pagination is stable when the sort key has duplicates.
+    return f" ORDER BY {col} {direction} {nulls}, t.id ASC"
+
+
 def list_tiles(status: str | None = None, user_id: int | None = None,
                date_from: str | None = None, date_to: str | None = None,
                paused: bool | None = None, q: str | None = None,
+               sort_by: str | None = None, sort_dir: str | None = None,
                limit: int = 200, offset: int = 0) -> list[dict]:
     where_sql, args = _build_tiles_filter(
         prefix="t.", status=status, user_id=user_id,
         date_from=date_from, date_to=date_to, paused=paused, q=q,
     )
+    order_sql = _build_order_by(sort_by, sort_dir)
     conn = connect()
     try:
         rows = conn.execute(
@@ -72,7 +97,8 @@ def list_tiles(status: str | None = None, user_id: int | None = None,
             "LEFT JOIN users ur ON ur.id=t.reviewed_by "
             "LEFT JOIN users ua ON ua.id=t.assigned_to"
             + where_sql
-            + " ORDER BY t.id LIMIT ? OFFSET ?",
+            + order_sql
+            + " LIMIT ? OFFSET ?",
             args + [limit, offset],
         ).fetchall()
     finally:

@@ -744,6 +744,60 @@ def test_thumbnail(client, admin_user, tiles):
     assert img.size == (64, 64)
 
 
+def test_admin_tiles_sort_orders_full_dataset_across_pages(client, admin_user, tiles_many):
+    """Sort must apply to all tiles, not just the current page slice. Regression
+    against client-side sort that only reordered the visible page."""
+    t = token(client, "admin", "admin123")
+    page_size = 20
+    # Names are tile_000 .. tile_099 — descending by name puts tile_099 first.
+    page0 = client.get(
+        f"/api/admin/tiles?sort_by=name&sort_dir=desc&limit={page_size}&offset=0",
+        headers=headers(t),
+    ).json()
+    page4 = client.get(
+        f"/api/admin/tiles?sort_by=name&sort_dir=desc&limit={page_size}&offset={4 * page_size}",
+        headers=headers(t),
+    ).json()
+    assert page0[0]["name"] == "tile_099"
+    assert page4[-1]["name"] == "tile_000"
+    # Every name on page 0 must outrank every name on page 4 — the global sort
+    # is what would break if the backend only sorted within each page.
+    assert min(t["name"] for t in page0) > max(t["name"] for t in page4)
+
+
+def test_admin_tiles_sort_default_is_id_asc(client, admin_user, tiles_many):
+    t = token(client, "admin", "admin123")
+    rows = client.get("/api/admin/tiles?limit=10", headers=headers(t)).json()
+    ids = [r["id"] for r in rows]
+    assert ids == sorted(ids)
+
+
+def test_admin_tiles_sort_rejects_unknown_column(client, admin_user, tiles):
+    t = token(client, "admin", "admin123")
+    # Anything outside the whitelist must 422 — guards against ORDER BY injection.
+    r = client.get("/api/admin/tiles?sort_by=data_png", headers=headers(t))
+    assert r.status_code == 422
+
+
+def test_admin_tiles_sort_nulls_last_on_asc(client, admin_user, tiles, operators):
+    """Tiles never classified have classified_at=NULL. ASC sort by that column
+    must push NULLs to the end, not the start — otherwise the first page is
+    a wall of unclassified tiles and the user can't find recent work."""
+    import numpy as np
+    tok = token(client, "op1", "secret123")
+    tile = client.get("/api/tiles/next", headers=headers(tok)).json()
+    raw = np.full(65536, 1, dtype=np.uint8).tobytes()
+    client.post(f"/api/tiles/{tile['id']}/classify",
+                headers={**headers(tok), "Content-Type": "application/octet-stream"}, content=raw)
+    t = token(client, "admin", "admin123")
+    rows = client.get(
+        "/api/admin/tiles?sort_by=classified_at&sort_dir=asc",
+        headers=headers(t),
+    ).json()
+    assert rows[0]["classified_at"] is not None
+    assert rows[-1]["classified_at"] is None
+
+
 def test_thumbnail_falls_back_to_blank_on_missing_blob(client, admin_user, tiles):
     """A tile whose data_png is NULL (or corrupt) must still return a 200 PNG,
     rendered as the empty mask — the admin grid should never 422 on rows that

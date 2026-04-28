@@ -225,6 +225,8 @@ async function loadAndRender() {
     if (df) params.set("date_from", df);
     if (dt) params.set("date_to", dt);
     if (q) params.set("q", q);
+    params.set("sort_by", sortKey);
+    params.set("sort_dir", sortDir);
     params.set("limit", PAGE_SIZE);
     params.set("offset", page * PAGE_SIZE);
     const target = document.getElementById("tiles-list");
@@ -235,25 +237,18 @@ async function loadAndRender() {
         b.classList.toggle("active", b.id === `view-${listView}`);
     });
     target.innerHTML = "";
-    const sorted = sortTiles(tiles);
-    if (listView === "table") renderTable(target, sorted);
-    else renderGrid(target, sorted);
+    if (listView === "table") renderTable(target, tiles);
+    else renderGrid(target, tiles);
     updateBulkBar();
     renderPager();
-}
-
-function sortTiles(tiles) {
-    return [...tiles].sort((a, b) => {
-        const va = a[sortKey] ?? "", vb = b[sortKey] ?? "";
-        if (va < vb) return sortDir === "asc" ? -1 : 1;
-        if (va > vb) return sortDir === "asc" ? 1 : -1;
-        return 0;
-    });
 }
 
 function setSort(key) {
     if (sortKey === key) sortDir = sortDir === "asc" ? "desc" : "asc";
     else { sortKey = key; sortDir = "asc"; }
+    // Sort changes the order of every row, including ones not on the current
+    // page — go back to page 0 so the user sees the new top of the list.
+    page = 0;
     loadAndRender();
 }
 

@@ -40,23 +40,35 @@ def admin_dashboard():
     return admin_service.dashboard()
 
 
+_TILE_SORT_KEYS = {
+    "id", "name", "status",
+    "classified_by_username", "reviewed_by_username",
+    "classified_at", "reviewed_at",
+}
+
+
 @router.get("/tiles")
 def admin_tiles(status: TileStatus | None = None,
                 user_id: int | None = Query(default=None, ge=1),
                 date_from: str | None = None, date_to: str | None = None,
                 paused: bool | None = None,
                 q: str | None = Query(default=None, max_length=200),
+                sort_by: str | None = Query(default=None, max_length=64),
+                sort_dir: str | None = Query(default=None, pattern="^(asc|desc)$"),
                 limit: int = Query(default=200, ge=1, le=1000),
                 offset: int = Query(default=0, ge=0)):
     if date_from:
         date_from = _parse_iso_date(date_from, "date_from")
     if date_to:
         date_to = _parse_iso_date(date_to, "date_to")
+    if sort_by is not None and sort_by not in _TILE_SORT_KEYS:
+        raise HTTPException(422, f"invalid sort_by: {sort_by}")
     status_v = status.value if status else None
     q_norm = q.strip() if q else None
     items = admin_service.list_tiles(
         status=status_v, user_id=user_id, date_from=date_from, date_to=date_to,
-        paused=paused, q=q_norm, limit=limit, offset=offset,
+        paused=paused, q=q_norm, sort_by=sort_by, sort_dir=sort_dir,
+        limit=limit, offset=offset,
     )
     total = admin_service.count_tiles(
         status=status_v, user_id=user_id, date_from=date_from, date_to=date_to,

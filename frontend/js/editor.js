@@ -726,6 +726,8 @@ function attachEvents() {
     if (btnPause) btnPause.addEventListener("click", pauseTile);
     const btnGmaps = document.getElementById("btn-gmaps");
     if (btnGmaps) btnGmaps.addEventListener("click", openInGoogleMaps);
+    const btnGearth = document.getElementById("btn-gearth");
+    if (btnGearth) btnGearth.addEventListener("click", openInGoogleEarth);
 
     const resumeContinue = document.getElementById("paused-resume-continue");
     if (resumeContinue) resumeContinue.addEventListener("click", continuePausedTile);
@@ -1337,6 +1339,18 @@ function openInGoogleMaps() {
     const lon = (currentTile.bbox_west + currentTile.bbox_east) / 2;
     // data=!3m1!1e3 forces the satellite/earth layer; zoom 18 frames a 640m tile.
     const url = `https://www.google.com/maps/@${lat},${lon},18z/data=!3m1!1e3`;
+    window.open(url, "_blank", "noopener,noreferrer");
+}
+
+function openInGoogleEarth() {
+    if (!currentTile) {
+        showToast("Nenhum tile aberto.", "warn");
+        return;
+    }
+    const lat = (currentTile.bbox_south + currentTile.bbox_north) / 2;
+    const lon = (currentTile.bbox_west + currentTile.bbox_east) / 2;
+    // 1500d = camera distance in meters (frames a ~640m tile with margin); 0t = top-down.
+    const url = `https://earth.google.com/web/@${lat},${lon},0a,1500d,1y,0h,0t,0r`;
     window.open(url, "_blank", "noopener,noreferrer");
 }
 
