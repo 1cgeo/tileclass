@@ -117,6 +117,12 @@ def _open_cache() -> sqlite3.Connection:
     with _cache_lock:
         path = _resolve_cache_path()
         conn = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
+        # WAL lets concurrent readers coexist with a writer; busy_timeout makes
+        # the second writer wait briefly instead of raising "database is locked"
+        # (the admin map view fans out many parallel tile requests).
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA busy_timeout=5000")
         conn.executescript(_CACHE_SCHEMA)
     return conn
 
