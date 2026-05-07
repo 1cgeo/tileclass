@@ -56,6 +56,13 @@ CREATE TABLE IF NOT EXISTS projects (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT UNIQUE NOT NULL,
     description TEXT,
+    -- 'raster' (current pixel-mask flow) or 'vector' (GeoJSON FeatureCollection
+    -- per tile with line annotations, e.g. drainage networks, road graphs).
+    -- Immutable after creation: changing kind would orphan every tile body.
+    kind TEXT NOT NULL DEFAULT 'raster' CHECK (kind IN ('raster','vector')),
+    -- Vector projects only: when 1, submits run validate_topology
+    -- (each LineString has direction; endpoints snap; no cycles).
+    topology_required INTEGER NOT NULL DEFAULT 0,
     mask_complete_required INTEGER NOT NULL DEFAULT 1,
     primary_mbtiles TEXT NOT NULL,
     secondary_mbtiles TEXT,
@@ -74,6 +81,20 @@ CREATE TABLE IF NOT EXISTS project_classes (
     color TEXT NOT NULL,
     ordering INTEGER NOT NULL,
     PRIMARY KEY (project_id, class_id)
+);
+
+-- Vector projects' attribute schema (per-feature properties form). Mutually
+-- exclusive with project_classes by kind: raster uses classes, vector uses
+-- attributes.
+CREATE TABLE IF NOT EXISTS project_attributes (
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    key TEXT NOT NULL,
+    label TEXT NOT NULL,
+    type TEXT NOT NULL CHECK (type IN ('text','number','enum','boolean')),
+    required INTEGER NOT NULL DEFAULT 0,
+    options_json TEXT,
+    ordering INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (project_id, key)
 );
 
 CREATE TABLE IF NOT EXISTS project_members (
@@ -107,7 +128,13 @@ CREATE TABLE IF NOT EXISTS tiles (
     -- when the tile has never been classified. Used by the dashboard's
     -- class-distribution panel without re-decoding masks.
     class_counts TEXT,
-    last_heartbeat_at TEXT
+    last_heartbeat_at TEXT,
+    -- Vector tiles only: GeoJSON FeatureCollection serialized as TEXT.
+    -- Mutually exclusive with data_png — the project's `kind` column
+    -- decides which body is populated.
+    data_geojson TEXT,
+    -- Cached number of features in data_geojson; null when never submitted.
+    feature_count INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_tiles_status ON tiles(status);
@@ -226,18 +253,20 @@ def _rebuild_tiles_with_project_not_null(conn: sqlite3.Connection) -> None:
             paused_at TEXT,
             blocked_from TEXT,
             class_counts TEXT,
-            last_heartbeat_at TEXT
+            last_heartbeat_at TEXT,
+            data_geojson TEXT,
+            feature_count INTEGER
         )"""
     )
     conn.execute(
         """INSERT INTO tiles_new (id, project_id, name, bbox_west, bbox_south, bbox_east, bbox_north,
            status, assigned_to, classified_by, reviewed_by, classified_at, reviewed_at,
            data_png, problem_note, version, paused_at, blocked_from,
-           class_counts, last_heartbeat_at)
+           class_counts, last_heartbeat_at, data_geojson, feature_count)
            SELECT id, project_id, name, bbox_west, bbox_south, bbox_east, bbox_north,
                   status, assigned_to, classified_by, reviewed_by, classified_at, reviewed_at,
                   data_png, problem_note, version, paused_at, blocked_from,
-                  class_counts, last_heartbeat_at
+                  class_counts, last_heartbeat_at, data_geojson, feature_count
            FROM tiles"""
     )
     conn.execute("DROP TABLE tiles")
@@ -275,6 +304,23 @@ def _migrate(conn: sqlite3.Connection) -> None:
         # ISO8601 timestamp the editor pings while the tile is open. Stale
         # heartbeat → auto-pause sweep takes over and frees the slot.
         conn.execute("ALTER TABLE tiles ADD COLUMN last_heartbeat_at TEXT")
+    if "data_geojson" not in cols:
+        # Vector tile body. Null on legacy raster tiles.
+        conn.execute("ALTER TABLE tiles ADD COLUMN data_geojson TEXT")
+    if "feature_count" not in cols:
+        conn.execute("ALTER TABLE tiles ADD COLUMN feature_count INTEGER")
+    # projects.kind / topology_required for the vector flow. Defaults
+    # preserve existing rows as raster.
+    proj_cols = {r[1] for r in conn.execute("PRAGMA table_info(projects)").fetchall()}
+    if "kind" not in proj_cols:
+        conn.execute(
+            "ALTER TABLE projects ADD COLUMN kind TEXT NOT NULL DEFAULT 'raster' "
+            "CHECK (kind IN ('raster','vector'))"
+        )
+    if "topology_required" not in proj_cols:
+        conn.execute(
+            "ALTER TABLE projects ADD COLUMN topology_required INTEGER NOT NULL DEFAULT 0"
+        )
     # Indices on migrated columns must run after the ALTER above (cannot live
     # in SCHEMA because executescript runs before this fn on existing DBs).
     conn.execute(
