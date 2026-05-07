@@ -1,18 +1,22 @@
-"""MBTiles tile readers (read-only).
+"""MBTiles tile readers (read-only), pooled per (project_id, layer).
+
+Each project declares up to five mbtiles paths (`primary`, `secondary`,
+`tertiary`, `ref_primary`, `ref_secondary`). Readers are opened lazily on
+the first request, cached for reuse, and bounded by an LRU so a server
+hosting many projects does not exhaust file descriptors.
 
 The SQLite DB is opened read-only + immutable, one connection per worker
 thread (FastAPI runs sync endpoints in a thread pool, and a single sqlite3
 connection cannot serve concurrent queries even with check_same_thread=False).
-
-Three pre-instantiated singletons are exported: `primary` (the satellite/imagery
-mbtiles, default WebP), `dsg` (the DSG categorical overlay, PNG), and `mapbiomas`
-(the MapBiomas overlay, PNG, mapped to TileClass palette).
 """
 from __future__ import annotations
 import sqlite3
 import threading
+from collections import OrderedDict
 from pathlib import Path
 from typing import Optional
+
+from . import project_service
 
 
 class MBTilesReader:
@@ -45,8 +49,7 @@ class MBTilesReader:
             self._min_zoom = self._max_zoom = None
 
     def close(self) -> None:
-        """Release the path so is_open() → False. Thread-local connections
-        are cleaned up when their threads terminate (FastAPI threadpool lifecycle)."""
+        """Release the path so is_open() → False."""
         self._path = None
 
     def is_open(self) -> bool:
@@ -90,6 +93,95 @@ class MBTilesReader:
         return self._path
 
 
-primary = MBTilesReader("webp")
-dsg = MBTilesReader("png")
-mapbiomas = MBTilesReader("png")
+# ---- Reader pool ------------------------------------------------------------
+
+_DEFAULT_FORMATS = {
+    "primary": "webp",
+    "secondary": "webp",
+    "tertiary": "webp",
+    "ref_primary": "png",
+    "ref_secondary": "png",
+}
+
+# Bounded LRU: each open mbtiles holds one fd per worker thread, so 32 entries
+# × ~16 threads × 5 layers fits comfortably under typical fd limits (1024+).
+_MAX_OPEN = 32
+
+_pool_lock = threading.Lock()
+_pool: "OrderedDict[tuple[int, str], MBTilesReader]" = OrderedDict()
+
+
+def _close_evicted(reader: MBTilesReader) -> None:
+    try:
+        reader.close()
+    except Exception:
+        pass
+
+
+def get_reader(project_id: int, layer: str) -> Optional[MBTilesReader]:
+    """Return an opened reader for (project_id, layer), or None when the
+    project has no path configured for that layer or the file is missing.
+    Idempotent and thread-safe."""
+    if layer not in _DEFAULT_FORMATS:
+        return None
+    key = (project_id, layer)
+    with _pool_lock:
+        existing = _pool.get(key)
+        if existing is not None:
+            _pool.move_to_end(key)
+            if existing.is_open():
+                return existing
+    proj = project_service.get_project(project_id)
+    if not proj:
+        return None
+    column = project_service._LAYER_COLUMN[layer]
+    path = project_service.resolve_mbtiles_path(proj.get(column))
+    if path is None or not path.exists():
+        return None
+    reader = MBTilesReader(_DEFAULT_FORMATS[layer])
+    try:
+        reader.open(path)
+    except (FileNotFoundError, sqlite3.DatabaseError, sqlite3.OperationalError):
+        # File exists but isn't a valid mbtiles (test stubs, half-downloaded
+        # files, corrupt). Treat as "not configured" so callers can render a
+        # configured-but-not-open status without crashing the request.
+        return None
+    with _pool_lock:
+        _pool[key] = reader
+        _pool.move_to_end(key)
+        while len(_pool) > _MAX_OPEN:
+            _, evicted = _pool.popitem(last=False)
+            _close_evicted(evicted)
+    return reader
+
+
+def invalidate_project(project_id: int) -> None:
+    """Drop all cached readers for the given project. Called after a project
+    update changes any mbtiles path."""
+    with _pool_lock:
+        for key in list(_pool.keys()):
+            if key[0] == project_id:
+                _close_evicted(_pool.pop(key))
+
+
+def close_all() -> None:
+    with _pool_lock:
+        for r in _pool.values():
+            _close_evicted(r)
+        _pool.clear()
+
+
+def open_readers() -> dict:
+    """Snapshot of currently-pooled readers for the maintenance dashboard."""
+    with _pool_lock:
+        items = [(pid, layer, r) for (pid, layer), r in _pool.items()]
+    out = {}
+    for pid, layer, r in items:
+        out[f"{pid}:{layer}"] = {
+            "open": r.is_open(),
+            "format": r.tile_format(),
+            "min_zoom": r.zoom_range()[0],
+            "max_zoom": r.zoom_range()[1],
+            "path": str(r.path()) if r.path() else None,
+        }
+    return out

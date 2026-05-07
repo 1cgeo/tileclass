@@ -39,19 +39,27 @@ def test_overview_requires_admin(client, admin_user, operators):
 
 
 def test_overview_shape(client, admin_user):
-    """Whatever the real config opens (depends on the dev's data_external/),
-    each mbtiles slot reports a consistent shape: closed → just `open: False`,
-    open → all metadata keys present."""
+    """Each mbtiles slot reports a consistent shape both in the legacy
+    `mbtiles` block (default-project mirror) and in the new per-project
+    `projects` map. Closed → minimal payload; open → full reader metadata."""
     tok = token(client, admin_user["username"], admin_user["password"])
     body = client.get("/api/admin/maintenance/overview", headers=h(tok)).json()
-    assert set(body.keys()) == {"mbtiles", "overlay_cache"}
+    assert set(body.keys()) == {"mbtiles", "projects", "overlay_cache"}
+    # Legacy block: default project's primary/dsg/mapbiomas, derived from
+    # the per-project map below.
     for key in ("primary", "dsg", "mapbiomas"):
         info = body["mbtiles"][key]
         assert "open" in info, key
-        if info["open"]:
-            assert set(info) == {"open", "format", "min_zoom", "max_zoom", "path"}, key
-        else:
-            assert info == {"open": False}, key
+    # Per-project map keyed by project id (string) → name + layers.
+    assert body["projects"], "default project must appear in the per-project map"
+    for pid, payload in body["projects"].items():
+        assert "name" in payload and "layers" in payload, pid
+        for layer, info in payload["layers"].items():
+            assert "open" in info and "configured" in info, (pid, layer)
+            if info["open"]:
+                assert set(info) >= {
+                    "open", "configured", "format", "min_zoom", "max_zoom", "path"
+                }, (pid, layer)
     cache = body["overlay_cache"]
     assert cache["rendered_tiles"] == 0
     assert cache["empty_tiles"] == 0

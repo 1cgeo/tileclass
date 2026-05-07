@@ -9,7 +9,6 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.gzip import GZipMiddleware
 
 from . import mbtiles_service
-from .config import get_config
 from .database import init_db
 from .routers import admin as admin_router
 from .routers import auth as auth_router
@@ -44,30 +43,13 @@ def _friendly(message: str) -> str:
 FRONTEND_DIR = FsPath(__file__).parent.parent / "frontend"
 
 
-def _open_optional(section: dict | None, reader: mbtiles_service.MBTilesReader) -> None:
-    path = (section or {}).get("mbtiles_path")
-    if not path:
-        return
-    p = FsPath(path)
-    if not p.is_absolute():
-        p = FsPath(__file__).resolve().parent / p
-    if p.exists():
-        reader.open(p)
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
-    cfg = get_config()
-    _open_optional(cfg.get("tileserver"), mbtiles_service.primary)
-    _open_optional(cfg.get("dsg"), mbtiles_service.dsg)
-    _open_optional(cfg.get("mapbiomas"), mbtiles_service.mapbiomas)
     try:
         yield
     finally:
-        mbtiles_service.primary.close()
-        mbtiles_service.dsg.close()
-        mbtiles_service.mapbiomas.close()
+        mbtiles_service.close_all()
 
 
 app = FastAPI(title="TileClass", version="1.0.0", lifespan=lifespan)

@@ -1,11 +1,9 @@
-"""Project endpoints — list/details (any member) + admin CRUD.
+"""Project endpoints — list/details (any member) + admin CRUD + raw XYZ
+passthroughs. The XYZ endpoint pulls bytes from the per-project reader pool
+in mbtiles_service so layers stay scoped to a single project."""
+from fastapi import APIRouter, Depends, HTTPException, Response
 
-Layer-byte serving (`/api/projects/{id}/xyz/{layer}/...`) lives next to the
-mbtiles cache logic in routers/config.py to share the per-project reader pool.
-"""
-from fastapi import APIRouter, Depends, HTTPException
-
-from .. import auth, project_service
+from .. import auth, mbtiles_service, project_service
 from ..models import (
     ProjectCreateIn, ProjectUpdateIn, ProjectClassesIn, ProjectMemberIn,
 )
@@ -21,24 +19,88 @@ def list_projects(user: auth.CurrentUser = Depends(auth.get_current_user)):
     return project_service.list_projects_for_user(user.id, is_admin=user.role == "admin")
 
 
+def _build_layers(project_id: int, proj: dict) -> dict:
+    """Layer URL templates the editor consumes. Each entry includes the
+    extension (taken from the mbtiles metadata, falling back to a per-layer
+    default) so the editor can construct the final URL without round-tripping
+    to discover the format. Absent layers map to None — the client uses that
+    to suppress shortcuts/legend entries."""
+    base = f"/api/projects/{project_id}/xyz"
+    out = {}
+    layer_to_field = {
+        "primary": "primary_mbtiles",
+        "secondary": "secondary_mbtiles",
+        "tertiary": "tertiary_mbtiles",
+        "ref_primary": "ref_mask_primary_mbtiles",
+        "ref_secondary": "ref_mask_secondary_mbtiles",
+    }
+    for layer, field in layer_to_field.items():
+        if not proj.get(field):
+            out[layer] = None
+            continue
+        reader = mbtiles_service.get_reader(project_id, layer)
+        if reader is None:
+            # Path is set but file missing/unreadable. Surface that the layer
+            # is configured so the admin can spot the problem; client treats
+            # it as absent (no shortcut).
+            out[layer] = {
+                "url": None,
+                "ext": None,
+                "min_zoom": None,
+                "max_zoom": None,
+                "error": "mbtiles_not_open",
+            }
+            continue
+        ext = reader.tile_format()
+        zmin, zmax = reader.zoom_range()
+        out[layer] = {
+            "url": f"{base}/{layer}/{{z}}/{{x}}/{{y}}.{ext}",
+            "ext": ext,
+            "min_zoom": zmin,
+            "max_zoom": zmax,
+        }
+    return out
+
+
 @router.get("/{project_id}")
 def get_project(project_id: int, user: auth.CurrentUser = Depends(auth.get_current_user)):
     proj = project_service.get_project(project_id)
     if not proj:
         raise HTTPException(404, detail={"error": "project_not_found"})
     role = project_service.require_membership(project_id, user)
-    out = {**proj, "role": role}
-    # Layer URLs the editor will hit. Absent layers map to None so the client
-    # knows not to register the corresponding shortcut.
-    base = f"/api/projects/{project_id}/xyz"
-    out["layers"] = {
-        "primary": f"{base}/primary/{{z}}/{{x}}/{{y}}" if proj["primary_mbtiles"] else None,
-        "secondary": f"{base}/secondary/{{z}}/{{x}}/{{y}}" if proj["secondary_mbtiles"] else None,
-        "tertiary": f"{base}/tertiary/{{z}}/{{x}}/{{y}}" if proj["tertiary_mbtiles"] else None,
-        "ref_primary": f"{base}/ref_primary/{{z}}/{{x}}/{{y}}" if proj["ref_mask_primary_mbtiles"] else None,
-        "ref_secondary": f"{base}/ref_secondary/{{z}}/{{x}}/{{y}}" if proj["ref_mask_secondary_mbtiles"] else None,
-    }
-    return out
+    return {**proj, "role": role, "layers": _build_layers(project_id, proj)}
+
+
+# ---- XYZ passthrough --------------------------------------------------------
+
+_LAYER_DEFAULT_MEDIA = {
+    "webp": "image/webp",
+    "png": "image/png",
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+}
+
+
+@router.get("/{project_id}/xyz/{layer}/{z}/{x}/{y}.{ext}")
+def project_xyz(
+    project_id: int, layer: str, z: int, x: int, y: int, ext: str,
+    user: auth.CurrentUser = Depends(auth.get_current_user),
+):
+    project_service.require_membership(project_id, user)
+    reader = mbtiles_service.get_reader(project_id, layer)
+    if reader is None:
+        raise HTTPException(404, detail="layer not configured")
+    if ext.lower() != reader.tile_format():
+        raise HTTPException(404, detail="wrong extension")
+    data = reader.get_tile(z, x, y)
+    if data is None:
+        return Response(status_code=204)
+    media = _LAYER_DEFAULT_MEDIA.get(ext.lower(), f"image/{ext.lower()}")
+    return Response(
+        content=data,
+        media_type=media,
+        headers={"Cache-Control": "public, max-age=86400, immutable"},
+    )
 
 
 # ---- Admin write ------------------------------------------------------------

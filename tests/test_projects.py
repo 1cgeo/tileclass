@@ -1,4 +1,5 @@
 """Project CRUD + membership + class management."""
+import sqlite3
 import pytest
 from tests.conftest import token
 
@@ -13,6 +14,29 @@ def _stub_mbtiles(tmp_path, name="stub.mbtiles") -> str:
     p = tmp_path / name
     p.write_bytes(b"\x00")
     return str(p)
+
+
+def _real_mbtiles(tmp_path, name="real.mbtiles", *, fmt="png",
+                  tile_bytes=b"\x89PNG\r\n\x1a\n") -> str:
+    """Materialise a minimal but valid mbtiles file the reader pool can open
+    and answer get_tile() from. Single tile at z=0,x=0,y=0."""
+    path = tmp_path / name
+    if path.exists():
+        path.unlink()
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        "CREATE TABLE metadata(name TEXT, value TEXT);"
+        "CREATE TABLE tiles(zoom_level INT, tile_column INT, tile_row INT, tile_data BLOB,"
+        " PRIMARY KEY(zoom_level, tile_column, tile_row));"
+    )
+    conn.execute("INSERT INTO metadata VALUES('format',?)", (fmt,))
+    conn.execute("INSERT INTO metadata VALUES('minzoom','0'),('maxzoom','3')")
+    conn.execute(
+        "INSERT INTO tiles VALUES(0, 0, 0, ?)", (tile_bytes,)
+    )
+    conn.commit()
+    conn.close()
+    return str(path)
 
 
 # ---- Read paths -------------------------------------------------------------
@@ -37,11 +61,19 @@ def test_get_project_includes_classes_and_layers(client, admin_user):
     assert isinstance(body["classes"], list) and len(body["classes"]) >= 1
     assert all({"id", "name", "color"} <= set(c) for c in body["classes"])
     layers = body["layers"]
-    # Primary URL is always present in default seed (config.yaml has tileserver.mbtiles_path).
-    assert layers["primary"] == "/api/projects/1/xyz/primary/{z}/{x}/{y}"
-    # Optional layers default to None when config has no path or path is empty.
-    for k in ("secondary", "tertiary"):
-        assert layers[k] is None or layers[k].endswith("/{z}/{x}/{y}")
+    assert set(layers.keys()) == {
+        "primary", "secondary", "tertiary", "ref_primary", "ref_secondary"
+    }
+    # Each layer is None (no path configured / file missing without admin
+    # awareness yet) or a dict with a populated `url`/`error`. The default
+    # config.yaml's mbtiles paths point at data_external/ which doesn't ship
+    # in the repo, so all layers may be None — assertion stays loose to
+    # accommodate dev machines that have or don't have those files.
+    for v in layers.values():
+        if v is None:
+            continue
+        assert isinstance(v, dict)
+        assert "url" in v or "error" in v
 
 
 def test_member_sees_project_non_member_does_not(client, admin_user, operators, tmp_path):
@@ -244,3 +276,110 @@ def test_member_endpoints_require_admin(client, admin_user, operators):
         headers=h(op_tok),
     )
     assert r.status_code == 403
+
+
+# ---- XYZ endpoint -----------------------------------------------------------
+
+def test_xyz_serves_bytes_for_member(client, admin_user, operators, tmp_path):
+    """GET /api/projects/{id}/xyz/primary/{z}/{x}/{y}.png returns the tile
+    bytes stored in the project's primary mbtiles."""
+    admin_tok = token(client, admin_user["username"], admin_user["password"])
+    mb = _real_mbtiles(tmp_path)
+    new = client.post(
+        "/api/admin/projects",
+        json={
+            "name": "with-mbtiles",
+            "primary_mbtiles": mb,
+            "classes": [{"id": 1, "name": "x", "color": "#112233"}],
+        },
+        headers=h(admin_tok),
+    ).json()
+    pid = new["id"]
+    # Make op1 a member.
+    client.post(
+        f"/api/admin/projects/{pid}/members",
+        json={"user_id": operators[0]["id"], "role": "operator"},
+        headers=h(admin_tok),
+    )
+    op_tok = token(client, operators[0]["username"], operators[0]["password"])
+
+    r = client.get(f"/api/projects/{pid}/xyz/primary/0/0/0.png", headers=h(op_tok))
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "image/png"
+    # Body matches the bytes we seeded.
+    assert r.content.startswith(b"\x89PNG")
+
+
+def test_xyz_404_when_layer_unconfigured(client, admin_user, tmp_path):
+    """Asking for a layer the project hasn't set up returns 404."""
+    tok = token(client, admin_user["username"], admin_user["password"])
+    new = client.post(
+        "/api/admin/projects",
+        json={
+            "name": "primary-only",
+            "primary_mbtiles": _real_mbtiles(tmp_path),
+            "classes": [{"id": 1, "name": "x", "color": "#112233"}],
+        },
+        headers=h(tok),
+    ).json()
+    pid = new["id"]
+    r = client.get(f"/api/projects/{pid}/xyz/secondary/0/0/0.png", headers=h(tok))
+    assert r.status_code == 404
+
+
+def test_xyz_403_for_non_member(client, admin_user, operators, tmp_path):
+    """Operator who isn't a member of the project cannot fetch its layers
+    even if they're authenticated."""
+    admin_tok = token(client, admin_user["username"], admin_user["password"])
+    new = client.post(
+        "/api/admin/projects",
+        json={
+            "name": "isolated",
+            "primary_mbtiles": _real_mbtiles(tmp_path),
+            "classes": [{"id": 1, "name": "x", "color": "#112233"}],
+        },
+        headers=h(admin_tok),
+    ).json()
+    pid = new["id"]
+    op_tok = token(client, operators[0]["username"], operators[0]["password"])
+    r = client.get(f"/api/projects/{pid}/xyz/primary/0/0/0.png", headers=h(op_tok))
+    assert r.status_code == 403
+
+
+def test_xyz_extension_must_match_format(client, admin_user, tmp_path):
+    """An mbtiles whose metadata says format=png must reject .webp requests."""
+    tok = token(client, admin_user["username"], admin_user["password"])
+    new = client.post(
+        "/api/admin/projects",
+        json={
+            "name": "format-check",
+            "primary_mbtiles": _real_mbtiles(tmp_path, fmt="png"),
+            "classes": [{"id": 1, "name": "x", "color": "#112233"}],
+        },
+        headers=h(tok),
+    ).json()
+    pid = new["id"]
+    r = client.get(f"/api/projects/{pid}/xyz/primary/0/0/0.webp", headers=h(tok))
+    assert r.status_code == 404
+
+
+def test_layers_url_in_get_project_uses_real_format(client, admin_user, tmp_path):
+    """GET /api/projects/{id} reports layers with `url`/`ext` derived from
+    the actually-opened reader's metadata."""
+    tok = token(client, admin_user["username"], admin_user["password"])
+    new = client.post(
+        "/api/admin/projects",
+        json={
+            "name": "layers-meta",
+            "primary_mbtiles": _real_mbtiles(tmp_path, fmt="png"),
+            "classes": [{"id": 1, "name": "x", "color": "#112233"}],
+        },
+        headers=h(tok),
+    ).json()
+    pid = new["id"]
+    body = client.get(f"/api/projects/{pid}", headers=h(tok)).json()
+    primary = body["layers"]["primary"]
+    assert primary is not None
+    assert primary["ext"] == "png"
+    assert primary["url"].endswith("/{z}/{x}/{y}.png")
+    assert primary["min_zoom"] == 0 and primary["max_zoom"] == 3

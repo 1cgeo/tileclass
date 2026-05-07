@@ -61,6 +61,17 @@ def _invalidate(project_id: int | None = None) -> None:
             _PROJECT_CACHE.clear()
         else:
             _PROJECT_CACHE.pop(project_id, None)
+    # Drop any cached mbtiles readers for the project so the next tile fetch
+    # picks up new paths. Imported lazily to avoid a circular dependency with
+    # mbtiles_service (which imports project_service for path resolution).
+    try:
+        from . import mbtiles_service
+        if project_id is None:
+            mbtiles_service.close_all()
+        else:
+            mbtiles_service.invalidate_project(project_id)
+    except Exception:
+        pass
 
 
 # ---- Reads ------------------------------------------------------------------

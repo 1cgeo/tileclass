@@ -5,7 +5,7 @@ from enum import Enum
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response
 from fastapi.responses import JSONResponse
 
-from .. import auth, admin_service, mask_tile_service, mbtiles_service
+from .. import auth, admin_service, mask_tile_service, mbtiles_service, project_service
 from ..models import (
     AssignTileIn, BulkAssignIn, BulkReportProblemIn, BulkTileIdsIn,
     CreateUserIn, DashboardOut, ResetReasonIn, SetActiveIn, SetCanReviewIn,
@@ -274,13 +274,25 @@ def admin_set_user_role(body: SetRoleIn, user_id: int = Path(ge=1),
 
 # ---------- Maintenance ----------
 
-def _mbtiles_info(reader: mbtiles_service.MBTilesReader) -> dict:
-    if not reader.is_open():
-        return {"open": False}
+def _layer_info(project_id: int, layer: str) -> dict:
+    """Status of a single configured layer for a project. Returns
+    `{'open': False, 'configured': bool}` when the project has no path or
+    the file is missing; otherwise full reader metadata."""
+    proj = project_service.get_project(project_id)
+    if not proj:
+        return {"open": False, "configured": False}
+    column = project_service._LAYER_COLUMN[layer]
+    has_path = bool(proj.get(column))
+    if not has_path:
+        return {"open": False, "configured": False}
+    reader = mbtiles_service.get_reader(project_id, layer)
+    if reader is None or not reader.is_open():
+        return {"open": False, "configured": True, "path": proj.get(column)}
     lo, hi = reader.zoom_range()
     p = reader.path()
     return {
         "open": True,
+        "configured": True,
         "format": reader.tile_format(),
         "min_zoom": lo,
         "max_zoom": hi,
@@ -290,14 +302,41 @@ def _mbtiles_info(reader: mbtiles_service.MBTilesReader) -> dict:
 
 @router.get("/maintenance/overview")
 def admin_maintenance_overview():
-    """State of the optional MBTiles readers + size/contents of the on-disk
-    overlay cache. Powers the admin Manutenção tab; safe to poll."""
+    """State of mbtiles readers (per project × layer) + size/contents of the
+    on-disk overlay cache. Powers the admin Manutenção tab; safe to poll."""
+    from ..database import connect
+    conn = connect()
+    try:
+        rows = conn.execute(
+            "SELECT id, name FROM projects WHERE active=1 ORDER BY id"
+        ).fetchall()
+    finally:
+        conn.close()
+    projects_layers = {}
+    for r in rows:
+        pid = r["id"]
+        projects_layers[pid] = {
+            "name": r["name"],
+            "layers": {
+                layer: _layer_info(pid, layer)
+                for layer in ("primary", "secondary", "tertiary",
+                              "ref_primary", "ref_secondary")
+            },
+        }
+    # Legacy shape for the SPA's existing maintenance widget — populated from
+    # the default project so the screen keeps rendering until the admin UI is
+    # rebuilt for projects (step 7).
+    default = next(iter(projects_layers.values()), None)
+    legacy_default = {}
+    if default:
+        legacy_default = {
+            "primary": default["layers"]["primary"],
+            "dsg": default["layers"]["ref_primary"],
+            "mapbiomas": default["layers"]["ref_secondary"],
+        }
     return {
-        "mbtiles": {
-            "primary": _mbtiles_info(mbtiles_service.primary),
-            "dsg": _mbtiles_info(mbtiles_service.dsg),
-            "mapbiomas": _mbtiles_info(mbtiles_service.mapbiomas),
-        },
+        "mbtiles": legacy_default,
+        "projects": projects_layers,
         "overlay_cache": mask_tile_service.cache_stats(),
     }
 
