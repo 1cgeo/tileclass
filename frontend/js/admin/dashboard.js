@@ -75,6 +75,8 @@ export async function renderDashboard(root) {
         root.appendChild(row);
     }
 
+    await renderClassDistribution(root);
+
     const opH = document.createElement("h3");
     opH.textContent = "Por operador";
     opH.style.marginTop = "16px";
@@ -172,4 +174,43 @@ function statCard(label, value) {
     const l = document.createElement("div"); l.className = "label"; l.textContent = label;
     d.append(v, l);
     return d;
+}
+
+
+async function renderClassDistribution(root) {
+    let dist = [];
+    try { dist = await apiGet("/api/admin/class-distribution"); } catch { return; }
+    if (!dist.length) return;
+    const h = document.createElement("h3");
+    h.textContent = "Distribuição por classe (pixels classificados)";
+    root.appendChild(h);
+    const note = document.createElement("p");
+    note.className = "muted";
+    note.style.fontSize = "12px";
+    note.textContent = "Tiles antigos sem cache aparecem zerados — rode `python -m backend.scripts.recompute_class_counts` para preencher.";
+    root.appendChild(note);
+    const total = dist.reduce((s, c) => s + c.pixels, 0) || 1;
+    for (const c of dist) {
+        const row = document.createElement("div");
+        row.className = "bar-row";
+        const name = document.createElement("span");
+        name.className = "name";
+        const swatch = document.createElement("span");
+        swatch.style.cssText =
+            `display:inline-block;width:10px;height:10px;background:${c.color};margin-right:6px;border-radius:2px;border:1px solid rgba(0,0,0,.2);vertical-align:middle`;
+        name.appendChild(swatch);
+        name.append(document.createTextNode(c.name));
+        const wrap = document.createElement("span");
+        wrap.className = "bar-wrap";
+        const bar = document.createElement("span");
+        bar.className = "bar";
+        bar.style.width = `${(c.pixels / total) * 100}%`;
+        bar.style.background = c.color;
+        wrap.appendChild(bar);
+        const count = document.createElement("span");
+        count.className = "count";
+        count.textContent = `${c.pct}% (${c.pixels.toLocaleString("pt-BR")})`;
+        row.append(name, wrap, count);
+        root.appendChild(row);
+    }
 }

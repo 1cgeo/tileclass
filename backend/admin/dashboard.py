@@ -58,6 +58,62 @@ def _cycle_durations(conn, assign_action: str, done_action: str,
     ).fetchall()
 
 
+def class_distribution(project_id: int | None = None) -> list[dict]:
+    """Pixel counts per class across every classified/reviewed tile, joined
+    with the project's class metadata so the dashboard can render colored
+    bars without an extra round-trip.
+
+    Reads `tiles.class_counts` (cached at submit). Tiles not yet classified
+    are NULL and contribute nothing; running `recompute_class_counts.py`
+    backfills legacy DBs."""
+    import json
+    proj_clause, proj_args = _scope(project_id)
+    where_proj = ("WHERE 1=1" + proj_clause) if proj_clause else ""
+    conn = connect()
+    try:
+        rows = conn.execute(
+            f"SELECT project_id, class_counts FROM tiles {where_proj}",
+            proj_args,
+        ).fetchall()
+        # totals[(pid, class_id)] = pixels
+        totals: dict[tuple[int, int], int] = {}
+        for r in rows:
+            if not r["class_counts"]:
+                continue
+            try:
+                cc = json.loads(r["class_counts"])
+            except (TypeError, ValueError):
+                continue
+            for cid_str, count in cc.items():
+                key = (r["project_id"], int(cid_str))
+                totals[key] = totals.get(key, 0) + int(count)
+
+        # Resolve names + colors per project. One query per distinct project.
+        seen_projects = {pid for (pid, _) in totals}
+        names: dict[tuple[int, int], tuple[str, str]] = {}
+        for pid in seen_projects:
+            for c in conn.execute(
+                "SELECT class_id, name, color FROM project_classes WHERE project_id=?",
+                (pid,),
+            ).fetchall():
+                names[(pid, c["class_id"])] = (c["name"], c["color"])
+    finally:
+        conn.close()
+    grand = sum(totals.values()) or 1
+    out = []
+    for (pid, cid), pixels in sorted(totals.items(), key=lambda kv: (-kv[1],)):
+        name, color = names.get((pid, cid), (f"#{cid}", "#888888"))
+        out.append({
+            "project_id": pid,
+            "class_id": cid,
+            "name": name,
+            "color": color,
+            "pixels": pixels,
+            "pct": round(100.0 * pixels / grand, 2),
+        })
+    return out
+
+
 def dashboard(project_id: int | None = None) -> dict:
     proj_clause, proj_args = _scope(project_id)
     where_proj = ("WHERE 1=1" + proj_clause) if proj_clause else ""

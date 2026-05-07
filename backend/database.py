@@ -102,7 +102,12 @@ CREATE TABLE IF NOT EXISTS tiles (
     problem_note TEXT,
     version INTEGER NOT NULL DEFAULT 1,
     paused_at TEXT,
-    blocked_from TEXT
+    blocked_from TEXT,
+    -- JSON: {"<class_id>": <pixel_count>, ...}. Populated on submit; null
+    -- when the tile has never been classified. Used by the dashboard's
+    -- class-distribution panel without re-decoding masks.
+    class_counts TEXT,
+    last_heartbeat_at TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_tiles_status ON tiles(status);
@@ -219,16 +224,20 @@ def _rebuild_tiles_with_project_not_null(conn: sqlite3.Connection) -> None:
             problem_note TEXT,
             version INTEGER NOT NULL DEFAULT 1,
             paused_at TEXT,
-            blocked_from TEXT
+            blocked_from TEXT,
+            class_counts TEXT,
+            last_heartbeat_at TEXT
         )"""
     )
     conn.execute(
         """INSERT INTO tiles_new (id, project_id, name, bbox_west, bbox_south, bbox_east, bbox_north,
            status, assigned_to, classified_by, reviewed_by, classified_at, reviewed_at,
-           data_png, problem_note, version, paused_at, blocked_from)
+           data_png, problem_note, version, paused_at, blocked_from,
+           class_counts, last_heartbeat_at)
            SELECT id, project_id, name, bbox_west, bbox_south, bbox_east, bbox_north,
                   status, assigned_to, classified_by, reviewed_by, classified_at, reviewed_at,
-                  data_png, problem_note, version, paused_at, blocked_from
+                  data_png, problem_note, version, paused_at, blocked_from,
+                  class_counts, last_heartbeat_at
            FROM tiles"""
     )
     conn.execute("DROP TABLE tiles")
@@ -258,6 +267,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if "blocked_from" not in cols:
         # Remembers which status to restore on unblock. Set only when status='blocked'.
         conn.execute("ALTER TABLE tiles ADD COLUMN blocked_from TEXT")
+    if "class_counts" not in cols:
+        # JSON pixel-count cache populated on submit; legacy tiles stay NULL
+        # until `recompute_class_counts.py` is run.
+        conn.execute("ALTER TABLE tiles ADD COLUMN class_counts TEXT")
+    if "last_heartbeat_at" not in cols:
+        # ISO8601 timestamp the editor pings while the tile is open. Stale
+        # heartbeat → auto-pause sweep takes over and frees the slot.
+        conn.execute("ALTER TABLE tiles ADD COLUMN last_heartbeat_at TEXT")
     # Indices on migrated columns must run after the ALTER above (cannot live
     # in SCHEMA because executescript runs before this fn on existing DBs).
     conn.execute(

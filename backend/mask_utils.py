@@ -73,6 +73,15 @@ def validate_submission(
     return missing == 0, missing
 
 
+def class_counts(raw: bytes) -> dict[int, int]:
+    """Pixel count per class id present in `raw` (255/unfilled excluded).
+    Returned as plain dict so callers can json-dump straight to the DB.
+    Cheap C-loop count via numpy.bincount."""
+    arr = np.frombuffer(raw, dtype=np.uint8)
+    counts = np.bincount(arr, minlength=256)
+    return {int(i): int(counts[i]) for i in range(255) if counts[i]}
+
+
 def _default_project_class_ids() -> list[int]:
     """Look up the default project's class ids without requiring callers to
     pass them. Used as a fallback for legacy code paths still being migrated."""

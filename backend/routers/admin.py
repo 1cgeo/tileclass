@@ -40,6 +40,14 @@ def admin_dashboard(project_id: int | None = Query(default=None, ge=1)):
     return admin_service.dashboard(project_id=project_id)
 
 
+@router.get("/class-distribution")
+def admin_class_distribution(project_id: int | None = Query(default=None, ge=1)):
+    """Per-class pixel totals across classified/reviewed tiles, ready to
+    feed a stacked bar in the dashboard. Tiles with no class_counts cache
+    are skipped — run scripts/recompute_class_counts.py to backfill."""
+    return admin_service.class_distribution(project_id=project_id)
+
+
 _TILE_SORT_KEYS = {
     "id", "name", "status",
     "classified_by_username", "reviewed_by_username",

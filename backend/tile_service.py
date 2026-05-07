@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 import json
 from fastapi import HTTPException
 from .database import connect, transaction, log_action, now_iso
-from .mask_utils import encode_mask, decode_mask, empty_mask_png, validate_submission, validate_partial
+from .mask_utils import encode_mask, decode_mask, empty_mask_png, validate_submission, validate_partial, class_counts
 from . import mask_tile_service, project_service
 
 
@@ -409,21 +409,24 @@ def submit_classification(tile_id: int, user_id: int, raw_mask: bytes,
             )
         if row["assigned_to"] != user_id:
             raise HTTPException(403, "not assigned to you")
+        # Pixel-count cache for the dashboard's class-distribution panel —
+        # avoids re-decoding the mask on every aggregate.
+        cc_json = json.dumps(class_counts(raw_mask), separators=(",", ":"))
         status = row["status"]
         if status == "in_progress":
             conn.execute(
                 """UPDATE tiles SET status='classified', data_png=?, classified_by=?,
-                   classified_at=?, assigned_to=NULL, paused_at=NULL, version=version+1
-                   WHERE id=?""",
-                (png, user_id, now_iso(), tile_id),
+                   classified_at=?, assigned_to=NULL, paused_at=NULL, version=version+1,
+                   class_counts=? WHERE id=?""",
+                (png, user_id, now_iso(), cc_json, tile_id),
             )
             log_action(conn, user_id, tile_id, "classify")
         elif status == "in_review":
             conn.execute(
                 """UPDATE tiles SET status='reviewed', data_png=?, reviewed_by=?,
-                   reviewed_at=?, assigned_to=NULL, paused_at=NULL, version=version+1
-                   WHERE id=?""",
-                (png, user_id, now_iso(), tile_id),
+                   reviewed_at=?, assigned_to=NULL, paused_at=NULL, version=version+1,
+                   class_counts=? WHERE id=?""",
+                (png, user_id, now_iso(), cc_json, tile_id),
             )
             log_action(conn, user_id, tile_id, "review")
         else:
