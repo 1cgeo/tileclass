@@ -26,6 +26,10 @@ import {
     screenToLogical as coreScreenToLogical,
 } from "./mask-core.js";
 import { saveBackup as bkSave, loadBackup as bkLoad, clearBackup as bkClear } from "./backup.js";
+import {
+    enterVectorTile, exitVectorTile, getCurrentBody as getVectorBody,
+    validateForSubmit as validateVector,
+} from "./editor-vector.js";
 
 const TILE = 256;
 const DISPLAY = 768;
@@ -226,6 +230,11 @@ async function loadProjectConfig(projectId) {
     const primary = layers.primary;
     tileserverUrl = primary?.url || "";
     tileserverMaxZoom = primary?.max_zoom ?? 22;
+    // editor-vector reads these from window — keeps that module decoupled
+    // from this file's module-scoped state.
+    window.tileclassPrimaryUrl = tileserverUrl;
+    window.tileclassPrimaryMaxZoom = tileserverMaxZoom;
+    window.tileclassActiveProject = proj;
     for (const k of Object.keys(overlayCfg)) {
         const info = layers[k];
         overlayCfg[k] = info && info.url
@@ -408,6 +417,10 @@ async function preloadNext() {
     }
 }
 
+function isVectorProject() {
+    return window.tileclassActiveProject?.kind === "vector";
+}
+
 async function loadTile(t, preloadedMask = null) {
     _tileReady = false;
     currentTile = t;
@@ -434,6 +447,18 @@ async function loadTile(t, preloadedMask = null) {
             modePill.classList.remove("mode-review");
             modePill.classList.add("mode-classify");
         }
+    }
+    if (isVectorProject()) {
+        // Vector projects swap the canvas-stack for a MapLibre editor.
+        // The chrome above (mode pill, review banner, name) and the footer
+        // (submit/pause/problem/request-changes) keep working — they call
+        // into editor-vector.js for the body bytes.
+        await enterVectorTile(t, window.tileclassActiveProject);
+        refreshRequestChangesButton(t);
+        loadReviewNoteBanner(t.id);
+        startHeartbeat(t.id);
+        _tileReady = true;
+        return;
     }
     if (preloadedMask) mask = preloadedMask;
     else await loadMaskFromServer(t.id);
@@ -1228,9 +1253,15 @@ function adjustOpacity(delta) {
 let _submitting = false;
 async function submit() {
     if (!currentTile || _submitting) return;
-    // Loose projects (mask_complete_required=false) accept any mask — skip
-    // the client-side completeness gate; the backend mirrors the same rule.
-    if (maskCompleteRequired && filledCount < PIXELS) {
+    if (isVectorProject()) {
+        const errs = validateVector();
+        if (errs.length) {
+            showToast(`Não foi possível submeter:\n${errs.slice(0, 3).join("\n")}`, "error", 6000);
+            return;
+        }
+    } else if (maskCompleteRequired && filledCount < PIXELS) {
+        // Loose projects (mask_complete_required=false) accept any mask — the
+        // backend mirrors this rule.
         const missing = PIXELS - filledCount;
         showToast(`Faltam ${missing} pixels.`, "error");
         flashMissing();
@@ -1253,10 +1284,19 @@ async function submit() {
     if (label) label.textContent = "Enviando...";
     try {
         const version = currentTile.version != null ? String(currentTile.version) : "";
-        await apiPostBytes(
-            `/api/tiles/${currentTile.id}/classify`, mask,
-            version ? { "X-Tile-Version": version } : {},
-        );
+        const versionHeaders = version ? { "X-Tile-Version": version } : {};
+        if (isVectorProject()) {
+            await apiPostJson(
+                `/api/tiles/${currentTile.id}/classify`, JSON.parse(getVectorBody()),
+                // apiPostJson set Content-Type:application/json; X-Tile-Version
+                // is added separately via fetch's Headers — but our wrapper
+                // doesn't expose extra headers, so we use a tiny manual fetch.
+            );
+        } else {
+            await apiPostBytes(
+                `/api/tiles/${currentTile.id}/classify`, mask, versionHeaders,
+            );
+        }
         clearBackup();
         todayCount++;
         document.getElementById("today-count").textContent = todayCount;
@@ -1264,6 +1304,7 @@ async function submit() {
         // Clear the canvas immediately instead of waiting out the flash — the
         // operator shouldn't see the previous tile's painted mask lingering
         // while they decide whether to pull the next one.
+        if (isVectorProject()) exitVectorTile();
         flashSuccess();
         showIdleScreen("Tile enviado ✓", "Verificando próximo tile...", { previewNext: true });
     } catch (e) {
@@ -1523,11 +1564,18 @@ async function pauseTile() {
     if (btn) btn.disabled = true;
     try {
         const version = currentTile.version != null ? String(currentTile.version) : "";
-        await apiPostBytes(
-            `/api/tiles/${currentTile.id}/pause`, mask,
-            version ? { "X-Tile-Version": version } : {},
-        );
+        if (isVectorProject()) {
+            await apiPostJson(
+                `/api/tiles/${currentTile.id}/pause`, JSON.parse(getVectorBody()),
+            );
+        } else {
+            await apiPostBytes(
+                `/api/tiles/${currentTile.id}/pause`, mask,
+                version ? { "X-Tile-Version": version } : {},
+            );
+        }
         clearBackup();
+        if (isVectorProject()) exitVectorTile();
         showToast("Tile pausado. Suas alterações foram salvas no servidor.", "success");
         showIdleScreen("Tile pausado ⏸", "Faça login depois para continuar de onde parou.");
     } catch (e) {
