@@ -278,6 +278,64 @@ def test_member_endpoints_require_admin(client, admin_user, operators):
     assert r.status_code == 403
 
 
+# ---- Delete -----------------------------------------------------------------
+
+def test_delete_empty_project(client, admin_user, tmp_path):
+    """A project with no tiles can be hard-deleted; classes and members are
+    cascaded by the schema and the project disappears from the list."""
+    tok = token(client, admin_user["username"], admin_user["password"])
+    new = client.post(
+        "/api/admin/projects",
+        json={
+            "name": "to-delete",
+            "primary_mbtiles": _stub_mbtiles(tmp_path),
+            "classes": [{"id": 1, "name": "x", "color": "#000000"}],
+        },
+        headers=h(tok),
+    ).json()
+    pid = new["id"]
+    r = client.delete(f"/api/admin/projects/{pid}", headers=h(tok))
+    assert r.status_code == 200
+    # Now gone.
+    assert client.get(f"/api/projects/{pid}", headers=h(tok)).status_code == 404
+
+
+def test_delete_project_with_tiles_blocked(client, admin_user, tiles):
+    """Default project has 10 tiles after the fixture; deleting must 409."""
+    tok = token(client, admin_user["username"], admin_user["password"])
+    r = client.delete("/api/admin/projects/1", headers=h(tok))
+    assert r.status_code == 409
+    assert r.json()["detail"]["error"] == "project_has_tiles"
+    assert r.json()["detail"]["tile_count"] == 10
+
+
+# ---- Inactive project blocks distribution ----------------------------------
+
+def test_inactive_project_blocks_next(client, admin_user, operators, tiles):
+    """Setting active=False stops /next from handing out tiles, even though
+    membership and tiles are intact. Existing tiles can still be inspected
+    (queue-stats, dashboard) for reporting."""
+    adm = token(client, admin_user["username"], admin_user["password"])
+    op = operators[0]
+    op_tok = token(client, op["username"], op["password"])
+
+    # Sanity: /next works while active.
+    r = client.get("/api/tiles/next?project_id=1", headers=h(op_tok))
+    assert r.status_code == 200
+
+    # Disable the project.
+    client.patch("/api/admin/projects/1", json={"active": False}, headers=h(adm))
+
+    # /next is now blocked with a project-specific error code.
+    r = client.get("/api/tiles/next?project_id=1", headers=h(op_tok))
+    assert r.status_code == 409
+    assert r.json()["detail"]["error"] == "project_inactive"
+
+    # Read-only queue stats keep working — admins still need the totals.
+    r = client.get("/api/tiles/queue-stats?project_id=1", headers=h(op_tok))
+    assert r.status_code == 200
+
+
 # ---- XYZ endpoint -----------------------------------------------------------
 
 def test_xyz_serves_bytes_for_member(client, admin_user, operators, tmp_path):

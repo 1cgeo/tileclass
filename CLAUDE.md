@@ -1,9 +1,9 @@
 # TileClass
 
-Aplicação web para classificação pixel-a-pixel de tiles de satélite (256×256 @ **2.5 m/pixel** = **640 m × 640 m** no chão, 6 classes).
-Backend FastAPI + SQLite; frontend Vanilla JS com Canvas HTML5. Imagem de fundo via TileServer-GL (XYZ).
+Aplicação web para classificação pixel-a-pixel de tiles de satélite (256×256 @ **2.5 m/pixel** = **640 m × 640 m** no chão).
+Backend FastAPI + SQLite; frontend Vanilla JS com Canvas HTML5. Imagem de fundo via mbtiles XYZ por projeto.
 
-**Classes (config.yaml):** Massa d'água (#377eb8 azul), Área edificada (#e41a1c vermelho), Floresta (#4daf4a verde), Campo (#ffff33 amarelo), Cultivo (#984ea3 roxo), Terreno exposto (#ff7f00 laranja). Paleta ColorBrewer Set1 — contrastantes entre si e visíveis sobre Sentinel-2.
+**Projetos:** classes, paleta de cores, mbtiles (imagem primária/secundária/terciária + duas máscaras de referência) e a flag `mask_complete_required` vivem por projeto. Tiles, membership de operador/revisor e o dashboard são todos escopados por `project_id`. O `config.yaml` é seed para o projeto "default" criado no primeiro `init_db()`; depois disso a fonte de verdade são as tabelas `projects/project_classes/project_members`.
 
 Spec completa: `docs/requirements.md`. Em caso de dúvida, o requirements manda.
 
@@ -12,7 +12,7 @@ Spec completa: `docs/requirements.md`. Em caso de dúvida, o requirements manda.
 - **Backend:** Python 3.11+, FastAPI, Uvicorn, SQLite (sqlite3 nativo — **sem ORM**), PyJWT, bcrypt, Pillow, NumPy, PyYAML, rasterio (export), pyproj (geodésica WGS84)
 - **Frontend:** Vanilla JS (sem framework), Canvas HTML5, fetch API. MapLibre GL JS (via CDN) para renderização georreferenciada dos tiles XYZ. Servido como estático pelo FastAPI.
 - **Testes:** pytest + httpx (backend), Vitest + jsdom (frontend unit), Puppeteer + uvicorn real (E2E)
-- **Config:** `backend/config.yaml` (classes, TileServer URL, JWT secret, DB path). Override por env: `TILECLASS_CONFIG=<path>` (usado nos E2E). Rate limit desligável via `TILECLASS_DISABLE_RATE_LIMIT=1` (apenas E2E — nunca em produção).
+- **Config:** `backend/config.yaml` mantém apenas `database.path`, `auth.jwt_secret`, `mask_overlay` e o bloco seed `default_project`/`classes`/`tileserver*`/`dsg`/`mapbiomas` — usados **uma única vez** para criar o projeto default. Override por env: `TILECLASS_CONFIG=<path>` (usado nos E2E). Rate limit desligável via `TILECLASS_DISABLE_RATE_LIMIT=1` (apenas E2E — nunca em produção).
 
 ## Comandos
 
@@ -26,11 +26,11 @@ uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
 
 # Scripts CLI (rodar como módulo para imports relativos funcionarem)
 python -m backend.scripts.create_admin
-python -m backend.scripts.import_points --point <lat> <lon> <name>          # um ponto
-python -m backend.scripts.import_points --csv pontos.csv [--block 3]        # CSV lat,lon,name; block NxN
-python -m backend.scripts.import_cq_tiles --geoparquet cq_selection.geoparquet [--seed empty|raw]
-python -m backend.scripts.import_qc_tiles --csv qc_tiles.csv --bdf-dir <dir>
-python -m backend.scripts.export_tiles <out_dir> [--status reviewed|reviewed+classified] [--raw] [--mosaic] [--manifest <path>]
+python -m backend.scripts.import_points --point <lat> <lon> <name> [--project <id|name>]   # um ponto
+python -m backend.scripts.import_points --csv pontos.csv [--block 3] [--project <id|name>] # CSV lat,lon,name; block NxN
+python -m backend.scripts.import_cq_tiles --geoparquet cq_selection.geoparquet [--seed empty|raw] [--project <id|name>]
+python -m backend.scripts.import_qc_tiles --csv qc_tiles.csv --bdf-dir <dir> [--project <id|name>]
+python -m backend.scripts.export_tiles <out_dir> [--status reviewed|reviewed+classified] [--raw] [--mosaic] [--manifest <path>] [--project <id|name>]
 python -m backend.scripts.build_mbtiles <raster_in> <out.mbtiles>           # raster grande → tiles XYZ
 python -m backend.scripts.build_xyz_pyramid <raster_in> <out_dir>            # alternativa em disco
 python -m backend.scripts.merge_db <other.db>                                # funde tileclass.db de outra equipe
@@ -52,14 +52,16 @@ tileclass/
 │   ├── main.py                 # FastAPI app + lifespan + middleware + static SPA
 │   ├── routers/                # FastAPI APIRouters (registrados no main.py)
 │   │   ├── auth.py             # /api/auth/{login,refresh,me,logout}
+│   │   ├── projects.py         # /api/projects + /api/projects/{id} + /api/projects/{id}/xyz/{layer}/{z}/{x}/{y}.{ext}
+│   │   │                        # + admin /api/admin/projects[...] CRUD/classes/members
 │   │   ├── operator.py         # /api/tiles/* + /api/me/stats-today + helpers de body de máscara
-│   │   ├── admin.py            # /api/admin/* (dashboard, tiles, users, mask overlay)
-│   │   └── config.py           # /api/config/{classes,tileserver} + /api/{xyz,dsg,mb}/{z}/{x}/{y}.<ext>
+│   │   └── admin.py            # /api/admin/* (dashboard, tiles, users, mask overlay) — todos com ?project_id= opcional
 │   ├── auth.py                 # JWT, bcrypt, rate limit, blacklist, role middleware
 │   ├── models.py               # Schemas Pydantic
 │   ├── database.py             # Conexão SQLite (WAL), schema, transaction(), log_action
 │   ├── config.py               # Carrega config.yaml (singleton cache)
-│   ├── tile_service.py         # Fila, atribuição atômica, submit, problema, pause/resume, histórico
+│   ├── project_service.py      # CRUD de projetos + classes + membros, cache + path validation, require_membership
+│   ├── tile_service.py         # Fila, atribuição atômica, submit, problema, pause/resume, histórico — escopados por project_id
 │   ├── admin_service.py        # Fachada — re-exporta de backend/admin/
 │   ├── admin/                  # Submódulos do admin (split de admin_service.py)
 │   │   ├── dashboard.py        # /admin/dashboard + _cycle_durations (CTE pause/resume aware)
@@ -67,9 +69,9 @@ tileclass/
 │   │   ├── tiles_mutations.py  # reset/problem/re-review/assign/unassign/pause/delete/block/unblock (atômicos)
 │   │   ├── users.py            # list/create + can_review/role/active toggles
 │   │   └── thumbnails.py       # tile_thumbnail (mask colorizada) + tile_satellite_thumbnail
-│   ├── mask_utils.py           # Uint8Array ↔ PNG "L" + validação (IDs derivados do config)
+│   ├── mask_utils.py           # Uint8Array ↔ PNG "L" + validação (allowed_ids do projeto, require_complete por projeto)
 │   ├── mask_tile_service.py    # Cache mbtiles do overlay admin (rasteriza máscaras → XYZ)
-│   ├── mbtiles_service.py      # Reader read-only (singletons primary/dsg/mb, conn por thread)
+│   ├── mbtiles_service.py      # Pool LRU de readers por (project_id, layer); 5 layers × N projetos
 │   ├── geo.py                  # TILE_PX/METERS_PER_PX/TILE_METERS + bbox_from_center (pyproj.Geod WGS84)
 │   ├── tile_grid.py            # Helpers Web Mercator (build_mbtiles e import_cq)
 │   ├── config.yaml
@@ -87,7 +89,7 @@ tileclass/
 │       ├── mask-core.js        # Lógica PURA (paint, Bresenham, flood, undo, screenToLogical) — testável sem DOM
 │       ├── backup.js           # localStorage backup (round-trip Uint8Array ↔ base64) — testável sem DOM
 │       ├── admin.js            # Orquestrador admin (tiles, users, viewer)
-│       ├── admin/               # Submódulos: dashboard.js, modals.js
+│       ├── admin/               # Submódulos: dashboard.js, modals.js, projects.js (CRUD/classes/members)
 │       ├── minimap.js          # MapLibre 3×3 com highlight do tile atual
 │       ├── maplib.js           # Helpers MapLibre (createLockedMap, setMapBbox)
 │       ├── utils.js            # hexToRgb, blobToImage, escapeHtml
@@ -108,11 +110,46 @@ tileclass/
 - **Comentários, docstrings, nomes de variável/função:** Inglês.
 - **Campos de banco e API JSON:** Inglês (`status`, `assigned_to`, `classified_at`).
 
+## Projetos
+
+Cada projeto define seu próprio mundo de classificação. As tabelas-chave são `projects`, `project_classes` (PK `(project_id, class_id)`) e `project_members` (PK `(project_id, user_id)` com role `operator|reviewer|admin`). `tiles.project_id` é `NOT NULL` e referencia `projects(id)`.
+
+**Layers (mbtiles, paths relativos a `backend/`):**
+
+| Coluna | Layer (frontend) | Atalho | Obrigatório |
+|---|---|---|---|
+| `primary_mbtiles` | `primary` | — (fundo) | **sim** |
+| `secondary_mbtiles` | `secondary` | `D` (hold) | não |
+| `tertiary_mbtiles` | `tertiary` | `R` (hold) | não |
+| `ref_mask_primary_mbtiles` | `ref_primary` | `T` (hold) | não |
+| `ref_mask_secondary_mbtiles` | `ref_secondary` | `Y` (hold) | não |
+
+Layers ausentes não registram atalho nem aparecem na sidebar/cheat-sheet (`rebuildShortcutMap` filtra `KEY_TO_OVERLAY` em runtime). `ref_*` são overlays de referência (raster categorizado, não-editável); ao serem segurados, escondem a máscara do operador (`HIDE_MASK_OVERLAYS`).
+
+**`mask_complete_required`:** quando `True` (default), submit rejeita pixels=255 com `unfilled_pixels`; quando `False`, aceita. Frontend espelha o gate: `updateSubmitButton` só pinta `incomplete` no projeto estrito.
+
+**Membership e bloqueio:**
+- Operador só vê tiles do projeto onde é membro. Admins globais veem todos.
+- `users.can_review` virou um veto temporário: `False` impede review queue mesmo se a membership for `reviewer`. Será removido quando a UI completar a migração para roles por projeto.
+- Soft-disable: `PATCH /api/admin/projects/{id}` com `active=False` mantém todos os dados mas `/next` e `/next-preview` retornam 409 `project_inactive`. Stats/dashboard continuam respondendo. Operador termina o tile que já tem antes do bloqueio.
+- Hard-delete: `DELETE /api/admin/projects/{id}` só funciona se o projeto não tem tiles. Caso contrário 409 `project_has_tiles` — desative em vez de excluir.
+
+**Fluxo do editor:**
+1. `apiGet("/api/projects")` ao login. Único projeto → seleção automática; múltiplos → dropdown `#project-picker` no header (persistido em `localStorage["tileclass_active_project_id"]`).
+2. `apiGet("/api/projects/{id}")` carrega `classes`, `mask_complete_required`, e `layers` com URLs prontas (`/api/projects/{id}/xyz/{layer}/{z}/{x}/{y}.{ext}`).
+3. Toda chamada de fila (`/api/tiles/next`, `/next-preview`, `/queue-stats`, `/me/stats-today`, `/tiles/assigned`) passa `?project_id=<id>`. Quando o usuário tem só uma membership o param pode ser omitido; com múltiplas, o backend devolve 400 `project_id_required`.
+
+**Migração (idempotente, em `database.py`):** DBs pré-projetos ganham um projeto "default" semeado a partir de `config.yaml.classes/tileserver/dsg/mapbiomas`; todos os tiles existentes recebem `project_id=<default>`; usuários ativos viram membros com role derivada de `role+can_review`. A coluna é tornada `NOT NULL` via tabela espelho. DBs novos passam pela mesma seed automaticamente em `init_db()`.
+
+**Pool de mbtiles readers:** `mbtiles_service` mantém um LRU de até 32 readers, chaveado por `(project_id, layer)`. Editar paths via admin invalida o reader correspondente. Arquivos inválidos/corruptos são tolerados (reader fica `closed`, layer some do payload).
+
+**Regra inegociável de classes:** renomear/recolorir IDs é livre; **remover** uma classe é rejeitado quando o projeto tem qualquer tile (bytes da máscara são imutáveis e podem referenciar o ID removido). Adicionar novos IDs é livre.
+
 ## Invariantes do domínio
 
 - **Geometria do tile (backend/geo.py):** `TILE_PX=256`, `METERS_PER_PX=2.5`, `TILE_METERS=640`. Cada tile é definido **pelo centro geodésico**. `bbox_from_center(lat, lon)` usa `pyproj.Geod` (WGS84) para calcular ±320 m em cada direção cardeal — precisão < 1 mm em qualquer latitude. Schema de `tiles` tem apenas `bbox_*`; zoom/tile_x/tile_y/context_tiles foram removidos.
 - **Adjacência sem gap:** `offset_center(lat, lon, dx, dy)` caminha `dx*640m` e `dy*640m` por geodésica, garantindo que tiles vizinhos do `--block NxN` compartilhem arestas exatamente (gap < 1 mm, validado por teste).
-- **Fonte de verdade da máscara:** `Uint8Array(65536)` no cliente. Valores válidos: IDs definidos em `config.yaml` (`classes[].id`, hoje `1..6`) + `255` (não preenchido). `mask_utils.validate_partial` deriva os IDs do config — adicionar/remover classe é só edição YAML, sem código. O canvas é apenas visualização.
+- **Fonte de verdade da máscara:** `Uint8Array(65536)` no cliente. Valores válidos: IDs definidos em `project_classes[project_id]` + `255` (não preenchido). `mask_utils.validate_partial(raw, allowed_ids)` recebe os IDs explicitamente; `validate_submission(raw, allowed_ids, require_complete=...)` usa o `mask_complete_required` do projeto para decidir se rejeita 255. O canvas é apenas visualização.
 - **PNG do backend:** banda única (grayscale "L"), 8 bits, 256×256, sem compressão com perda. Pillow faz a conversão `bytes ↔ PNG`.
 - **Protocolo wire:** frontend envia **raw bytes** (Uint8Array, 65536 bytes) no body do classify/review; nunca PNG. Backend converte.
 - **Submissão:** rejeitar se houver `255` no array. Resposta de erro traz a contagem.
@@ -137,6 +174,9 @@ python -m backend.scripts.export_tiles <out_dir> --raw
 
 # Também escreve gt_mosaic.tif unindo tudo
 python -m backend.scripts.export_tiles <out_dir> --mosaic
+
+# Restringe a um único projeto
+python -m backend.scripts.export_tiles <out_dir> --project default
 ```
 
 **Formato de saída** (cada tile: `<out_dir>/gt_<tile.name>.tif`):
@@ -144,9 +184,11 @@ python -m backend.scripts.export_tiles <out_dir> --mosaic
 - Transform via `rasterio.transform.from_bounds(west, south, east, north, 256, 256)` — pixel ≈ 2.5 m na latitude do centro
 - Reprojeção para 3857/UTM fica a cargo do consumer (`gdalwarp` / `rasterio.warp`).
 
-**Remap canônico de classes** (default; `--raw` desativa):
+**Multi-projeto:** `--project <id|name>` filtra a exportação. Sem o flag, todos os projetos vão para o mesmo `out_dir` (manifest distingue via coluna `project_id`). O remap EDGV foi pensado para o projeto seed de 6 classes — projetos com paletas diferentes devem usar `--raw` para preservar IDs nativos.
 
-| TileClass id | Nome (config.yaml) | EDGV id | Nome EDGV (treinamento_6c) |
+**Remap canônico de classes** (default no projeto seed; `--raw` desativa):
+
+| TileClass id | Nome (config.yaml seed) | EDGV id | Nome EDGV (treinamento_6c) |
 |:-:|---|:-:|---|
 | 1 | Massa d'água | **0** | agua |
 | 2 | Área edificada | **1** | edif |
@@ -162,7 +204,7 @@ A LUT (`EDGV_REMAP_LUT`) é constante de módulo no topo do script — único po
 - `reviewed` (padrão) — só tiles que passaram pela revisão (GT estritamente aceito).
 - `reviewed+classified` — inclui também `classified` (passaram só pela classificação, ainda não revisados). Útil para dataset preliminar/maior, ciente do risco de inconsistência.
 
-**Manifest (`<out_dir>/manifest.csv`):** uma linha por tile exportado com `filename, tile_id, name, status, classified_by, reviewed_by, classified_at, reviewed_at, bbox_*`. É o ponto de entrada pra outros agentes saberem o que receberam (status, autoria, geometria) sem precisar abrir o GeoTIFF.
+**Manifest (`<out_dir>/manifest.csv`):** uma linha por tile exportado com `filename, tile_id, project_id, name, status, classified_by, reviewed_by, classified_at, reviewed_at, bbox_*`. É o ponto de entrada pra outros agentes saberem o que receberam (status, autoria, projeto, geometria) sem precisar abrir o GeoTIFF.
 
 **Quando estender:** se um consumer precisar de outro CRS, formato (PNG/Zarr), ou subset (por bbox/operador/data), adicione flags ao mesmo script — não crie novo extractor. Manter um único ponto de saída evita drift entre consumers.
 

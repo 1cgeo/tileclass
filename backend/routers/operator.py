@@ -49,11 +49,17 @@ def _resolve_project_id(
     user: auth.CurrentUser,
     *,
     required: bool,
+    enforce_active: bool = False,
 ) -> int | None:
     """Resolve and authorise the project for queue endpoints. When `required`,
     a missing query param falls back to the user's single project membership
     (zero-friction default for single-project deployments). Membership check
-    runs unconditionally so admins still hit the right project's tiles."""
+    runs unconditionally so admins still hit the right project's tiles.
+
+    `enforce_active=True` adds a gate so /next-style endpoints refuse to
+    serve from a soft-disabled project (admin set `active=False`). Read-only
+    endpoints (assigned, queue-stats, stats-today) keep working so the
+    operator can finish or report on tiles already assigned."""
     if project_id is None:
         if not required:
             return None
@@ -64,6 +70,13 @@ def _resolve_project_id(
             return memberships[0]["id"]
         raise HTTPException(400, detail={"error": "project_id_required"})
     project_service.require_membership(project_id, user)
+    if enforce_active:
+        proj = project_service.get_project(project_id)
+        if not proj or not proj.get("active"):
+            raise HTTPException(409, detail={
+                "error": "project_inactive",
+                "message": "Projeto desativado: novas atribuições estão bloqueadas.",
+            })
     return project_id
 
 
@@ -72,7 +85,7 @@ def next_tile(
     project_id: int | None = Query(default=None),
     user: auth.CurrentUser = Depends(auth.get_current_user),
 ):
-    pid = _resolve_project_id(project_id, user, required=True)
+    pid = _resolve_project_id(project_id, user, required=True, enforce_active=True)
     t = tile_service.get_next_tile(user.id, pid)
     if not t:
         return Response(status_code=204)
@@ -100,7 +113,7 @@ def next_tile_preview(
     user: auth.CurrentUser = Depends(auth.get_current_user),
 ):
     """Peek without assigning — used by the frontend to pre-load the next image."""
-    pid = _resolve_project_id(project_id, user, required=True)
+    pid = _resolve_project_id(project_id, user, required=True, enforce_active=True)
     t = tile_service.peek_next_tile(user.id, pid)
     if not t:
         return Response(status_code=204)

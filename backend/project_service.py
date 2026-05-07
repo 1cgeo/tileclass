@@ -369,6 +369,30 @@ def remove_member(project_id: int, user_id: int, *, by_user: int) -> None:
         log_action(conn, by_user, None, "project_member_remove", f"{project_id}:{user_id}")
 
 
+def delete_project(project_id: int, *, by_user: int) -> None:
+    """Hard-delete a project. Refuses if there is any tile or action in this
+    project — the operator-facing history would otherwise dangle. Use
+    `update_project(active=False)` to soft-disable instead."""
+    with transaction("IMMEDIATE") as conn:
+        if not conn.execute(
+            "SELECT 1 FROM projects WHERE id=?", (project_id,)
+        ).fetchone():
+            raise HTTPException(404, detail={"error": "project_not_found"})
+        tile_count = conn.execute(
+            "SELECT COUNT(*) c FROM tiles WHERE project_id=?", (project_id,)
+        ).fetchone()["c"]
+        if tile_count:
+            raise HTTPException(409, detail={
+                "error": "project_has_tiles",
+                "tile_count": tile_count,
+                "message": "Não é possível deletar projeto com tiles. Desative-o (active=False) ou remova os tiles antes.",
+            })
+        log_action(conn, by_user, None, "project_delete", str(project_id))
+        # ON DELETE CASCADE drops project_classes + project_members.
+        conn.execute("DELETE FROM projects WHERE id=?", (project_id,))
+    _invalidate(project_id)
+
+
 # ---- FastAPI dependencies ---------------------------------------------------
 
 def require_membership(

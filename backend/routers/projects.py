@@ -134,6 +134,15 @@ def update_project(
     return project_service.update_project(project_id, fields=fields, updated_by=admin.id)
 
 
+@admin_router.delete("/{project_id}")
+def delete_project(
+    project_id: int,
+    admin: auth.CurrentUser = Depends(auth.require_admin),
+):
+    project_service.delete_project(project_id, by_user=admin.id)
+    return {"ok": True}
+
+
 @admin_router.put("/{project_id}/classes")
 def replace_classes(
     project_id: int,

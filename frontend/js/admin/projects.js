@@ -114,8 +114,13 @@ function renderProjectDetail(proj, members) {
             <td><button class="link" data-rm-mem="${m.id}">remover</button></td>
         </tr>
     `).join("");
+    const inactiveBadge = proj.active ? "" :
+        ' <span class="chip warn">desativado</span>';
     return `
-        <h3>${escapeHtml(proj.name)} <span class="muted">(id ${proj.id})</span></h3>
+        <h3>
+            ${escapeHtml(proj.name)}
+            <span class="muted">(id ${proj.id})</span>${inactiveBadge}
+        </h3>
 
         <section class="project-section">
             <h4>Configuração</h4>
@@ -136,7 +141,11 @@ function renderProjectDetail(proj, members) {
                 Ativo
             </label>
             ${layerRows}
-            <button class="primary" id="btn-save-project">Salvar</button>
+            <div class="form-actions">
+                <button class="primary" id="btn-save-project">Salvar</button>
+                <button id="btn-delete-project" class="danger">Excluir projeto</button>
+            </div>
+            <p class="muted">Excluir só funciona quando o projeto não tem tiles. Para parar de distribuir novas tarefas mas manter o histórico, desmarque <strong>Ativo</strong>.</p>
         </section>
 
         <section class="project-section">
@@ -172,6 +181,8 @@ function renderProjectDetail(proj, members) {
 function wireProjectDetail(proj, members) {
     const btnSave = document.getElementById("btn-save-project");
     if (btnSave) btnSave.onclick = () => saveProjectFields(proj.id);
+    const btnDelete = document.getElementById("btn-delete-project");
+    if (btnDelete) btnDelete.onclick = () => deleteProject(proj.id, proj.name);
     const btnAddCls = document.getElementById("btn-add-class");
     if (btnAddCls) btnAddCls.onclick = () => addClassRow();
     const btnSaveCls = document.getElementById("btn-save-classes");
@@ -298,6 +309,19 @@ async function removeMember(projectId, userId) {
         showToast(`Falha: ${e.message}`, "err", 6000);
     }
 }
+
+async function deleteProject(projectId, projectName) {
+    if (!confirm(`Excluir o projeto "${projectName}"? Esta ação só funciona se o projeto não tiver tiles.`)) return;
+    try {
+        await apiDelete(`/api/admin/projects/${projectId}`);
+        showToast("Projeto excluído.", "ok");
+        await refreshProjectList();
+        document.getElementById("project-detail").classList.add("hidden");
+    } catch (e) {
+        showToast(`Falha ao excluir: ${e.message}`, "err", 8000);
+    }
+}
+
 
 async function refreshProjectList() {
     try {

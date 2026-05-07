@@ -7,8 +7,10 @@ de UI/UX vivem no código e em `CLAUDE.md`.
 
 Aplicação web para classificação pixel-a-pixel de tiles de imagens de satélite.
 Operadores recebem tiles 256×256 (resolução 2.5 m/pixel = 640 m × 640 m no
-chão) e atribuem uma das 6 classes a cada pixel. O sistema gerencia a fila de
-trabalho, revisão por pares e acompanhamento de progresso.
+chão) e atribuem classes a cada pixel. O conjunto de classes, suas cores, e
+quais imagens/máscaras de referência aparecem para o operador são definidos
+**por projeto**. O sistema gerencia múltiplos projetos simultaneamente — cada
+um com sua própria fila, classes, paleta, mbtiles e membros.
 
 **Stack:** Python 3.11+ (FastAPI, sqlite3 nativo — sem ORM, Pillow, NumPy,
 PyJWT, bcrypt, PyYAML, pyproj, rasterio) + Vanilla JS (sem framework, Canvas
@@ -20,11 +22,12 @@ HTML5, MapLibre GL JS).
 
 - API REST (FastAPI) servindo o frontend estático.
 - SQLite WAL como banco único; máscaras como PNG single-band (BLOB).
-- Imagem de fundo via tiles XYZ (MBTiles local servido por
-  `/api/xyz/{z}/{x}/{y}.{ext}` ou TileServer-GL externo). Overlays opcionais:
-  ArcGIS World Imagery (secundário/terciário), DSG, MapBiomas.
-- JWT (access 8h, refresh 24h, HS256). Role `operator|admin` + flag
-  `can_review`.
+- Imagens e máscaras de referência por projeto via mbtiles servidos por
+  `/api/projects/{id}/xyz/{layer}/{z}/{x}/{y}.{ext}`. Cada projeto declara
+  até 5 layers: `primary` (obrigatório), `secondary`, `tertiary` (atalhos
+  D/R), `ref_primary`, `ref_secondary` (atalhos T/Y, máscaras categorizadas).
+- JWT (access 8h, refresh 24h, HS256). Role global `operator|admin` + flag
+  `can_review`. Por projeto: `project_members.role ∈ {operator,reviewer,admin}`.
 
 ## 3. Modelo de Dados (SQLite)
 
@@ -40,23 +43,65 @@ HTML5, MapLibre GL JS).
 | can_review      | INTEGER | 0/1; admins recebem 1 automático      |
 | created_at      | TEXT    | ISO 8601                              |
 
-### 3.2 `tiles`
+### 3.2 `projects`
+
+| Coluna                       | Tipo    | Notas                                                                |
+|------------------------------|---------|----------------------------------------------------------------------|
+| id                           | INTEGER | PK                                                                   |
+| name                         | TEXT    | Único                                                                |
+| description                  | TEXT    | Livre                                                                |
+| mask_complete_required       | INTEGER | 0/1; quando 1, submit rejeita pixels=255                             |
+| primary_mbtiles              | TEXT    | Path obrigatório (relativo a `backend/` ou absoluto)                 |
+| secondary_mbtiles            | TEXT    | Opcional — atalho `D`                                                |
+| tertiary_mbtiles             | TEXT    | Opcional — atalho `R`                                                |
+| ref_mask_primary_mbtiles     | TEXT    | Opcional — máscara categorizada de referência (atalho `T`)           |
+| ref_mask_secondary_mbtiles   | TEXT    | Opcional — máscara categorizada de referência (atalho `Y`)           |
+| active                       | INTEGER | 0/1; quando 0, `/next` e `/next-preview` retornam 409 `project_inactive` |
+| created_by                   | INTEGER | FK users.id (admin que criou)                                        |
+| created_at                   | TEXT    | ISO 8601                                                             |
+
+### 3.3 `project_classes`
+
+| Coluna     | Tipo    | Notas                                                                |
+|------------|---------|----------------------------------------------------------------------|
+| project_id | INTEGER | FK projects.id (CASCADE)                                             |
+| class_id   | INTEGER | 1..254, único por projeto                                            |
+| name       | TEXT    | Nome da classe (livre)                                               |
+| color      | TEXT    | `#RRGGBB`                                                            |
+| ordering   | INTEGER | Ordem de exibição                                                    |
+
+PK: `(project_id, class_id)`. Renomear/recolorir é livre; **remover** uma
+classe é rejeitado quando o projeto tem qualquer tile.
+
+### 3.4 `project_members`
+
+| Coluna     | Tipo    | Notas                                                                |
+|------------|---------|----------------------------------------------------------------------|
+| project_id | INTEGER | FK projects.id (CASCADE)                                             |
+| user_id    | INTEGER | FK users.id (CASCADE)                                                |
+| role       | TEXT    | `operator`, `reviewer` ou `admin` (escopo do projeto)                |
+
+PK: `(project_id, user_id)`. Admins globais (`users.role='admin'`) ignoram
+membership. `users.can_review` permanece como veto temporário.
+
+### 3.5 `tiles`
 
 | Coluna         | Tipo    | Notas                                                    |
 |----------------|---------|----------------------------------------------------------|
 | id             | INTEGER | PK                                                       |
+| project_id     | INTEGER | **NOT NULL** FK projects.id                              |
 | name           | TEXT    | Identificador legível                                    |
 | bbox_west      | REAL    | Longitude oeste (graus)                                  |
 | bbox_south     | REAL    | Latitude sul                                             |
 | bbox_east      | REAL    | Longitude leste                                          |
 | bbox_north     | REAL    | Latitude norte                                           |
-| status         | TEXT    | Ver 3.4                                                  |
+| status         | TEXT    | Ver 3.7                                                  |
 | assigned_to    | INTEGER | FK users.id                                              |
 | classified_by  | INTEGER | FK users.id                                              |
 | reviewed_by    | INTEGER | FK users.id                                              |
 | classified_at  | TEXT    | ISO 8601                                                 |
 | reviewed_at    | TEXT    | ISO 8601                                                 |
-| data_png       | BLOB    | PNG single-band 256×256, valores `1..6` e `255`          |
+| data_png       | BLOB    | PNG single-band 256×256, IDs do projeto + `255`          |
 | problem_note   | TEXT    | Nota livre quando `status='problem'`                     |
 | version        | INTEGER | Incrementado a cada mutação; usado em CAS                |
 | paused_at      | TEXT    | ISO 8601 quando o tile está pausado                      |
@@ -68,7 +113,7 @@ cardeal usando `pyproj.Geod` (WGS84). Pixel = 2.5 m em qualquer latitude.
 Não há `zoom`/`tile_x`/`tile_y` no schema — composição XYZ é resolvida no
 frontend pelo MapLibre a partir da bbox.
 
-### 3.3 `action_log`
+### 3.6 `action_log`
 
 | Coluna     | Tipo    | Notas                                                 |
 |------------|---------|-------------------------------------------------------|
@@ -82,12 +127,14 @@ frontend pelo MapLibre a partir da bbox.
 Ações principais: `assign_classify`, `assign_review`, `classify`, `review`,
 `pause`, `resume`, `report_problem`, `reset`, `re_review`, `block`,
 `unblock`, `assign`, `unassign`, `delete_tile`, `create_user`,
-`set_user_active`, `set_user_role`, `set_user_can_review`.
+`set_user_active`, `set_user_role`, `set_user_can_review`,
+`project_create`, `project_update`, `project_delete`,
+`project_classes_update`, `project_member_set`, `project_member_remove`.
 
 Pareamento `assign_*→classify/review` em pares por `(user_id, tile_id)` é o
 que alimenta as métricas de duração no dashboard.
 
-### 3.4 Status do Tile
+### 3.7 Status do Tile
 
 ```
 pending ──> in_progress ──> classified ──> in_review ──> reviewed
@@ -129,13 +176,37 @@ ou foi revogado.
 JWT carrega `sub` (user_id), `username`, `role`, `typ` (`access`/`refresh`),
 `jti`, `exp`. Tipo errado em refresh → 401.
 
-### 4.2 Operador (`/api/tiles`)
+### 4.2 Projetos (`/api/projects`)
+
+| Método | Path                                            | Descrição                                                      |
+|--------|-------------------------------------------------|----------------------------------------------------------------|
+| GET    | `/`                                             | Lista projetos visíveis ao user (membership; admin vê todos).  |
+| GET    | `/{id}`                                         | Detalhes + classes + map de layers (URLs prontas com extensão). 403 se não-membro. |
+| GET    | `/{id}/xyz/{layer}/{z}/{x}/{y}.{ext}`           | Tile bytes do mbtiles do projeto. `layer ∈ {primary, secondary, tertiary, ref_primary, ref_secondary}`. 404 se não configurada; 403 se não-membro. |
+
+Admin (`/api/admin/projects`):
+
+| Método | Path                                | Descrição                                                                |
+|--------|-------------------------------------|--------------------------------------------------------------------------|
+| POST   | `/`                                 | Cria projeto. Body inclui paths, classes, `mask_complete_required`. Valida que paths existem. |
+| PATCH  | `/{id}`                             | Patch parcial: nome, descrição, paths, `mask_complete_required`, `active`. |
+| DELETE | `/{id}`                             | Deleta projeto. 409 `project_has_tiles` se há tiles — desative em vez de excluir. |
+| PUT    | `/{id}/classes`                     | Substitui o conjunto de classes. Remoção bloqueada quando o projeto tem tiles. |
+| GET    | `/{id}/members`                     | Lista membros + role.                                                    |
+| POST   | `/{id}/members`                     | `{user_id, role}` — upsert.                                              |
+| DELETE | `/{id}/members/{user_id}`           | Remove membro.                                                           |
+
+### 4.3 Operador (`/api/tiles`)
+
+Todos os endpoints abaixo aceitam `?project_id=<id>`. Quando o user tem
+exatamente uma membership, o param é opcional; com múltiplas, omitir
+retorna 400 `project_id_required`.
 
 | Método | Path                         | Descrição                                                       |
 |--------|------------------------------|-----------------------------------------------------------------|
-| GET    | `/next`                      | Próximo tile (resume → revisão → pending). 204 se vazio.        |
+| GET    | `/next`                      | Próximo tile do projeto. 204 vazio. 409 `project_inactive` se `active=False`. |
 | GET    | `/assigned`                  | Tile atualmente atribuído (para resume sem puxar fila).         |
-| GET    | `/next-preview`              | Peek sem atribuir (pré-carga).                                  |
+| GET    | `/next-preview`              | Peek sem atribuir (pré-carga). Bloqueado em projeto inativo.    |
 | GET    | `/queue-stats`               | Tamanhos de fila por status.                                    |
 | GET    | `/{id}`                      | Metadados (`TileOut`).                                          |
 | GET    | `/{id}/image`                | PNG da máscara atual.                                           |
@@ -146,9 +217,9 @@ JWT carrega `sub` (user_id), `username`, `role`, `typ` (`access`/`refresh`),
 | POST   | `/{id}/pause`                | Body: 65536 bytes (snapshot). Solta atribuição preservando trabalho. |
 | POST   | `/{id}/resume`               | Reatribui um tile pausado pelo próprio usuário.                 |
 
-| Método | Path                  | Descrição                                  |
-|--------|-----------------------|--------------------------------------------|
-| GET    | `/api/me/stats-today` | `{count}` — classificados hoje pelo user.  |
+| Método | Path                  | Descrição                                                              |
+|--------|-----------------------|------------------------------------------------------------------------|
+| GET    | `/api/me/stats-today` | `{count}` — classificados hoje pelo user (opcionalmente por projeto).  |
 
 **Regras de `/next`:**
 1. Resume: se o user tem tile em `in_progress`/`in_review`, devolve esse.
@@ -163,8 +234,9 @@ Atribuição é transacional (`BEGIN IMMEDIATE` + `SELECT … LIMIT 1` + `UPDATE
 **Regras de classificação/revisão:**
 - Body é **raw bytes** (`Uint8Array` de 65536 bytes), não PNG. Backend
   converte com Pillow.
-- Validação: tamanho exato + valores em `{1..6, 255}`. Submit rejeita se
-  houver `255`; resposta traz a contagem.
+- Validação: tamanho exato + valores em `{class_ids do projeto, 255}`.
+  Submit rejeita se houver `255` **e** o projeto tem `mask_complete_required=True`;
+  resposta traz a contagem.
 - Autorização: `assigned_to == current_user`.
 - Concorrência otimista: header `X-Tile-Version`. Se diferente de
   `tiles.version`, retorna `409` com `error=tile_modified` — o frontend
@@ -199,20 +271,11 @@ Todos atrás de `Depends(auth.require_admin)`.
 | PATCH  | `/users/{id}/role`                     | Promove/rebaixa.                                       |
 | PATCH  | `/users/{id}/can-review`               | Habilita/desabilita revisão.                           |
 
-### 4.4 Config (`/api/config`)
+### 4.4 Config legada — removida
 
-| Método | Path           | Descrição                                                  |
-|--------|----------------|------------------------------------------------------------|
-| GET    | `/classes`     | Lista das classes (id/nome/cor) do `config.yaml`.          |
-| GET    | `/tileserver`  | URLs e zoom ranges (primário, secundário, terciário, WC, MB). |
-
-### 4.5 MBTiles passthrough
-
-| Método | Path                          | Descrição                                  |
-|--------|-------------------------------|--------------------------------------------|
-| GET    | `/api/xyz/{z}/{x}/{y}.{ext}`  | Tile do MBTiles primário.                  |
-| GET    | `/api/dsg/{z}/{x}/{y}.{ext}`  | DSG (overlay categórico).                  |
-| GET    | `/api/mb/{z}/{x}/{y}.{ext}`   | MapBiomas.                                 |
+Os endpoints `/api/config/classes`, `/api/config/tileserver`, `/api/xyz/*`,
+`/api/dsg/*` e `/api/mb/*` foram removidos. Configuração e tiles raster
+agora vivem sob `/api/projects/{id}` (ver 4.2).
 
 ## 5. Frontend
 
@@ -233,7 +296,18 @@ e no código (`frontend/js/`). Pontos contratuais:
 
 ## 6. Configuração (`backend/config.yaml`)
 
+> **Nota:** após a introdução de projetos, o `config.yaml` é usado como
+> *seed* — só é lido para criar o projeto "default" no primeiro
+> `init_db()`. Edições subsequentes nos blocos `classes`, `tileserver*`,
+> `dsg`, `mapbiomas` **não atualizam** o projeto no banco. Use a UI
+> admin (aba Projetos) ou os endpoints `/api/admin/projects[...]`.
+
 ```yaml
+default_project:
+  name: default
+  description: "Projeto padrão (auto-migrado do config.yaml)"
+  mask_complete_required: true
+
 tileserver:
   url_template: "https://server.arcgisonline.com/.../{z}/{y}/{x}"
   mbtiles_path: "../data_external/tiles.mbtiles"   # opcional, override do url_template
@@ -282,18 +356,21 @@ Rodar como módulo (`python -m backend.scripts.<name>`) para imports
 relativos funcionarem.
 
 - `create_admin` — cria usuário admin inicial (interativo).
-- `import_points --point <lat> <lon> <name> | --csv pontos.csv [--block N]` —
+- `import_points [--project <id|name>] --point <lat> <lon> <name> | --csv pontos.csv [--block N]` —
   importa tiles a partir de pontos centrais; `--block N` gera bloco N×N
-  contíguo (gap < 1 mm validado).
-- `import_cq_tiles --geoparquet <file> [--seed empty|raw]` — importa de
+  contíguo (gap < 1 mm validado). `--project` é obrigatório quando há
+  mais de um projeto no banco.
+- `import_cq_tiles [--project <id|name>] --geoparquet <file> [--seed empty|raw]` — importa de
   geoparquet do CQ.
-- `import_qc_tiles --csv qc_tiles.csv --bdf-dir <dir>` — importa lote do
+- `import_qc_tiles [--project <id|name>] --csv qc_tiles.csv --bdf-dir <dir>` — importa lote do
   QC com seed mask do argmax.
 - `export_tiles <out_dir> [--status reviewed|reviewed+classified] [--raw]
-  [--mosaic] [--manifest <path>]` — GT extractor (ver §8).
+  [--mosaic] [--manifest <path>] [--project <id|name>]` — GT extractor (ver §8).
 - `build_mbtiles <raster_in> <out.mbtiles>` — converte raster → MBTiles XYZ.
 - `build_xyz_pyramid <raster_in> <out_dir>` — pirâmide XYZ em disco.
-- `merge_db <other.db>` — funde `tileclass.db` de outra equipe.
+- `merge_db --primary <db> --secondary <other.db>` — funde DBs. Projetos
+  com mesmo nome são reutilizados; demais são copiados (classes + membros);
+  uniqueness de tiles é por `(project_id, bbox)`.
 
 ## 8. GT Extractor (`export_tiles.py`)
 
