@@ -51,6 +51,10 @@ def test_wm_tiles_for_bbox_small_region(app_env):
 
 # ---- Helpers -----------------------------------------------------------------
 
+def _default_pid(conn):
+    return conn.execute("SELECT id FROM projects ORDER BY id LIMIT 1").fetchone()["id"]
+
+
 def _insert_classified(name, bbox, fill_class):
     """Insert a tile in 'classified' state filled uniformly with `fill_class`."""
     raw = bytes([fill_class]) * (TILE_SIZE * TILE_SIZE)
@@ -58,11 +62,12 @@ def _insert_classified(name, bbox, fill_class):
     now = datetime.now(timezone.utc).isoformat()
     conn = connect()
     try:
+        pid = _default_pid(conn)
         conn.execute(
-            """INSERT INTO tiles(name, bbox_west, bbox_south, bbox_east, bbox_north,
+            """INSERT INTO tiles(project_id, name, bbox_west, bbox_south, bbox_east, bbox_north,
                                  status, classified_at, data_png)
-               VALUES(?,?,?,?,?,'classified',?,?)""",
-            (name, *bbox, now, png),
+               VALUES(?,?,?,?,?,?,'classified',?,?)""",
+            (pid, name, *bbox, now, png),
         )
         row = conn.execute("SELECT id FROM tiles WHERE name=?", (name,)).fetchone()
     finally:
@@ -112,10 +117,11 @@ def test_pending_tile_does_not_render(app_env):
     raw = bytes([1]) * (TILE_SIZE * TILE_SIZE)
     conn = connect()
     try:
+        pid = _default_pid(conn)
         conn.execute(
-            """INSERT INTO tiles(name, bbox_west, bbox_south, bbox_east, bbox_north,
-                                 status, data_png) VALUES(?,?,?,?,?,'pending',?)""",
-            ("pending-tile", *_BBOX, encode_mask(raw)),
+            """INSERT INTO tiles(project_id, name, bbox_west, bbox_south, bbox_east, bbox_north,
+                                 status, data_png) VALUES(?,?,?,?,?,?,'pending',?)""",
+            (pid, "pending-tile", *_BBOX, encode_mask(raw)),
         )
     finally:
         conn.close()
@@ -202,10 +208,11 @@ def test_classify_invalidates_cache(app_env, client, admin_user, operators):
     raw_empty = empty_mask_png()
     conn = connect()
     try:
+        pid = _default_pid(conn)
         conn.execute(
-            """INSERT INTO tiles(name, bbox_west, bbox_south, bbox_east, bbox_north,
-                                 status, data_png) VALUES(?,?,?,?,?,'pending',?)""",
-            ("t1", *_BBOX, raw_empty),
+            """INSERT INTO tiles(project_id, name, bbox_west, bbox_south, bbox_east, bbox_north,
+                                 status, data_png) VALUES(?,?,?,?,?,?,'pending',?)""",
+            (pid, "t1", *_BBOX, raw_empty),
         )
     finally:
         conn.close()

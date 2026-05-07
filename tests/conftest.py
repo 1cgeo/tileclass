@@ -81,6 +81,18 @@ def _wal_checkpoint():
         conn.close()
 
 
+def _add_to_default_project(conn, user_id: int, role: str) -> None:
+    """Make the user a member of the seed default project so project-aware
+    endpoints can serve them tiles in tests."""
+    row = conn.execute("SELECT id FROM projects ORDER BY id LIMIT 1").fetchone()
+    if row is None:
+        return
+    conn.execute(
+        "INSERT OR IGNORE INTO project_members(project_id, user_id, role) VALUES (?,?,?)",
+        (row["id"], user_id, role),
+    )
+
+
 @pytest.fixture()
 def admin_user(app_env):
     # Use transaction() so BEGIN/COMMIT pairs explicitly — bare autocommit
@@ -93,6 +105,7 @@ def admin_user(app_env):
             ("admin", _FIXTURE_ADMIN_HASH, "admin", datetime.now(timezone.utc).isoformat()),
         )
         row = conn.execute("SELECT id FROM users WHERE username='admin'").fetchone()
+        _add_to_default_project(conn, row["id"], "admin")
     _wal_checkpoint()
     return {"id": row["id"], "username": "admin", "password": "admin123"}
 
@@ -110,6 +123,7 @@ def _make_operators(n: int):
                 (u, _FIXTURE_OP_HASH, "operator", now),
             )
             row = conn.execute("SELECT id FROM users WHERE username=?", (u,)).fetchone()
+            _add_to_default_project(conn, row["id"], "reviewer")
             users.append({"id": row["id"], "username": u, "password": "secret123"})
     _wal_checkpoint()
     return users
@@ -125,6 +139,24 @@ def operators_10(app_env):
     return _make_operators(10)
 
 
+def _default_project_id(conn) -> int:
+    row = conn.execute("SELECT id FROM projects ORDER BY id LIMIT 1").fetchone()
+    if row is None:
+        raise RuntimeError("default project missing — init_db should have seeded it")
+    return row["id"]
+
+
+@pytest.fixture()
+def default_project(app_env):
+    """Resolve the auto-seeded default project id (created by init_db)."""
+    from backend.database import connect
+    conn = connect()
+    try:
+        return _default_project_id(conn)
+    finally:
+        conn.close()
+
+
 @pytest.fixture()
 def tiles_many(app_env):
     from backend.database import connect
@@ -132,12 +164,13 @@ def tiles_many(app_env):
     empty = empty_mask_png()
     conn = connect()
     try:
+        pid = _default_project_id(conn)
         for i in range(100):
             conn.execute(
-                """INSERT INTO tiles(name,bbox_west,bbox_south,bbox_east,bbox_north,
+                """INSERT INTO tiles(project_id,name,bbox_west,bbox_south,bbox_east,bbox_north,
                    status,data_png)
-                   VALUES (?,?,?,?,?,'pending',?)""",
-                (f"tile_{i:03d}", 0.0 + i, 0.0, 0.1 + i, 0.1, empty),
+                   VALUES (?,?,?,?,?,?,'pending',?)""",
+                (pid, f"tile_{i:03d}", 0.0 + i, 0.0, 0.1 + i, 0.1, empty),
             )
     finally:
         conn.close()
@@ -145,18 +178,19 @@ def tiles_many(app_env):
 
 @pytest.fixture()
 def tiles(app_env):
-    """Insert 10 pending tiles."""
+    """Insert 10 pending tiles in the default project."""
     from backend.database import connect
     from backend.mask_utils import empty_mask_png
     empty = empty_mask_png()
     conn = connect()
     try:
+        pid = _default_project_id(conn)
         for i in range(10):
             conn.execute(
-                """INSERT INTO tiles(name,bbox_west,bbox_south,bbox_east,bbox_north,
+                """INSERT INTO tiles(project_id,name,bbox_west,bbox_south,bbox_east,bbox_north,
                    status,data_png)
-                   VALUES (?,?,?,?,?,'pending',?)""",
-                (f"tile_{i:03d}", 0.0 + i, 0.0, 0.1 + i, 0.1, empty),
+                   VALUES (?,?,?,?,?,?,'pending',?)""",
+                (pid, f"tile_{i:03d}", 0.0 + i, 0.0, 0.1 + i, 0.1, empty),
             )
     finally:
         conn.close()

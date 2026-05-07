@@ -21,11 +21,12 @@ def _insert_classified(name, fill_class):
     now = datetime.now(timezone.utc).isoformat()
     conn = connect()
     try:
+        pid = conn.execute("SELECT id FROM projects ORDER BY id LIMIT 1").fetchone()["id"]
         conn.execute(
-            """INSERT INTO tiles(name, bbox_west, bbox_south, bbox_east, bbox_north,
+            """INSERT INTO tiles(project_id, name, bbox_west, bbox_south, bbox_east, bbox_north,
                                  status, classified_at, data_png)
-               VALUES(?,?,?,?,?,'classified',?,?)""",
-            (name, *_BBOX, now, png),
+               VALUES(?,?,?,?,?,?,'classified',?,?)""",
+            (pid, name, *_BBOX, now, png),
         )
     finally:
         conn.close()
