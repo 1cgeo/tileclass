@@ -67,6 +67,11 @@
             </aside>
 
             <div class="canvas-wrap">
+                <div id="review-note-banner" class="review-note-banner hidden">
+                    <strong>Pedido de ajuste:</strong>
+                    <span id="review-note-text"></span>
+                    <span class="muted" id="review-note-meta"></span>
+                </div>
                 <div id="canvas-viewport">
                     <div id="canvas-stack" class="canvas-stack">
                         <div id="map-satellite"></div>
@@ -153,6 +158,7 @@
             <button id="btn-undo" title="Ctrl+Z">Desfazer <span class="kbd">⌃Z</span></button>
             <button id="btn-redo" title="Ctrl+Shift+Z">Refazer <span class="kbd">⌃⇧Z</span></button>
             <button id="btn-problem">Reportar Problema</button>
+            <button id="btn-request-changes" class="hidden" title="Devolver ao classificador com nota (mantém máscara)">Pedir ajustes</button>
             <button id="btn-pause" class="footer-pause" title="Pausa salva o trabalho parcial no servidor e congela o tempo">Pausar</button>
             <button id="btn-submit" class="primary"><span id="submit-label">Submeter</span></button>
         </footer>
@@ -182,6 +188,23 @@
                 <div class="modal-actions">
                     <button id="problem-cancel">Cancelar</button>
                     <button id="problem-confirm" class="primary">Confirmar</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Reviewer "request changes" modal -->
+        <div id="modal-request-changes" class="modal hidden">
+            <div class="modal-box">
+                <h2>Pedir ajustes</h2>
+                <p class="hint">A máscara é preservada e o tile volta para a fila de classificação com sua nota.</p>
+                <textarea id="request-changes-note" rows="5" maxlength="2000"
+                          placeholder="Explique o que precisa ser ajustado..."></textarea>
+                <div class="textarea-footer">
+                    <span class="hint">Ctrl+Enter para enviar</span>
+                </div>
+                <div class="modal-actions">
+                    <button id="request-changes-cancel">Cancelar</button>
+                    <button id="request-changes-confirm" class="primary">Devolver ao classificador</button>
                 </div>
             </div>
         </div>

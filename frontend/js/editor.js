@@ -451,7 +451,33 @@ async function loadTile(t, preloadedMask = null) {
     resetView();
     drawGrid();
     updateProgress();
+    refreshRequestChangesButton(t);
+    loadReviewNoteBanner(t.id);
     _tileReady = true;
+}
+
+function refreshRequestChangesButton(t) {
+    const btn = document.getElementById("btn-request-changes");
+    if (!btn) return;
+    btn.classList.toggle("hidden", t?.status !== "in_review");
+}
+
+async function loadReviewNoteBanner(tileId) {
+    const banner = document.getElementById("review-note-banner");
+    if (!banner) return;
+    try {
+        const note = await apiGet(`/api/tiles/${tileId}/review-note`);
+        if (!note) {
+            banner.classList.add("hidden");
+            return;
+        }
+        document.getElementById("review-note-text").textContent = note.note;
+        document.getElementById("review-note-meta").textContent =
+            `${note.by_username || "?"} · ${(note.created_at || "").slice(0, 16).replace("T", " ")}`;
+        banner.classList.remove("hidden");
+    } catch {
+        banner.classList.add("hidden");
+    }
 }
 
 async function loadMaskFromServer(tileId) {
@@ -784,6 +810,8 @@ function attachEvents() {
     document.getElementById("btn-redo").addEventListener("click", redo);
     document.getElementById("btn-submit").addEventListener("click", submit);
     document.getElementById("btn-problem").addEventListener("click", openProblemModal);
+    const btnRC = document.getElementById("btn-request-changes");
+    if (btnRC) btnRC.addEventListener("click", openRequestChangesModal);
     const btnPause = document.getElementById("btn-pause");
     if (btnPause) btnPause.addEventListener("click", pauseTile);
     const btnGmaps = document.getElementById("btn-gmaps");
@@ -804,6 +832,14 @@ function attachEvents() {
 
     document.getElementById("problem-cancel").addEventListener("click", closeProblemModal);
     document.getElementById("problem-confirm").addEventListener("click", confirmProblem);
+    const rcCancel = document.getElementById("request-changes-cancel");
+    if (rcCancel) rcCancel.addEventListener("click", closeRequestChangesModal);
+    const rcConfirm = document.getElementById("request-changes-confirm");
+    if (rcConfirm) rcConfirm.addEventListener("click", confirmRequestChanges);
+    const rcNote = document.getElementById("request-changes-note");
+    if (rcNote) rcNote.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter" && (ev.ctrlKey || ev.metaKey)) confirmRequestChanges();
+    });
 
 
     document.getElementById("btn-logout").addEventListener("click", async () => {
@@ -1389,6 +1425,29 @@ async function confirmProblem() {
         closeProblemModal();
         showToast("Problema reportado.", "success");
         await loadNext();
+    } catch (e) {
+        showToast(`Erro: ${e.message}`, "error");
+    }
+}
+
+function openRequestChangesModal() {
+    if (!currentTile) return;
+    document.getElementById("request-changes-note").value = "";
+    document.getElementById("modal-request-changes").classList.remove("hidden");
+    document.getElementById("request-changes-note").focus();
+}
+function closeRequestChangesModal() {
+    document.getElementById("modal-request-changes").classList.add("hidden");
+}
+async function confirmRequestChanges() {
+    const note = document.getElementById("request-changes-note").value.trim();
+    if (!note) { showToast("Descreva o ajuste necessário.", "error"); return; }
+    try {
+        await apiPostJson(`/api/tiles/${currentTile.id}/request-changes`, { note });
+        clearBackup();
+        closeRequestChangesModal();
+        showToast("Tile devolvido ao classificador.", "success");
+        showIdleScreen("Ajuste solicitado ✓", "Verificando próximo tile...", { previewNext: true });
     } catch (e) {
         showToast(`Erro: ${e.message}`, "error");
     }

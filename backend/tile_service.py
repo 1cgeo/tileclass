@@ -438,6 +438,64 @@ def submit_classification(tile_id: int, user_id: int, raw_mask: bytes,
 _MAX_PROBLEM_NOTE = 2000
 
 
+def request_changes(tile_id: int, user_id: int, note: str) -> dict:
+    """Reviewer kicks the tile back to the classification queue with a note.
+    The classifier (or whoever picks the tile next) sees the note attached.
+    Mask is preserved — unlike report_problem, the work isn't wiped."""
+    note = (note or "").strip()
+    if not note:
+        raise HTTPException(400, detail={"error": "empty_note",
+                                          "message": "Nota é obrigatória."})
+    if len(note) > _MAX_PROBLEM_NOTE:
+        note = note[:_MAX_PROBLEM_NOTE]
+    with transaction("IMMEDIATE") as conn:
+        row = conn.execute(
+            "SELECT status, assigned_to FROM tiles WHERE id=?", (tile_id,)
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "tile not found")
+        if row["assigned_to"] != user_id:
+            raise HTTPException(403, "not assigned to you")
+        if row["status"] != "in_review":
+            raise HTTPException(409, f"invalid state for request_changes: {row['status']}")
+        # Status returns to pending so anyone can pick it up; classified_by
+        # stays so dashboard pairs the rework against the original classifier.
+        conn.execute(
+            """UPDATE tiles SET status='pending', assigned_to=NULL,
+               paused_at=NULL, version=version+1 WHERE id=?""",
+            (tile_id,),
+        )
+        log_action(conn, user_id, tile_id, "request_changes", note)
+    # Status moves out of in_review (visible) so refresh the overlay tiles
+    # that included this tile's mask.
+    mask_tile_service.safe_invalidate_tile(tile_id)
+    return {"ok": True}
+
+
+def latest_review_note(tile_id: int) -> dict | None:
+    """Most recent `request_changes` note attached to the tile, or None.
+    Used by the editor to surface "este tile voltou pra você" context when
+    the classifier picks the tile up again."""
+    conn = connect()
+    try:
+        row = conn.execute(
+            """SELECT a.detail, a.created_at, u.username
+               FROM action_log a LEFT JOIN users u ON u.id=a.user_id
+               WHERE a.tile_id=? AND a.action='request_changes'
+               ORDER BY a.id DESC LIMIT 1""",
+            (tile_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    return {
+        "note": row["detail"],
+        "created_at": row["created_at"],
+        "by_username": row["username"],
+    }
+
+
 def report_problem(tile_id: int, user_id: int, note: str) -> dict:
     # Cap note size so action_log.detail cannot be used to bloat the DB.
     note = (note or "").strip()

@@ -144,6 +144,17 @@ def tile_history(tile_id: int = Path(ge=1),
     return tile_service.tile_history(tile_id)
 
 
+@router.get("/tiles/{tile_id}/review-note")
+def tile_review_note(tile_id: int = Path(ge=1),
+                     _: auth.CurrentUser = Depends(auth.get_current_user)):
+    """Most recent `request_changes` note for this tile, or 204 if none.
+    The editor surfaces this as a banner when the classifier reopens the tile."""
+    note = tile_service.latest_review_note(tile_id)
+    if not note:
+        return Response(status_code=204)
+    return note
+
+
 @router.get("/tiles/{tile_id}", response_model=TileOut)
 def get_tile(tile_id: int = Path(ge=1),
              user: auth.CurrentUser = Depends(auth.get_current_user)):
@@ -189,6 +200,14 @@ async def review(tile_id: int = Path(ge=1), *, request: Request,
 def report_problem(body: ReportProblemIn, tile_id: int = Path(ge=1),
                    user: auth.CurrentUser = Depends(auth.get_current_user)):
     return tile_service.report_problem(tile_id, user.id, body.note)
+
+
+@router.post("/tiles/{tile_id}/request-changes")
+def request_changes(body: ReportProblemIn, tile_id: int = Path(ge=1),
+                    user: auth.CurrentUser = Depends(auth.get_current_user)):
+    """Reviewer-only kick-back: tile returns to pending with a note attached
+    for the next classifier (typically the original one). Mask is preserved."""
+    return tile_service.request_changes(tile_id, user.id, body.note)
 
 
 @router.post("/tiles/{tile_id}/pause")

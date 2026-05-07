@@ -25,6 +25,8 @@ def app_env(monkeypatch, tmp_path):
     import backend.database as dbmod
     import backend.auth as authmod
     import backend.mask_tile_service as mtsmod
+    import backend.mbtiles_service as mbtsmod
+    import backend.project_service as psmod
 
     original = config_mod.get_config
 
@@ -50,6 +52,11 @@ def app_env(monkeypatch, tmp_path):
     # admin_service, tile_service import config inside functions, so patching config_mod is enough
     monkeypatch.setattr(dbmod, "_DB_PATH", None, raising=True)
     mtsmod.reset_cache_path()
+    # Each test runs against a brand-new SQLite file but the project cache
+    # and mbtiles reader pool live at module scope; flush them so a previous
+    # test's stale `active=False` (or now-orphaned reader) doesn't bleed in.
+    psmod._invalidate()
+    mbtsmod.close_all()
 
     # Reset in-memory rate-limit state between tests
     authmod.reset_rate_limits()

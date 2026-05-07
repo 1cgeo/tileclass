@@ -206,6 +206,14 @@ input[type="range"] {
     padding: 4px 10px; border-radius: var(--radius-sm);
     font-weight: 700; font-size: 12px; letter-spacing: 0.02em;
 }
+.review-note-banner {
+    background: #fff8e1; color: #7a4a00;
+    border: 1px solid #e0a64a;
+    padding: 8px 12px; border-radius: var(--radius-sm);
+    margin: 0 var(--space-2) var(--space-2);
+    font-size: 13px; line-height: 1.4;
+}
+.review-note-banner .muted { display: block; margin-top: 2px; font-size: 11px; }
 .queue-progress { font-size: 12px; color: var(--text-muted); }
 .header-right span { font-size: 12px; color: var(--text-muted); }
 #today-count { color: var(--ok); font-weight: 600; }
