@@ -64,14 +64,23 @@ export async function initAdmin(user) {
     document.querySelectorAll(".admin-nav button").forEach(btn => {
         btn.addEventListener("click", () => selectTab(btn.dataset.tab));
     });
-    const [cfg, cls] = await Promise.all([
-        apiGet("/api/config/tileserver"),
-        apiGet("/api/config/classes"),
-    ]);
-    tileserverUrl = cfg.url_template;
-    tileserverMaxZoom = cfg.max_zoom ?? 22;
-    classes = cls;
-    classesById = Object.fromEntries(classes.map(c => [c.id, c]));
+    // Admin uses the first available project's primary mbtiles + class palette
+    // for thumbnails/map renders. The Projetos tab is where multi-project
+    // management lives; per-project palette switching can come later.
+    const projects = await apiGet("/api/projects");
+    if (projects && projects.length) {
+        const proj = await apiGet(`/api/projects/${projects[0].id}`);
+        const primary = (proj.layers || {}).primary;
+        tileserverUrl = (primary && primary.url) || "";
+        tileserverMaxZoom = (primary && primary.max_zoom) ?? 22;
+        classes = proj.classes || [];
+        classesById = Object.fromEntries(classes.map(c => [c.id, c]));
+    } else {
+        tileserverUrl = "";
+        tileserverMaxZoom = 22;
+        classes = [];
+        classesById = {};
+    }
     const vtModal = document.getElementById("modal-view-tile");
     const closeVt = () => {
         vtModal.classList.add("hidden");
