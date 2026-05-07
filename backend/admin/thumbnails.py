@@ -17,7 +17,8 @@ def _tile_row(tile_id: int):
     conn = connect()
     try:
         return conn.execute(
-            "SELECT id, project_id, data_png, bbox_west, bbox_south, bbox_east, bbox_north "
+            "SELECT id, project_id, data_png, data_geojson, "
+            "bbox_west, bbox_south, bbox_east, bbox_north "
             "FROM tiles WHERE id=?",
             (tile_id,),
         ).fetchone()
@@ -38,15 +39,16 @@ def _project_class_lut(project_id: int) -> np.ndarray:
 
 
 def tile_thumbnail(tile_id: int, size: int = 128) -> bytes:
-    """Return the best thumbnail for the admin grid: colorized mask if the tile
-    has any painted pixels, otherwise the satellite backdrop so empty tiles
-    (pending / problem / freshly-assigned) still give the admin something to
-    look at. Falls back to the transparent empty mask if the tile's project
-    has no primary mbtiles open."""
+    """Return the best thumbnail for the admin grid. Dispatches by the
+    project's kind: raster colorizes the painted mask, vector overlays
+    LineStrings on the satellite backdrop."""
     row = _tile_row(tile_id)
     if not row:
         raise HTTPException(404, "tile not found")
     pid = row["project_id"]
+    proj = project_service.get_project(pid) if pid else None
+    if proj and proj.get("kind") == "vector":
+        return _vector_thumbnail(row, proj, size)
     primary = mbtiles_service.get_reader(pid, "primary") if pid else None
     # Missing or corrupt blob renders as the empty (all-255) mask — lut[255]
     # is transparent, so the admin grid shows a blank cell instead of a
@@ -141,3 +143,61 @@ def tile_satellite_thumbnail(tile_id: int, size: int = 128) -> bytes:
     non-empty. Used by callers that explicitly want the backdrop regardless of
     mask state."""
     return _tile_satellite_png(tile_id, size)
+
+
+def _vector_thumbnail(row, proj: dict, size: int) -> bytes:
+    """Lines drawn on the satellite backdrop, sized down to `size`. When the
+    backdrop isn't available, lines render on a dark background so the admin
+    still sees the geometry."""
+    import json as _json
+    from PIL import ImageDraw
+    from ..mask_tile_service import _vector_color_resolver
+    pid = row["project_id"]
+    try:
+        backdrop = _tile_satellite_png(row["id"], size)
+        from io import BytesIO
+        base = Image.open(BytesIO(backdrop)).convert("RGBA")
+    except Exception:
+        # Satellite isn't available (no mbtiles, decompression-bomb guard
+        # tripped on a degenerate bbox, etc). Lines need to render anyway.
+        base = Image.new("RGBA", (size, size), (32, 32, 32, 255))
+
+    text = row["data_geojson"]
+    if not text:
+        buf = io.BytesIO()
+        base.save(buf, format="PNG", optimize=True)
+        return buf.getvalue()
+
+    try:
+        doc = _json.loads(text)
+    except (TypeError, ValueError):
+        doc = None
+    overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    if doc:
+        draw = ImageDraw.Draw(overlay)
+        color_for = _vector_color_resolver(proj)
+        w, s, e, n = (row["bbox_west"], row["bbox_south"],
+                      row["bbox_east"], row["bbox_north"])
+        span_x = e - w
+        span_y = n - s
+        for f in doc.get("features", []) or []:
+            geom = f.get("geometry") or {}
+            if geom.get("type") != "LineString":
+                continue
+            coords = geom.get("coordinates") or []
+            if len(coords) < 2 or span_x <= 0 or span_y <= 0:
+                continue
+            # Linear bbox→pixel — at thumbnail scale and tile size (~640m)
+            # the spherical-Mercator skew is invisible.
+            pts = [
+                ((c[0] - w) / span_x * size,
+                 (n - c[1]) / span_y * size)
+                for c in coords if len(c) >= 2
+            ]
+            if len(pts) >= 2:
+                draw.line(pts, fill=color_for(f.get("properties") or {}),
+                          width=max(2, size // 64))
+    composed = Image.alpha_composite(base, overlay)
+    buf = io.BytesIO()
+    composed.convert("RGB").save(buf, format="PNG", optimize=True)
+    return buf.getvalue()

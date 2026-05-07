@@ -114,6 +114,85 @@ def class_distribution(project_id: int | None = None) -> list[dict]:
     return out
 
 
+def feature_distribution(project_id: int | None = None) -> list[dict]:
+    """Vector counterpart to class_distribution: counts feature occurrences
+    by enum/boolean attribute value, scanning each tile's data_geojson once.
+
+    Returned shape:
+      [{project_id, attribute_key, value, count, pct}, ...]
+
+    Text/number attributes are skipped — they have unbounded value spaces
+    and the dashboard's bar chart needs a discrete vocabulary. Tiles whose
+    body is null or unparseable are silently ignored."""
+    import json
+    proj_clause, proj_args = _scope(project_id)
+    where_proj = ("WHERE 1=1" + proj_clause) if proj_clause else ""
+    conn = connect()
+    try:
+        # Pull the per-project schema so we know which keys are enum/boolean.
+        schema_rows = conn.execute(
+            f"""SELECT pa.project_id, pa.key, pa.type, pa.options_json
+                FROM project_attributes pa
+                JOIN projects p ON p.id=pa.project_id
+                WHERE p.kind='vector'
+                  AND pa.type IN ('enum','boolean')
+                  {('AND p.id=?' if project_id is not None else '')}""",
+            proj_args,
+        ).fetchall()
+        schema_by_pid: dict[int, list[tuple[str, str]]] = {}
+        for s in schema_rows:
+            schema_by_pid.setdefault(s["project_id"], []).append(
+                (s["key"], s["type"]),
+            )
+        # Tiles with non-null bodies for projects that have at least one
+        # countable attribute.
+        tile_rows = conn.execute(
+            f"""SELECT t.project_id, t.data_geojson FROM tiles t
+                JOIN projects p ON p.id=t.project_id
+                WHERE p.kind='vector' AND t.data_geojson IS NOT NULL
+                  {('AND t.project_id=?' if project_id is not None else '')}""",
+            proj_args,
+        ).fetchall()
+    finally:
+        conn.close()
+
+    counts: dict[tuple[int, str, str], int] = {}
+    project_totals: dict[tuple[int, str], int] = {}
+    for r in tile_rows:
+        pid = r["project_id"]
+        keys = schema_by_pid.get(pid)
+        if not keys:
+            continue
+        try:
+            doc = json.loads(r["data_geojson"])
+        except (TypeError, ValueError):
+            continue
+        for f in doc.get("features", []) or []:
+            props = f.get("properties") or {}
+            for key, _t in keys:
+                value = props.get(key)
+                if value is None or value == "":
+                    continue
+                # Stringify so booleans + enums share the same key shape.
+                v = str(value).lower() if isinstance(value, bool) else str(value)
+                counts[(pid, key, v)] = counts.get((pid, key, v), 0) + 1
+                project_totals[(pid, key)] = project_totals.get((pid, key), 0) + 1
+
+    out = []
+    for (pid, key, value), count in sorted(
+        counts.items(), key=lambda kv: (-kv[1],),
+    ):
+        denom = project_totals.get((pid, key), 1)
+        out.append({
+            "project_id": pid,
+            "attribute_key": key,
+            "value": value,
+            "count": count,
+            "pct": round(100.0 * count / denom, 2),
+        })
+    return out
+
+
 def dashboard(project_id: int | None = None) -> dict:
     proj_clause, proj_args = _scope(project_id)
     where_proj = ("WHERE 1=1" + proj_clause) if proj_clause else ""

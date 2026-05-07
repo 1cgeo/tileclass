@@ -196,6 +196,15 @@ def _transparent_png() -> bytes:
 
 
 def _render_tile(project_id: int, z: int, x: int, y: int) -> bytes | None:
+    """Dispatch by project kind: raster reprojects PNG masks, vector
+    rasterizes LineStrings."""
+    proj = project_service.get_project(project_id)
+    if proj and proj.get("kind") == "vector":
+        return _render_vector_tile(project_id, z, x, y, proj)
+    return _render_raster_tile(project_id, z, x, y)
+
+
+def _render_raster_tile(project_id: int, z: int, x: int, y: int) -> bytes | None:
     """Build the PNG by reprojecting every intersecting TileClass mask in the
     given project. Returns None when no tile contributes any painted pixel —
     the cache stores this as NULL so empty regions don't waste disk."""
@@ -265,6 +274,119 @@ def _render_tile(project_id: int, z: int, x: int, y: int) -> bytes | None:
     buf = io.BytesIO()
     img.save(buf, format="PNG", optimize=True)
     return buf.getvalue()
+
+
+def _render_vector_tile(project_id: int, z: int, x: int, y: int,
+                        proj: dict) -> bytes | None:
+    """Rasterize the project's tile features into a 256x256 RGBA PNG.
+
+    Each LineString draws as a 2px stroke. Color comes from a project-level
+    convention: if there is a `direction` attribute we color by direction
+    (forward=blue, reverse=red, both=gray); otherwise we use the first
+    enum attribute's options as a categorical palette; otherwise fall back
+    to a single accent color.
+
+    The implicit cycle this avoids: redrawing the lat/lon → 3857 transform
+    on each line. We project the WM tile's lat/lon corners once, then
+    map every coordinate via straight linear interpolation in the local
+    bbox — fine because tile size is small relative to global curvature."""
+    import json
+    from PIL import ImageDraw
+
+    west, south, east, north = wm_tile_bounds_4326(z, x, y)
+    placeholders = ",".join("?" * len(_VISIBLE_STATUSES))
+    conn = connect_main()
+    try:
+        rows = conn.execute(
+            f"""SELECT bbox_west, bbox_south, bbox_east, bbox_north, data_geojson
+                FROM tiles
+                WHERE project_id=?
+                  AND status IN ({placeholders})
+                  AND data_geojson IS NOT NULL
+                  AND bbox_west < ? AND bbox_east > ?
+                  AND bbox_south < ? AND bbox_north > ?""",
+            (project_id, *_VISIBLE_STATUSES, east, west, north, south),
+        ).fetchall()
+    finally:
+        conn.close()
+    if not rows:
+        return None
+
+    img = Image.new("RGBA", (TILE_SIZE, TILE_SIZE), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    color_for = _vector_color_resolver(proj)
+    has_any = False
+
+    # Use Web Mercator pixel coordinates so straight lines look straight on
+    # the map (lat/lon → linear pixel would skew at high latitudes).
+    left_3857, bottom_3857, right_3857, top_3857 = wm_tile_bounds_3857(z, x, y)
+    span_x = right_3857 - left_3857
+    span_y = top_3857 - bottom_3857
+    if span_x <= 0 or span_y <= 0:
+        return None
+
+    def lonlat_to_pixel(lon, lat):
+        # Spherical Mercator (EPSG:3857) forward.
+        rad_lat = math.radians(max(min(lat, 85.05112878), -85.05112878))
+        mx = lon * _WM_HALF / 180.0
+        my = math.log(math.tan((90 + math.degrees(rad_lat)) * math.pi / 360)) / math.pi * _WM_HALF
+        px = (mx - left_3857) / span_x * TILE_SIZE
+        py = (top_3857 - my) / span_y * TILE_SIZE
+        return px, py
+
+    for r in rows:
+        try:
+            doc = json.loads(r["data_geojson"])
+        except (TypeError, ValueError):
+            continue
+        for f in doc.get("features", []) or []:
+            geom = f.get("geometry") or {}
+            if geom.get("type") != "LineString":
+                continue
+            coords = geom.get("coordinates") or []
+            if len(coords) < 2:
+                continue
+            pixels = [lonlat_to_pixel(c[0], c[1]) for c in coords if len(c) >= 2]
+            if len(pixels) < 2:
+                continue
+            color = color_for(f.get("properties") or {})
+            draw.line(pixels, fill=color, width=2, joint="curve")
+            has_any = True
+    if not has_any:
+        return None
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    return buf.getvalue()
+
+
+_DIR_COLORS = {
+    "forward": (55, 126, 184, 230),
+    "reverse": (228, 26, 28, 230),
+    "both": (160, 160, 160, 230),
+}
+_FALLBACK_COLOR = (228, 26, 28, 230)
+
+
+def _vector_color_resolver(proj: dict):
+    """Return f(properties) → (R,G,B,A). Picks a palette by the project's
+    attribute schema: direction-attribute first (graph projects), else the
+    first enum's options, else a single accent."""
+    attrs = proj.get("attributes") or []
+    if any(a["key"] == "direction" for a in attrs):
+        return lambda p: _DIR_COLORS.get(p.get("direction", "both"), _FALLBACK_COLOR)
+    enum = next((a for a in attrs if a["type"] == "enum"), None)
+    if enum and enum.get("options"):
+        # Stable categorical palette (ColorBrewer Set1, alpha 230).
+        palette = [
+            (228, 26, 28), (55, 126, 184), (77, 175, 74),
+            (152, 78, 163), (255, 127, 0), (255, 255, 51),
+            (166, 86, 40), (247, 129, 191),
+        ]
+        mapping = {opt: (*palette[i % len(palette)], 230)
+                   for i, opt in enumerate(enum["options"])}
+        key = enum["key"]
+        return lambda p: mapping.get(p.get(key), _FALLBACK_COLOR)
+    return lambda p: _FALLBACK_COLOR
 
 
 # ---- Public API ----

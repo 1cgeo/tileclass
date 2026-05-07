@@ -48,6 +48,14 @@ def admin_class_distribution(project_id: int | None = Query(default=None, ge=1))
     return admin_service.class_distribution(project_id=project_id)
 
 
+@router.get("/feature-distribution")
+def admin_feature_distribution(project_id: int | None = Query(default=None, ge=1)):
+    """Vector counterpart of class-distribution: occurrences per
+    (attribute_key, value) for enum/boolean attributes. The dashboard
+    renders one section per attribute key, with bars per value."""
+    return admin_service.feature_distribution(project_id=project_id)
+
+
 _TILE_SORT_KEYS = {
     "id", "name", "status",
     "classified_by_username", "reviewed_by_username",
