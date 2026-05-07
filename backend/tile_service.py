@@ -532,15 +532,21 @@ def request_changes(tile_id: int, user_id: int, note: str) -> dict:
 
 
 def latest_review_note(tile_id: int) -> dict | None:
-    """Most recent `request_changes` note attached to the tile, or None.
-    Used by the editor to surface "este tile voltou pra você" context when
-    the classifier picks the tile up again."""
+    """Most recent `request_changes` note still relevant to the current
+    cycle. A note is "live" only while the tile's `classified_at` is set
+    AND the note was logged after that timestamp — admin reset clears
+    `classified_at`, which retires any pre-reset notes so the next
+    classifier doesn't see ghost feedback from a discarded cycle."""
     conn = connect()
     try:
         row = conn.execute(
             """SELECT a.detail, a.created_at, u.username
-               FROM action_log a LEFT JOIN users u ON u.id=a.user_id
+               FROM action_log a
+               JOIN tiles t ON t.id=a.tile_id
+               LEFT JOIN users u ON u.id=a.user_id
                WHERE a.tile_id=? AND a.action='request_changes'
+                 AND t.classified_at IS NOT NULL
+                 AND a.created_at >= t.classified_at
                ORDER BY a.id DESC LIMIT 1""",
             (tile_id,),
         ).fetchone()
