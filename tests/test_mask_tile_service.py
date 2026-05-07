@@ -91,9 +91,12 @@ def _wm_tile_for(bbox, z):
 
 # ---- Render ------------------------------------------------------------------
 
+_PID = 1  # default project seeded by init_db()
+
+
 def test_render_empty_when_no_tiles(app_env):
     """A WM tile far from any classified data renders fully transparent."""
-    arr = _png_array(mts.get_tile(8, 100, 100))
+    arr = _png_array(mts.get_tile(_PID, 8, 100, 100))
     assert (arr[..., 3] == 0).all()
 
 
@@ -102,7 +105,7 @@ def test_render_paints_class_color(app_env):
     the rendered overlay tile that intersects it."""
     _insert_classified("t1", _BBOX, fill_class=1)
     z, x, y = _wm_tile_for(_BBOX, 14)
-    arr = _png_array(mts.get_tile(z, x, y))
+    arr = _png_array(mts.get_tile(_PID, z, x, y))
     blue = (
         (arr[..., 0] == 0x37)
         & (arr[..., 1] == 0x7e)
@@ -126,7 +129,7 @@ def test_pending_tile_does_not_render(app_env):
     finally:
         conn.close()
     z, x, y = _wm_tile_for(_BBOX, 14)
-    arr = _png_array(mts.get_tile(z, x, y))
+    arr = _png_array(mts.get_tile(_PID, z, x, y))
     assert (arr[..., 3] == 0).all()
 
 
@@ -139,13 +142,13 @@ def test_cache_hit_skips_rerender(app_env, monkeypatch):
     calls = {"n": 0}
     real = mts._render_tile
 
-    def counting(zz, xx, yy):
+    def counting(pid, zz, xx, yy):
         calls["n"] += 1
-        return real(zz, xx, yy)
+        return real(pid, zz, xx, yy)
 
     monkeypatch.setattr(mts, "_render_tile", counting)
-    a = mts.get_tile(z, x, y)
-    b = mts.get_tile(z, x, y)
+    a = mts.get_tile(_PID, z, x, y)
+    b = mts.get_tile(_PID, z, x, y)
     assert a == b
     assert calls["n"] == 1
 
@@ -154,12 +157,11 @@ def test_empty_region_cached_as_null(app_env):
     """Empty WM tiles cache as NULL — second call still serves a transparent
     PNG without re-rendering, and the row exists in the cache file."""
     z, x, y = 14, 100, 100
-    a = mts.get_tile(z, x, y)
+    a = mts.get_tile(_PID, z, x, y)
     arr = _png_array(a)
     assert (arr[..., 3] == 0).all()
-    # Reach into the cache to confirm the row is materialised as NULL.
     import sqlite3
-    cache = sqlite3.connect(str(mts._resolve_cache_path()))
+    cache = sqlite3.connect(str(mts.cache_path(_PID)))
     try:
         row = cache.execute(
             "SELECT tile_data FROM tiles WHERE zoom_level=? AND tile_column=? AND tile_row=?",
@@ -176,23 +178,22 @@ def test_invalidate_bbox_drops_overlapping_rows(app_env):
     """Cache pre-populated, then invalidate_bbox over the same area → rows gone."""
     _insert_classified("t1", _BBOX, fill_class=1)
     z, x, y = _wm_tile_for(_BBOX, 14)
-    mts.get_tile(z, x, y)  # populate cache
+    mts.get_tile(_PID, z, x, y)  # populate cache
 
     import sqlite3
-    cache_path = str(mts._resolve_cache_path())
-    cache = sqlite3.connect(cache_path)
+    cache_file = str(mts.cache_path(_PID))
+    cache = sqlite3.connect(cache_file)
     try:
         before = cache.execute("SELECT COUNT(*) FROM tiles").fetchone()[0]
     finally:
         cache.close()
     assert before >= 1
 
-    deleted = mts.invalidate_bbox(*_BBOX)
+    deleted = mts.invalidate_bbox(_PID, *_BBOX)
     assert deleted >= 1
 
-    cache = sqlite3.connect(cache_path)
+    cache = sqlite3.connect(cache_file)
     try:
-        # The specific tile we cached must be gone.
         row = cache.execute(
             "SELECT 1 FROM tiles WHERE zoom_level=? AND tile_column=? AND tile_row=?",
             (z, x, mts._tms_row(z, y)),
@@ -218,7 +219,7 @@ def test_classify_invalidates_cache(app_env, client, admin_user, operators):
         conn.close()
 
     z, x, y = _wm_tile_for(_BBOX, 14)
-    pre = _png_array(mts.get_tile(z, x, y))
+    pre = _png_array(mts.get_tile(_PID, z, x, y))
     assert (pre[..., 3] == 0).all()
 
     op_token = token(client, operators[0]["username"], operators[0]["password"])
@@ -231,7 +232,7 @@ def test_classify_invalidates_cache(app_env, client, admin_user, operators):
     )
     assert r.status_code == 200, r.text
 
-    post = _png_array(mts.get_tile(z, x, y))
+    post = _png_array(mts.get_tile(_PID, z, x, y))
     blue = (post[..., 0] == 0x37) & (post[..., 3] == 255)
     assert blue.any(), "expected the classified mask to appear after invalidation"
 
@@ -241,7 +242,7 @@ def test_reset_invalidates_cache(app_env, client, admin_user, operators):
     tid = _insert_classified("t1", _BBOX, fill_class=1)
     z, x, y = _wm_tile_for(_BBOX, 14)
 
-    pre = _png_array(mts.get_tile(z, x, y))
+    pre = _png_array(mts.get_tile(_PID, z, x, y))
     assert ((pre[..., 0] == 0x37) & (pre[..., 3] == 255)).any()
 
     admin_token = token(client, admin_user["username"], admin_user["password"])
@@ -249,7 +250,7 @@ def test_reset_invalidates_cache(app_env, client, admin_user, operators):
                     headers=h(admin_token))
     assert r.status_code == 200
 
-    post = _png_array(mts.get_tile(z, x, y))
+    post = _png_array(mts.get_tile(_PID, z, x, y))
     assert (post[..., 3] == 0).all(), "mask should disappear after admin reset"
 
 
@@ -258,23 +259,23 @@ def test_reset_invalidates_cache(app_env, client, admin_user, operators):
 def test_endpoint_requires_admin(client, admin_user, operators):
     """Operators are rejected; admin gets a PNG."""
     op_token = token(client, operators[0]["username"], operators[0]["password"])
-    r = client.get("/api/admin/mask-tiles/14/8400/9600.png", headers=h(op_token))
+    r = client.get(f"/api/admin/mask-tiles/{_PID}/14/8400/9600.png", headers=h(op_token))
     assert r.status_code in (401, 403)
 
     admin_token = token(client, admin_user["username"], admin_user["password"])
-    r = client.get("/api/admin/mask-tiles/14/8400/9600.png", headers=h(admin_token))
+    r = client.get(f"/api/admin/mask-tiles/{_PID}/14/8400/9600.png", headers=h(admin_token))
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("image/png")
 
 
 def test_endpoint_rejects_zoom_out_of_range(client, admin_user):
     t = token(client, admin_user["username"], admin_user["password"])
-    r = client.get("/api/admin/mask-tiles/3/0/0.png", headers=h(t))
+    r = client.get(f"/api/admin/mask-tiles/{_PID}/3/0/0.png", headers=h(t))
     assert r.status_code == 404
 
 
 def test_endpoint_rejects_xy_out_of_range(client, admin_user):
     """At z=8 there are only 256 tiles per axis; x=9999 must 404."""
     t = token(client, admin_user["username"], admin_user["password"])
-    r = client.get("/api/admin/mask-tiles/8/9999/0.png", headers=h(t))
+    r = client.get(f"/api/admin/mask-tiles/{_PID}/8/9999/0.png", headers=h(t))
     assert r.status_code == 404

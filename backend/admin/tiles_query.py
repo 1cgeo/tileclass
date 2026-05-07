@@ -132,53 +132,37 @@ def count_tiles(status: str | None = None, user_id: int | None = None,
 def list_tiles_map(project_id: int | None = None) -> list[dict]:
     """Compact tile list for the admin map view: id, name, status and bbox.
     No pagination — the map renders the full dataset as polygons."""
+    extra = " WHERE project_id=?" if project_id is not None else ""
+    args = (project_id,) if project_id is not None else ()
     conn = connect()
     try:
-        if project_id is None:
-            rows = conn.execute(
-                "SELECT id, project_id, name, status, bbox_west, bbox_south, bbox_east, bbox_north, "
-                "paused_at, blocked_from "
-                "FROM tiles ORDER BY id"
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT id, project_id, name, status, bbox_west, bbox_south, bbox_east, bbox_north, "
-                "paused_at, blocked_from "
-                "FROM tiles WHERE project_id=? ORDER BY id",
-                (project_id,),
-            ).fetchall()
+        rows = conn.execute(
+            "SELECT id, project_id, name, status, bbox_west, bbox_south, bbox_east, bbox_north, "
+            "paused_at, blocked_from "
+            f"FROM tiles{extra} ORDER BY id",
+            args,
+        ).fetchall()
     finally:
         conn.close()
     return [dict(r) for r in rows]
 
 
 def list_problems(project_id: int | None = None) -> list[dict]:
+    extra = " AND t.project_id=?" if project_id is not None else ""
+    args = (project_id,) if project_id is not None else ()
     conn = connect()
     try:
-        if project_id is None:
-            rows = conn.execute(
-                """SELECT t.id, t.project_id, t.name, t.problem_note,
-                          (SELECT user_id FROM action_log
-                             WHERE tile_id=t.id AND action='report_problem'
-                             ORDER BY id DESC LIMIT 1) reporter_id,
-                          (SELECT created_at FROM action_log
-                             WHERE tile_id=t.id AND action='report_problem'
-                             ORDER BY id DESC LIMIT 1) reported_at
-                   FROM tiles t WHERE t.status='problem' ORDER BY t.id"""
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                """SELECT t.id, t.project_id, t.name, t.problem_note,
-                          (SELECT user_id FROM action_log
-                             WHERE tile_id=t.id AND action='report_problem'
-                             ORDER BY id DESC LIMIT 1) reporter_id,
-                          (SELECT created_at FROM action_log
-                             WHERE tile_id=t.id AND action='report_problem'
-                             ORDER BY id DESC LIMIT 1) reported_at
-                   FROM tiles t WHERE t.status='problem' AND t.project_id=?
-                   ORDER BY t.id""",
-                (project_id,),
-            ).fetchall()
+        rows = conn.execute(
+            f"""SELECT t.id, t.project_id, t.name, t.problem_note,
+                       (SELECT user_id FROM action_log
+                          WHERE tile_id=t.id AND action='report_problem'
+                          ORDER BY id DESC LIMIT 1) reporter_id,
+                       (SELECT created_at FROM action_log
+                          WHERE tile_id=t.id AND action='report_problem'
+                          ORDER BY id DESC LIMIT 1) reported_at
+                FROM tiles t WHERE t.status='problem'{extra} ORDER BY t.id""",
+            args,
+        ).fetchall()
     finally:
         conn.close()
     return [dict(r) for r in rows]

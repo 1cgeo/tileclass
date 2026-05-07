@@ -6,7 +6,7 @@
 
 import { getTokens } from "./api.js";
 
-const OVERLAY_KEYS = ["secondary", "tertiary", "dsg", "mb"];
+const OVERLAY_KEYS = ["secondary", "tertiary", "ref_primary", "ref_secondary"];
 
 // Bing Maps uses quadkeys instead of z/x/y. We expose a custom URL scheme
 // `bingmaps://{z}/{x}/{y}` so config.yaml can stay declarative; the frontend

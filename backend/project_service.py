@@ -1,35 +1,25 @@
 """Project CRUD + membership + class config.
 
-Source-of-truth for everything that used to live in config.yaml's `classes`
-and `tileserver*`/`dsg`/`mapbiomas` blocks. The YAML is now seed-only
-(consumed once on a fresh DB by `_seed_default_project` in database.py).
-
-Read paths cache aggressively because `/api/projects/{id}` is hit on every
-editor load and every layer URL build. Mutations bump the per-project cache
-key so reads see fresh data without a global flush.
-"""
+Read paths cache aggressively (`get_project` is hit on every editor load and
+every layer URL build); mutations invalidate per-project cache keys plus the
+mbtiles reader pool."""
 from __future__ import annotations
 import threading
-import time
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 from fastapi import HTTPException
 
 from .config import validate_classes
-from .database import connect, transaction, log_action
+from .database import connect, transaction, log_action, now_iso
 
 
-# ---- Path resolution --------------------------------------------------------
-
-# mbtiles paths in the DB are stored relative to backend/ (the existing
-# convention from `_open_optional` in main.py: `../data_external/foo.mbtiles`).
-# Absolute paths pass through.
+# mbtiles paths are stored relative to backend/ by convention; absolute
+# paths pass through unchanged.
 _BACKEND_ROOT = Path(__file__).resolve().parent
 
 LAYER_KEYS = ("primary", "secondary", "tertiary", "ref_primary", "ref_secondary")
-_LAYER_COLUMN = {
+LAYER_COLUMN = {
     "primary": "primary_mbtiles",
     "secondary": "secondary_mbtiles",
     "tertiary": "tertiary_mbtiles",
@@ -38,9 +28,16 @@ _LAYER_COLUMN = {
 }
 
 
+def layer_path(project: dict, layer: str) -> str | None:
+    """Return the stored mbtiles path for `layer` on a project record, or None
+    when the layer isn't configured. Single point of truth for the layer →
+    column mapping."""
+    column = LAYER_COLUMN.get(layer)
+    return project.get(column) if column else None
+
+
 def resolve_mbtiles_path(stored: str | None) -> Optional[Path]:
-    """Resolve an mbtiles path the way main._open_optional did: relative to
-    backend/. Returns None for empty/None inputs."""
+    """Resolve an mbtiles path: relative entries become `backend/<path>`."""
     if not stored:
         return None
     p = Path(stored)
@@ -191,10 +188,6 @@ _ALLOWED_LAYER_FIELDS = {
 }
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
 def _validate_layer_path(stored: str, *, required: bool) -> None:
     """Path must resolve to an existing file. Empty/None only allowed for
     optional layers."""
@@ -248,7 +241,7 @@ def create_project(
             (name, description, 1 if mask_complete_required else 0,
              primary_mbtiles, secondary_mbtiles or None, tertiary_mbtiles or None,
              ref_mask_primary_mbtiles or None, ref_mask_secondary_mbtiles or None,
-             created_by, _now()),
+             created_by, now_iso()),
         )
         pid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         for ord_idx, c in enumerate(classes):

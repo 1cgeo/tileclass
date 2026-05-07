@@ -1,30 +1,26 @@
 """Admin dashboard: aggregates totals, completion %, ETA, and per-operator stats.
-Cycle durations come from action_log (assign_*→classify/review pairs minus the
+Cycle durations come from action_log (assign_*→classify/review pairs minus
 pause→resume intervals inside the cycle).
 
-When `project_id` is supplied, every aggregate is scoped to that project; when
-None, totals span the whole DB (legacy global view)."""
+`project_id` is propagated through every aggregate; None means global view.
+"""
 from ..database import connect
 
 
-def _project_join(project_id: int | None) -> tuple[str, str, list]:
-    """Return (extra_join, extra_where, args) to scope queries on tile_id-keyed
-    log rows to a project. Empty strings when scoping is off."""
+def _scope(project_id: int | None,
+           prefix: str = "") -> tuple[str, list]:
+    """Return (' AND <prefix>project_id=?', [pid]) when scoped, ('', []) when not.
+    Centralises the f-string-friendly fragment so every aggregate uses the
+    same shape and there's one place to look when the schema changes."""
     if project_id is None:
-        return "", "", []
-    return (
-        " LEFT JOIN tiles tt ON tt.id=action_log.tile_id",
-        " AND tt.project_id=?",
-        [project_id],
-    )
+        return "", []
+    return f" AND {prefix}project_id=?", [project_id]
 
 
 def _cycle_durations(conn, assign_action: str, done_action: str,
                      project_id: int | None = None):
-    """Per (user, tile) cycle duration in seconds, with pause→resume intervals
-    inside the cycle subtracted. Pauses from previous (reset+reassigned) cycles
-    are excluded by scoping to the latest assign timestamp."""
-    join_sql, extra_where, project_args = _project_join(project_id)
+    join_sql = "" if project_id is None else " LEFT JOIN tiles tt ON tt.id=action_log.tile_id"
+    extra_where, project_args = _scope(project_id, prefix="tt.")
     return conn.execute(
         f"""WITH cycles AS (
              SELECT action_log.user_id, action_log.tile_id,
@@ -63,20 +59,20 @@ def _cycle_durations(conn, assign_action: str, done_action: str,
 
 
 def dashboard(project_id: int | None = None) -> dict:
-    pscope = "" if project_id is None else " WHERE project_id=?"
-    pargs = [] if project_id is None else [project_id]
+    proj_clause, proj_args = _scope(project_id)
+    where_proj = ("WHERE 1=1" + proj_clause) if proj_clause else ""
+
     conn = connect()
     try:
         rows = conn.execute(
-            f"SELECT status, COUNT(*) c FROM tiles{pscope} GROUP BY status", pargs
+            f"SELECT status, COUNT(*) c FROM tiles {where_proj} GROUP BY status",
+            proj_args,
         ).fetchall()
         totals = {r["status"]: r["c"] for r in rows}
         total = sum(totals.values())
         # "Classified" for dashboard metrics means "past the classify step" —
         # includes tiles awaiting review, under review, and fully reviewed.
-        # The % concluded, rate per day, and ETA all use this definition so
-        # the numbers reflect classification throughput, which is the team's
-        # primary production metric (review is a secondary validation step).
+        # The team's primary production metric is classification throughput.
         classified_total = (
             totals.get("classified", 0)
             + totals.get("in_review", 0)
@@ -84,34 +80,31 @@ def dashboard(project_id: int | None = None) -> dict:
         )
         pct = round(100.0 * classified_total / total, 2) if total else 0.0
         paused_count = conn.execute(
-            f"SELECT COUNT(*) c FROM tiles WHERE paused_at IS NOT NULL"
-            + (" AND project_id=?" if project_id is not None else ""),
-            pargs,
+            f"SELECT COUNT(*) c FROM tiles WHERE paused_at IS NOT NULL{proj_clause}",
+            proj_args,
         ).fetchone()["c"]
-        # Per-status paused breakdown so the dashboard can show paused as a
-        # distinct category from active in_progress/in_review (paused tiles
-        # are still counted under their raw status in totals_by_status).
+        # Per-status paused breakdown — paused tiles are still counted under
+        # their raw status in totals_by_status, so the dashboard surfaces
+        # paused as a distinct category.
         paused_breakdown_rows = conn.execute(
             f"""SELECT status, COUNT(*) c FROM tiles
                 WHERE paused_at IS NOT NULL
-                  AND status IN ('in_progress','in_review')
-                  {' AND project_id=?' if project_id is not None else ''}
+                  AND status IN ('in_progress','in_review'){proj_clause}
                 GROUP BY status""",
-            pargs,
+            proj_args,
         ).fetchall()
         paused_by_status = {r["status"]: r["c"] for r in paused_breakdown_rows}
 
         daily = conn.execute(
             f"""SELECT substr(reviewed_at,1,10) d, COUNT(*) c
-                FROM tiles WHERE status='reviewed' AND reviewed_at IS NOT NULL
-                {' AND project_id=?' if project_id is not None else ''}
+                FROM tiles WHERE status='reviewed' AND reviewed_at IS NOT NULL{proj_clause}
                 GROUP BY d ORDER BY d DESC LIMIT 30""",
-            pargs,
+            proj_args,
         ).fetchall()
 
-        # Average time per action (seconds between assign and finish) via
-        # action_log self-joins. When project-scoped, the join through tiles
-        # filters out actions on tiles in other projects.
+        # When project-scoped, join through tiles so SUMs only count actions
+        # on tiles in this project. The COALESCE(t.id) avoids counting
+        # logout-style logs (tile_id IS NULL).
         if project_id is None:
             per_op = conn.execute(
                 """SELECT u.id, u.username,
@@ -157,7 +150,6 @@ def dashboard(project_id: int | None = None) -> dict:
             rv = review_by_user.get(r["id"])
             d["avg_classify_seconds"] = round(c, 1) if c else 0.0
             d["avg_review_seconds"] = round(rv, 1) if rv else 0.0
-            # Combined (legacy) average kept for backwards compatibility
             combined = []
             if c: combined.append(c)
             if rv: combined.append(rv)
@@ -166,14 +158,12 @@ def dashboard(project_id: int | None = None) -> dict:
 
         # ETA: remaining = tiles not yet classified; rate = tiles classified
         # in the last 7 days / 7. `classified_at` is set when a tile first
-        # transitions to 'classified' and is cleared on reset; filtering on
-        # status keeps re-classified-then-problem tiles out of the rate.
+        # transitions to 'classified' and is cleared on reset.
         rate_row = conn.execute(
             f"""SELECT COUNT(*) c FROM tiles
                 WHERE status IN ('classified','in_review','reviewed')
-                  AND classified_at >= datetime('now','-7 days')
-                  {' AND project_id=?' if project_id is not None else ''}""",
-            pargs,
+                  AND classified_at >= datetime('now','-7 days'){proj_clause}""",
+            proj_args,
         ).fetchone()
         rate_per_day = (rate_row["c"] or 0) / 7.0
         remaining = total - classified_total

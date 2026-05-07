@@ -39,18 +39,11 @@ def test_overview_requires_admin(client, admin_user, operators):
 
 
 def test_overview_shape(client, admin_user):
-    """Each mbtiles slot reports a consistent shape both in the legacy
-    `mbtiles` block (default-project mirror) and in the new per-project
-    `projects` map. Closed → minimal payload; open → full reader metadata."""
+    """Per-project layer status + overlay cache aggregate. Each layer slot
+    is either closed (minimal payload) or open (full reader metadata)."""
     tok = token(client, admin_user["username"], admin_user["password"])
     body = client.get("/api/admin/maintenance/overview", headers=h(tok)).json()
-    assert set(body.keys()) == {"mbtiles", "projects", "overlay_cache"}
-    # Legacy block: default project's primary/dsg/mapbiomas, derived from
-    # the per-project map below.
-    for key in ("primary", "dsg", "mapbiomas"):
-        info = body["mbtiles"][key]
-        assert "open" in info, key
-    # Per-project map keyed by project id (string) → name + layers.
+    assert set(body.keys()) == {"projects", "overlay_cache"}
     assert body["projects"], "default project must appear in the per-project map"
     for pid, payload in body["projects"].items():
         assert "name" in payload and "layers" in payload, pid
@@ -68,14 +61,17 @@ def test_overview_shape(client, admin_user):
     assert cache["file_size_bytes"] >= 0
 
 
+_PID = 1  # default project seeded by init_db()
+
+
 def test_overview_counts_after_render(client, admin_user):
     """Render one populated tile (rendered_tiles=1) and one over empty space
     (empty_tiles=1) — proves the stats split rendered vs empty correctly."""
     _insert_classified("t1", fill_class=1)
     z = 14
     x, y, *_ = mts.wm_tiles_for_bbox(z, *_BBOX)
-    mts.get_tile(z, x, y)            # populated → rendered row
-    mts.get_tile(z, 0, 0)            # ocean / no overlap → empty row
+    mts.get_tile(_PID, z, x, y)            # populated → rendered row
+    mts.get_tile(_PID, z, 0, 0)            # ocean / no overlap → empty row
 
     tok = token(client, admin_user["username"], admin_user["password"])
     cache = client.get("/api/admin/maintenance/overview",
@@ -95,8 +91,8 @@ def test_clear_wipes_cache(client, admin_user):
     _insert_classified("t1", fill_class=2)
     z = 14
     x, y, *_ = mts.wm_tiles_for_bbox(z, *_BBOX)
-    mts.get_tile(z, x, y)
-    mts.get_tile(z, 0, 0)
+    mts.get_tile(_PID, z, x, y)
+    mts.get_tile(_PID, z, 0, 0)
 
     tok = token(client, admin_user["username"], admin_user["password"])
     r = client.post("/api/admin/maintenance/overlay-cache/clear", headers=h(tok))

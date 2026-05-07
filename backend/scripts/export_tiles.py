@@ -81,27 +81,7 @@ def _write_geotiff(out: Path, arr: np.ndarray, bbox: tuple[float, float, float, 
         dst.write(arr, 1)
 
 
-def _resolve_project(project_arg: str | None) -> int | None:
-    """Resolve --project to a project_id. None = export all projects."""
-    if project_arg is None:
-        return None
-    conn = connect()
-    try:
-        rows = conn.execute("SELECT id, name FROM projects").fetchall()
-    finally:
-        conn.close()
-    try:
-        pid = int(project_arg)
-        for r in rows:
-            if r["id"] == pid:
-                return pid
-    except ValueError:
-        pass
-    for r in rows:
-        if r["name"] == project_arg:
-            return r["id"]
-    print(f"projeto não encontrado: {project_arg}")
-    sys.exit(1)
+from backend.scripts._common import resolve_project_arg
 
 
 def _select_rows(statuses: tuple[str, ...], project_id: int | None) -> list:
@@ -201,7 +181,11 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = Path(args.manifest) if args.manifest else out_dir / "manifest.csv"
     statuses = STATUS_FILTERS[args.status]
-    project_id = _resolve_project(args.project)
+    conn = connect()
+    try:
+        project_id = resolve_project_arg(conn, args.project, allow_all=True)
+    finally:
+        conn.close()
 
     rows = _select_rows(statuses, project_id)
     paths: list[Path] = []

@@ -134,8 +134,7 @@ def get_reader(project_id: int, layer: str) -> Optional[MBTilesReader]:
     proj = project_service.get_project(project_id)
     if not proj:
         return None
-    column = project_service._LAYER_COLUMN[layer]
-    path = project_service.resolve_mbtiles_path(proj.get(column))
+    path = project_service.resolve_mbtiles_path(project_service.layer_path(proj, layer))
     if path is None or not path.exists():
         return None
     reader = MBTilesReader(_DEFAULT_FORMATS[layer])

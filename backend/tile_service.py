@@ -2,13 +2,9 @@
 from datetime import datetime, timezone
 import json
 from fastapi import HTTPException
-from .database import connect, transaction, log_action
+from .database import connect, transaction, log_action, now_iso
 from .mask_utils import encode_mask, decode_mask, empty_mask_png, validate_submission, validate_partial
 from . import mask_tile_service, project_service
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 # Base SELECT used everywhere a tile is returned to the client. The LEFT JOINs
@@ -415,7 +411,7 @@ def submit_classification(tile_id: int, user_id: int, raw_mask: bytes,
                 """UPDATE tiles SET status='classified', data_png=?, classified_by=?,
                    classified_at=?, assigned_to=NULL, paused_at=NULL, version=version+1
                    WHERE id=?""",
-                (png, user_id, _now(), tile_id),
+                (png, user_id, now_iso(), tile_id),
             )
             log_action(conn, user_id, tile_id, "classify")
         elif status == "in_review":
@@ -423,7 +419,7 @@ def submit_classification(tile_id: int, user_id: int, raw_mask: bytes,
                 """UPDATE tiles SET status='reviewed', data_png=?, reviewed_by=?,
                    reviewed_at=?, assigned_to=NULL, paused_at=NULL, version=version+1
                    WHERE id=?""",
-                (png, user_id, _now(), tile_id),
+                (png, user_id, now_iso(), tile_id),
             )
             log_action(conn, user_id, tile_id, "review")
         else:
@@ -494,7 +490,7 @@ def pause_tile(tile_id: int, user_id: int, raw_mask: bytes,
             raise HTTPException(409, f"cannot pause from state: {row['status']}")
         conn.execute(
             "UPDATE tiles SET data_png=?, paused_at=?, version=version+1 WHERE id=?",
-            (png, _now(), tile_id),
+            (png, now_iso(), tile_id),
         )
         log_action(conn, user_id, tile_id, "pause")
         row = conn.execute(f"{_TILE_SELECT} WHERE tiles.id=?", (tile_id,)).fetchone()

@@ -14,6 +14,7 @@ let tileserverUrl = "";
 let tileserverMaxZoom = 22;
 let classes = [];
 let classesById = {};
+let currentProjectId = null;
 let selectedIds = new Set();
 let currentTab = "dashboard";
 let listView = "table"; // "table" | "grid"
@@ -69,13 +70,15 @@ export async function initAdmin(user) {
     // management lives; per-project palette switching can come later.
     const projects = await apiGet("/api/projects");
     if (projects && projects.length) {
-        const proj = await apiGet(`/api/projects/${projects[0].id}`);
+        currentProjectId = projects[0].id;
+        const proj = await apiGet(`/api/projects/${currentProjectId}`);
         const primary = (proj.layers || {}).primary;
         tileserverUrl = (primary && primary.url) || "";
         tileserverMaxZoom = (primary && primary.max_zoom) ?? 22;
         classes = proj.classes || [];
         classesById = Object.fromEntries(classes.map(c => [c.id, c]));
     } else {
+        currentProjectId = null;
         tileserverUrl = "";
         tileserverMaxZoom = 22;
         classes = [];
@@ -1353,13 +1356,14 @@ function setClassOverlayEnabled(on) {
 
 function addClassOverlayLayer() {
     if (!mapView || mapView.getSource("mask-overlay")) return;
+    if (!currentProjectId) return;
     // Cache-busting param so toggling off then on re-fetches anything the
     // browser cached during the previous session. Server-side MBTiles cache
     // is unaffected.
     const stamp = Date.now();
     mapView.addSource("mask-overlay", {
         type: "raster",
-        tiles: [`/api/admin/mask-tiles/{z}/{x}/{y}.png?t=${stamp}`],
+        tiles: [`/api/admin/mask-tiles/${currentProjectId}/{z}/{x}/{y}.png?t=${stamp}`],
         tileSize: 256,
         minzoom: CLASS_OVERLAY_MIN_ZOOM,
         maxzoom: CLASS_OVERLAY_MAX_ZOOM,

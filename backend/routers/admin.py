@@ -110,17 +110,21 @@ def admin_tiles_map(project_id: int | None = Query(default=None, ge=1)):
     return admin_service.list_tiles_map(project_id=project_id)
 
 
-@router.get("/mask-tiles/{z}/{x}/{y}.png")
-def admin_mask_tile(z: int = Path(ge=0, le=22), x: int = Path(ge=0), y: int = Path(ge=0)):
-    """Colorized mask overlay for the admin map view. Renders + caches a 256x256
-    RGBA tile composed from every TileClass tile whose bbox intersects (z,x,y).
-    Empty regions return a fully transparent PNG."""
+@router.get("/mask-tiles/{project_id}/{z}/{x}/{y}.png")
+def admin_mask_tile(
+    project_id: int = Path(ge=1),
+    z: int = Path(ge=0, le=22),
+    x: int = Path(ge=0),
+    y: int = Path(ge=0),
+):
+    """Colorized mask overlay for the admin map view, scoped to one project
+    so palettes/tilesets never bleed between projects."""
     if z < mask_tile_service.min_zoom() or z > mask_tile_service.max_zoom():
         raise HTTPException(404, "zoom out of range")
     n = 1 << z
     if x >= n or y >= n:
         raise HTTPException(404, "tile out of range")
-    png = mask_tile_service.get_tile(z, x, y)
+    png = mask_tile_service.get_tile(project_id, z, x, y)
     return Response(
         content=png,
         media_type="image/png",
@@ -276,19 +280,17 @@ def admin_set_user_role(body: SetRoleIn, user_id: int = Path(ge=1),
 # ---------- Maintenance ----------
 
 def _layer_info(project_id: int, layer: str) -> dict:
-    """Status of a single configured layer for a project. Returns
-    `{'open': False, 'configured': bool}` when the project has no path or
-    the file is missing; otherwise full reader metadata."""
+    """Per-layer status for the maintenance overview: not-configured,
+    configured-but-broken, or open with reader metadata."""
     proj = project_service.get_project(project_id)
     if not proj:
         return {"open": False, "configured": False}
-    column = project_service._LAYER_COLUMN[layer]
-    has_path = bool(proj.get(column))
-    if not has_path:
+    path = project_service.layer_path(proj, layer)
+    if not path:
         return {"open": False, "configured": False}
     reader = mbtiles_service.get_reader(project_id, layer)
     if reader is None or not reader.is_open():
-        return {"open": False, "configured": True, "path": proj.get(column)}
+        return {"open": False, "configured": True, "path": path}
     lo, hi = reader.zoom_range()
     p = reader.path()
     return {
@@ -313,30 +315,15 @@ def admin_maintenance_overview():
         ).fetchall()
     finally:
         conn.close()
-    projects_layers = {}
-    for r in rows:
-        pid = r["id"]
-        projects_layers[pid] = {
+    projects_layers = {
+        r["id"]: {
             "name": r["name"],
-            "layers": {
-                layer: _layer_info(pid, layer)
-                for layer in ("primary", "secondary", "tertiary",
-                              "ref_primary", "ref_secondary")
-            },
+            "layers": {layer: _layer_info(r["id"], layer)
+                       for layer in project_service.LAYER_KEYS},
         }
-    # Legacy shape for the SPA's existing maintenance widget — populated from
-    # the default project so the screen keeps rendering until the admin UI is
-    # rebuilt for projects (step 7).
-    default = next(iter(projects_layers.values()), None)
-    legacy_default = {}
-    if default:
-        legacy_default = {
-            "primary": default["layers"]["primary"],
-            "dsg": default["layers"]["ref_primary"],
-            "mapbiomas": default["layers"]["ref_secondary"],
-        }
+        for r in rows
+    }
     return {
-        "mbtiles": legacy_default,
         "projects": projects_layers,
         "overlay_cache": mask_tile_service.cache_stats(),
     }

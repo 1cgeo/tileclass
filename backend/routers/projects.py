@@ -20,36 +20,20 @@ def list_projects(user: auth.CurrentUser = Depends(auth.get_current_user)):
 
 
 def _build_layers(project_id: int, proj: dict) -> dict:
-    """Layer URL templates the editor consumes. Each entry includes the
-    extension (taken from the mbtiles metadata, falling back to a per-layer
-    default) so the editor can construct the final URL without round-tripping
-    to discover the format. Absent layers map to None — the client uses that
-    to suppress shortcuts/legend entries."""
+    """Layer URL templates the editor consumes. Includes ext (from mbtiles
+    metadata) so the client doesn't round-trip to discover the format.
+    Absent layer → None; configured-but-broken → {error: 'mbtiles_not_open'}
+    so the admin can spot the problem and the client still skips the shortcut."""
     base = f"/api/projects/{project_id}/xyz"
     out = {}
-    layer_to_field = {
-        "primary": "primary_mbtiles",
-        "secondary": "secondary_mbtiles",
-        "tertiary": "tertiary_mbtiles",
-        "ref_primary": "ref_mask_primary_mbtiles",
-        "ref_secondary": "ref_mask_secondary_mbtiles",
-    }
-    for layer, field in layer_to_field.items():
-        if not proj.get(field):
+    for layer in project_service.LAYER_KEYS:
+        if not project_service.layer_path(proj, layer):
             out[layer] = None
             continue
         reader = mbtiles_service.get_reader(project_id, layer)
         if reader is None:
-            # Path is set but file missing/unreadable. Surface that the layer
-            # is configured so the admin can spot the problem; client treats
-            # it as absent (no shortcut).
-            out[layer] = {
-                "url": None,
-                "ext": None,
-                "min_zoom": None,
-                "max_zoom": None,
-                "error": "mbtiles_not_open",
-            }
+            out[layer] = {"url": None, "ext": None, "min_zoom": None,
+                          "max_zoom": None, "error": "mbtiles_not_open"}
             continue
         ext = reader.tile_format()
         zmin, zmax = reader.zoom_range()

@@ -316,8 +316,14 @@ def init_db() -> None:
         conn.close()
 
 
+def now_iso() -> str:
+    """UTC timestamp in ISO 8601 — single source for `*_at` columns and
+    action_log.created_at across the codebase."""
+    return datetime.now(timezone.utc).isoformat()
+
+
 def log_action(conn: sqlite3.Connection, user_id: int, tile_id: int | None, action: str, detail: str | None = None) -> None:
     conn.execute(
         "INSERT INTO action_log(user_id, tile_id, action, detail, created_at) VALUES (?,?,?,?,?)",
-        (user_id, tile_id, action, detail, datetime.now(timezone.utc).isoformat()),
+        (user_id, tile_id, action, detail, now_iso()),
     )

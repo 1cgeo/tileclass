@@ -1,13 +1,12 @@
 """Admin tile mutations: reset, problem, re-review, assign/unassign, pause,
 delete, block/unblock. All multi-row paths are atomic (BEGIN IMMEDIATE +
 all-or-nothing); single-tile wrappers delegate to bulk so we keep one SQL path."""
-from datetime import datetime, timezone
 import json
 
 from fastapi import HTTPException
 
 from .. import mask_tile_service
-from ..database import connect, transaction, log_action
+from ..database import connect, transaction, log_action, now_iso
 from ..mask_utils import empty_mask_png
 
 
@@ -16,10 +15,6 @@ _MAX_REASON_LEN = 500
 
 def _clean_reason(reason: str | None) -> str | None:
     return ((reason or "").strip()[:_MAX_REASON_LEN]) or None
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def reset_many(tile_ids: list[int], admin_id: int, reason: str | None = None) -> int:
@@ -122,7 +117,7 @@ def assign_many(tile_ids: list[int], user_id: int, admin_id: int,
     if not tile_ids:
         return {"affected": 0, "ids": []}
     detail = _clean_reason(reason)
-    now = _now_iso()
+    now = now_iso()
     with transaction("IMMEDIATE") as conn:
         user = conn.execute(
             "SELECT id, active, role, can_review FROM users WHERE id=?", (user_id,)
@@ -207,7 +202,8 @@ def delete_tile(tile_id: int, admin_id: int, reason: str | None = None) -> dict:
     clean = _clean_reason(reason)
     with transaction("IMMEDIATE") as conn:
         row = conn.execute(
-            "SELECT id, name, status, bbox_west, bbox_south, bbox_east, bbox_north "
+            "SELECT id, project_id, name, status, "
+            "bbox_west, bbox_south, bbox_east, bbox_north "
             "FROM tiles WHERE id=?",
             (tile_id,),
         ).fetchone()
@@ -224,12 +220,12 @@ def delete_tile(tile_id: int, admin_id: int, reason: str | None = None) -> dict:
             conn, admin_id, None, "delete_tile",
             json.dumps({"tile_id": tile_id, "name": row["name"], "reason": clean}),
         )
+        project_id = row["project_id"]
         bbox = (row["bbox_west"], row["bbox_south"], row["bbox_east"], row["bbox_north"])
-    # Bbox-based invalidation: the row is gone, but the gate above guarantees
-    # status was 'problem' so the mask was already wiped + invalidated by the
-    # report-problem step. This call is a defensive cleanup for any cached
-    # entry that could have been re-rendered between report and delete.
-    mask_tile_service.safe_invalidate_bbox(*bbox)
+    # Defensive cleanup: status was 'problem' so the mask was already wiped +
+    # invalidated by report-problem. Catches any cache entry re-rendered in
+    # the gap between report and delete.
+    mask_tile_service.safe_invalidate_bbox(project_id, *bbox)
     return {"id": tile_id, "deleted": True}
 
 
@@ -264,7 +260,7 @@ def admin_pause_tile(tile_id: int, admin_id: int, reason: str | None = None) -> 
         operator_id = row["assigned_to"]
         conn.execute(
             "UPDATE tiles SET paused_at=?, version=version+1 WHERE id=?",
-            (_now_iso(), tile_id),
+            (now_iso(), tile_id),
         )
         log_action(conn, operator_id, tile_id, "pause", "admin")
         log_action(

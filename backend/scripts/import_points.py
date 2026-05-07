@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from backend.database import init_db, connect
 from backend.mask_utils import empty_mask_png
 from backend.geo import bbox_from_center, offset_center, TILE_METERS
+from backend.scripts._common import resolve_project_arg, insert_tile_dedup
 
 
 def _read_points(args) -> list[tuple[float, float, str]]:
@@ -46,60 +47,10 @@ def _read_points(args) -> list[tuple[float, float, str]]:
     return pts
 
 
-def _resolve_project(conn, project_arg: str | None) -> int:
-    """Resolve --project (id or name) to a project_id. Falls back to the
-    single existing project when there is exactly one."""
-    rows = conn.execute("SELECT id, name FROM projects ORDER BY id").fetchall()
-    if not rows:
-        print("erro: nenhum projeto cadastrado. Use a UI admin ou crie um via "
-              "/api/admin/projects antes de importar tiles.")
-        sys.exit(1)
-    if project_arg is None:
-        if len(rows) == 1:
-            return rows[0]["id"]
-        names = ", ".join(f"{r['id']}={r['name']}" for r in rows)
-        print(f"--project é obrigatório (vários projetos): {names}")
-        sys.exit(1)
-    # Try numeric id first, then name.
-    try:
-        pid = int(project_arg)
-        for r in rows:
-            if r["id"] == pid:
-                return pid
-    except ValueError:
-        pass
-    for r in rows:
-        if r["name"] == project_arg:
-            return r["id"]
-    print(f"projeto não encontrado: {project_arg}")
-    sys.exit(1)
-
-
-def _insert_tile(conn, project_id: int, name: str, lat_c: float, lon_c: float,
-                 empty_png: bytes) -> bool:
-    west, south, east, north = bbox_from_center(lat_c, lon_c)
-    # Idempotência por projeto: mesmo centro (tolerância ~1 micrograu ≈ 0.1m)
-    # dentro do MESMO projeto → skip. Projetos diferentes podem cobrir o
-    # mesmo ponto (ex: temas diferentes sobre a mesma área), então a chave
-    # de unicidade inclui project_id.
-    existing = conn.execute(
-        """SELECT id FROM tiles
-           WHERE project_id=?
-             AND ABS(bbox_west  - ?) < 1e-6
-             AND ABS(bbox_south - ?) < 1e-6
-             AND ABS(bbox_east  - ?) < 1e-6
-             AND ABS(bbox_north - ?) < 1e-6""",
-        (project_id, west, south, east, north),
-    ).fetchone()
-    if existing:
-        return False
-    conn.execute(
-        """INSERT INTO tiles(project_id, name, bbox_west, bbox_south, bbox_east, bbox_north,
-                             status, data_png)
-           VALUES (?,?,?,?,?,?,'pending',?)""",
-        (project_id, name, west, south, east, north, empty_png),
-    )
-    return True
+def _insert_at(conn, project_id: int, name: str, lat_c: float, lon_c: float,
+               empty_png: bytes) -> bool:
+    bbox = bbox_from_center(lat_c, lon_c)
+    return insert_tile_dedup(conn, project_id, name, bbox, empty_png)
 
 
 def main():
@@ -129,14 +80,14 @@ def main():
 
     conn = connect()
     try:
-        project_id = _resolve_project(conn, args.project)
+        project_id = resolve_project_arg(conn, args.project)
         conn.execute("BEGIN")
         for lat, lon, name in pts:
             for dy in range(-radius, radius + 1):
                 for dx in range(-radius, radius + 1):
                     lat_c, lon_c = offset_center(lat, lon, dx, dy)
                     tname = name if args.block == 1 else f"{name}_{dx:+d}{dy:+d}"
-                    if _insert_tile(conn, project_id, tname, lat_c, lon_c, empty_png):
+                    if _insert_at(conn, project_id, tname, lat_c, lon_c, empty_png):
                         inserted += 1
                     else:
                         skipped += 1

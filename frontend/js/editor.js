@@ -53,23 +53,12 @@ let missingHighlight = false;  // H: persistent highlight of unfilled (255) pixe
 let nextMissingCursor = 0;     // N: walks through missing pixels in raster order
 let tileserverUrl = "";
 let tileserverMaxZoom = 22;
-// Overlays are hold-to-show; each cfg is { url, minZoom?, maxZoom? } or null.
-// Two image layers (secondary/tertiary) and two reference-mask layers
-// (ref_primary/ref_secondary). Empty when the project hasn't configured them.
+// Overlays are hold-to-show; each cfg is { url, minZoom?, maxZoom? } or null
+// for layers the project has not configured.
 const overlayCfg = { secondary: null, tertiary: null, ref_primary: null, ref_secondary: null };
 const overlayHeld = { secondary: false, tertiary: false, ref_primary: false, ref_secondary: false };
-const OVERLAY_LABEL = {
-    secondary: "imagem secundária",
-    tertiary: "imagem terciária",
-    ref_primary: "máscara de referência primária",
-    ref_secondary: "máscara de referência secundária",
-};
-// Static key→layer map; the actual registered shortcuts are filtered to only
-// layers the project has configured (see refreshOverlayConfig).
-const KEY_TO_OVERLAY_ALL = { d: "secondary", r: "tertiary", t: "ref_primary", y: "ref_secondary" };
-let KEY_TO_OVERLAY = {};
+const KEY_TO_OVERLAY = { d: "secondary", r: "tertiary", t: "ref_primary", y: "ref_secondary" };
 let activeProjectId = null;
-let activeProject = null;
 let maskCompleteRequired = true;
 let todayCount = 0;
 
@@ -230,7 +219,6 @@ function renderProjectPicker(projects) {
 
 async function loadProjectConfig(projectId) {
     const proj = await apiGet(`/api/projects/${projectId}`);
-    activeProject = proj;
     classes = proj.classes || [];
     classesById = Object.fromEntries(classes.map(c => [c.id, c]));
     maskCompleteRequired = !!proj.mask_complete_required;
@@ -238,37 +226,19 @@ async function loadProjectConfig(projectId) {
     const primary = layers.primary;
     tileserverUrl = primary?.url || "";
     tileserverMaxZoom = primary?.max_zoom ?? 22;
-    // Build overlayCfg from the layers map; keep null when a layer is absent
-    // or configured-but-not-open so the shortcut path stays disabled.
     for (const k of Object.keys(overlayCfg)) {
         const info = layers[k];
         overlayCfg[k] = info && info.url
             ? { url: info.url, minZoom: info.min_zoom ?? 0, maxZoom: info.max_zoom ?? 22 }
             : null;
     }
-    rebuildShortcutMap();
-}
-
-function rebuildShortcutMap() {
-    /** Restrict the keyboard map to layers the project actually exposes.
-     * Keys with no configured layer never fire — and the shortcuts list /
-     * cheat-sheet only show the ones that are live. */
-    KEY_TO_OVERLAY = {};
-    for (const [key, layer] of Object.entries(KEY_TO_OVERLAY_ALL)) {
-        if (overlayCfg[layer]) KEY_TO_OVERLAY[key] = layer;
-    }
     refreshShortcutsBadges();
 }
 
 function refreshShortcutsBadges() {
-    /** Hide kbd badges and shortcut-list rows whose layer is absent from
-     * the active project. Idempotent — re-runs on every project switch. */
-    const slots = document.querySelectorAll("[data-overlay-key]");
-    for (const el of slots) {
-        const key = el.getAttribute("data-overlay-key");
-        const layer = KEY_TO_OVERLAY_ALL[key];
-        if (overlayCfg[layer]) el.classList.remove("hidden");
-        else el.classList.add("hidden");
+    for (const el of document.querySelectorAll("[data-overlay-key]")) {
+        const layer = KEY_TO_OVERLAY[el.getAttribute("data-overlay-key")];
+        el.classList.toggle("hidden", !overlayCfg[layer]);
     }
 }
 
@@ -586,11 +556,7 @@ function setOverlayHold(key, on) {
 }
 
 function pressOverlay(key) {
-    if (!overlayCfg[key]) {
-        showToast(`Imagem ${OVERLAY_LABEL[key]} não configurada.`, "warn", 1500);
-        return;
-    }
-    if (overlayHeld[key]) return;
+    if (!overlayCfg[key] || overlayHeld[key]) return;
     overlayHeld[key] = true;
     setOverlayHold(key, true);
 }

@@ -45,10 +45,30 @@ FRONTEND_DIR = FsPath(__file__).parent.parent / "frontend"
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    _prewarm_primary_readers()
     try:
         yield
     finally:
         mbtiles_service.close_all()
+
+
+def _prewarm_primary_readers() -> None:
+    """Open the primary mbtiles for every active project at startup so the
+    first GET /api/projects/{id} doesn't pay a sequential file-open per layer.
+    Optional layers stay lazy — they're rarer than the primary."""
+    from .database import connect
+    conn = connect()
+    try:
+        rows = conn.execute(
+            "SELECT id FROM projects WHERE active=1 ORDER BY id"
+        ).fetchall()
+    finally:
+        conn.close()
+    for r in rows:
+        try:
+            mbtiles_service.get_reader(r["id"], "primary")
+        except Exception:
+            pass
 
 
 app = FastAPI(title="TileClass", version="1.0.0", lifespan=lifespan)
