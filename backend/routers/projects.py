@@ -6,7 +6,8 @@ from pydantic import BaseModel
 
 from .. import auth, mbtiles_service, project_service
 from ..models import (
-    ProjectCreateIn, ProjectUpdateIn, ProjectClassesIn, ProjectMemberIn,
+    ProjectCreateIn, ProjectUpdateIn, ProjectClassesIn, ProjectAttributesIn,
+    ProjectMemberIn,
 )
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
@@ -124,13 +125,16 @@ def create_project(
     return project_service.create_project(
         name=body.name,
         description=body.description,
+        kind=body.kind,
+        topology_required=body.topology_required,
         mask_complete_required=body.mask_complete_required,
         primary_mbtiles=body.primary_mbtiles,
         secondary_mbtiles=body.secondary_mbtiles,
         tertiary_mbtiles=body.tertiary_mbtiles,
         ref_mask_primary_mbtiles=body.ref_mask_primary_mbtiles,
         ref_mask_secondary_mbtiles=body.ref_mask_secondary_mbtiles,
-        classes=[c.model_dump() for c in body.classes],
+        classes=[c.model_dump() for c in body.classes] if body.classes else None,
+        attributes=[a.model_dump() for a in body.attributes] if body.attributes else None,
         created_by=admin.id,
     )
 
@@ -180,6 +184,21 @@ def replace_classes(
     return project_service.set_classes(
         project_id,
         [c.model_dump() for c in body.classes],
+        updated_by=admin.id,
+    )
+
+
+@admin_router.put("/{project_id}/attributes")
+def replace_attributes(
+    project_id: int,
+    body: ProjectAttributesIn,
+    admin: auth.CurrentUser = Depends(auth.require_admin),
+):
+    """Vector projects only — replace the per-feature attribute schema.
+    Removing a key in use by any feature → 409 attribute_in_use."""
+    return project_service.set_attributes(
+        project_id,
+        [a.model_dump() for a in body.attributes],
         updated_by=admin.id,
     )
 

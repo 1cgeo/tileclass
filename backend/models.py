@@ -119,22 +119,37 @@ class ProjectClassIn(BaseModel):
     color: str = Field(pattern=r"^#[0-9A-Fa-f]{6}$")
 
 
+class ProjectAttributeIn(BaseModel):
+    key: str = Field(min_length=1, max_length=40, pattern=r"^[a-z][a-z0-9_]*$")
+    label: str = Field(min_length=1, max_length=80)
+    type: Literal["text", "number", "enum", "boolean"]
+    required: bool = False
+    options: Optional[list[str]] = None  # required for type=enum
+
+
 class ProjectCreateIn(BaseModel):
     name: str = Field(min_length=1, max_length=64)
     description: str = ""
+    kind: Literal["raster", "vector"] = "raster"
+    topology_required: bool = False
     mask_complete_required: bool = True
     primary_mbtiles: str = Field(min_length=1)
     secondary_mbtiles: Optional[str] = None
     tertiary_mbtiles: Optional[str] = None
     ref_mask_primary_mbtiles: Optional[str] = None
     ref_mask_secondary_mbtiles: Optional[str] = None
-    classes: list[ProjectClassIn] = Field(min_length=1)
+    # Mutual exclusion enforced server-side: raster wants `classes`,
+    # vector wants `attributes`. Both lists optional at the schema layer
+    # so the rejection is structured (not a Pydantic 422).
+    classes: Optional[list[ProjectClassIn]] = None
+    attributes: Optional[list[ProjectAttributeIn]] = None
 
 
 class ProjectUpdateIn(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     mask_complete_required: Optional[bool] = None
+    topology_required: Optional[bool] = None
     active: Optional[bool] = None
     primary_mbtiles: Optional[str] = None
     secondary_mbtiles: Optional[str] = None
@@ -145,6 +160,10 @@ class ProjectUpdateIn(BaseModel):
 
 class ProjectClassesIn(BaseModel):
     classes: list[ProjectClassIn] = Field(min_length=1)
+
+
+class ProjectAttributesIn(BaseModel):
+    attributes: list[ProjectAttributeIn] = Field(min_length=0)
 
 
 class ProjectMemberIn(BaseModel):
