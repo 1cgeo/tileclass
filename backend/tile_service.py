@@ -434,7 +434,7 @@ def get_tile_geojson(tile_id: int) -> str | None:
     return row["data_geojson"] or vector_utils.empty_feature_collection()
 
 
-def _project_for_tile(tile_id: int) -> dict:
+def project_for_tile(tile_id: int) -> dict:
     """Project record for the tile's project. Raises 404 when the tile or
     project is gone (rare — projects with tiles can't be hard-deleted)."""
     conn = connect()
@@ -452,12 +452,35 @@ def _project_for_tile(tile_id: int) -> dict:
     return proj
 
 
+def _lock_tile_for_user(conn, tile_id: int, user_id: int,
+                        expected_version: int | None,
+                        *, version_message: str | None = None):
+    """Inside an open `BEGIN IMMEDIATE` transaction, fetch the tile row and
+    enforce the three preconditions every submit/pause path shares: row
+    exists, the version matches the optimistic-lock token the editor sent,
+    and the caller is the assignee. Returns the (status, assigned_to,
+    version) row so the caller can switch on status."""
+    row = conn.execute(
+        "SELECT status, assigned_to, version FROM tiles WHERE id=?", (tile_id,)
+    ).fetchone()
+    if not row:
+        raise HTTPException(404, "tile not found")
+    if expected_version is not None and row["version"] != expected_version:
+        detail = {"error": "tile_modified", "current_version": row["version"]}
+        if version_message:
+            detail["message"] = version_message
+        raise HTTPException(409, detail=detail)
+    if row["assigned_to"] != user_id:
+        raise HTTPException(403, "not assigned to you")
+    return row
+
+
 def submit_classification(tile_id: int, user_id: int, body: bytes,
                           expected_version: int | None = None) -> dict:
     """Dispatcher: raster expects raw 65536-byte mask; vector expects UTF-8
     JSON FeatureCollection. The project's `kind` decides which path runs;
     a Content-Type mismatch is caught earlier in the operator router."""
-    proj = _project_for_tile(tile_id)
+    proj = project_for_tile(tile_id)
     if proj.get("kind") == "vector":
         return _submit_vector(tile_id, user_id, body, proj, expected_version)
     return _submit_raster(tile_id, user_id, body, proj, expected_version)
@@ -482,23 +505,11 @@ def _submit_raster(tile_id: int, user_id: int, raw_mask: bytes,
         raise HTTPException(413, detail={"error": "mask_too_large"})
 
     with transaction("IMMEDIATE") as conn:
-        row = conn.execute(
-            "SELECT status, assigned_to, version FROM tiles WHERE id=?", (tile_id,)
-        ).fetchone()
-        if not row:
-            raise HTTPException(404, "tile not found")
-        if expected_version is not None and row["version"] != expected_version:
-            raise HTTPException(
-                409,
-                detail={
-                    "error": "tile_modified",
-                    "message": "Este tile foi alterado por um admin enquanto você trabalhava. "
-                               "Seu progresso foi salvo localmente.",
-                    "current_version": row["version"],
-                },
-            )
-        if row["assigned_to"] != user_id:
-            raise HTTPException(403, "not assigned to you")
+        row = _lock_tile_for_user(
+            conn, tile_id, user_id, expected_version,
+            version_message=("Este tile foi alterado por um admin enquanto você "
+                             "trabalhava. Seu progresso foi salvo localmente."),
+        )
         # Pixel-count cache for the dashboard's class-distribution panel —
         # avoids re-decoding the mask on every aggregate.
         cc_json = json.dumps(class_counts(raw_mask), separators=(",", ":"))
@@ -548,21 +559,10 @@ def _submit_vector(tile_id: int, user_id: int, body: bytes,
     )
     if not ok:
         raise HTTPException(422, detail={"error": "invalid_features", **payload})
-    fcount = vector_utils.feature_count(text)
+    fcount = len(payload["doc"]["features"])
 
     with transaction("IMMEDIATE") as conn:
-        row = conn.execute(
-            "SELECT status, assigned_to, version FROM tiles WHERE id=?", (tile_id,)
-        ).fetchone()
-        if not row:
-            raise HTTPException(404, "tile not found")
-        if expected_version is not None and row["version"] != expected_version:
-            raise HTTPException(409, detail={
-                "error": "tile_modified",
-                "current_version": row["version"],
-            })
-        if row["assigned_to"] != user_id:
-            raise HTTPException(403, "not assigned to you")
+        row = _lock_tile_for_user(conn, tile_id, user_id, expected_version)
         status = row["status"]
         if status == "in_progress":
             conn.execute(
@@ -686,7 +686,7 @@ def pause_tile(tile_id: int, user_id: int, body: bytes,
     """Save partial body and freeze the timer (dashboard subtracts
     pause→resume). Dispatches by project.kind: raster persists a PNG mask,
     vector persists a (possibly partial / invalid-topology) FeatureCollection."""
-    proj = _project_for_tile(tile_id)
+    proj = project_for_tile(tile_id)
     if proj.get("kind") == "vector":
         return _pause_vector(tile_id, user_id, body, proj, expected_version)
     return _pause_raster(tile_id, user_id, body, proj, expected_version)
@@ -704,22 +704,10 @@ def _pause_raster(tile_id: int, user_id: int, raw_mask: bytes,
         raise HTTPException(413, detail={"error": "mask_too_large"})
 
     with transaction("IMMEDIATE") as conn:
-        row = conn.execute(
-            "SELECT status, assigned_to, version FROM tiles WHERE id=?", (tile_id,)
-        ).fetchone()
-        if not row:
-            raise HTTPException(404, "tile not found")
-        if expected_version is not None and row["version"] != expected_version:
-            raise HTTPException(
-                409,
-                detail={
-                    "error": "tile_modified",
-                    "message": "Este tile foi alterado por um admin enquanto você trabalhava.",
-                    "current_version": row["version"],
-                },
-            )
-        if row["assigned_to"] != user_id:
-            raise HTTPException(403, "not assigned to you")
+        row = _lock_tile_for_user(
+            conn, tile_id, user_id, expected_version,
+            version_message="Este tile foi alterado por um admin enquanto você trabalhava.",
+        )
         if row["status"] not in ("in_progress", "in_review"):
             raise HTTPException(409, f"cannot pause from state: {row['status']}")
         conn.execute(
@@ -745,23 +733,12 @@ def _pause_vector(tile_id: int, user_id: int, body: bytes,
     except UnicodeDecodeError:
         raise HTTPException(400, detail={"error": "invalid_utf8"})
     try:
-        vector_utils.parse_geojson(text)
+        doc = vector_utils.parse_geojson(text)
     except ValueError as e:
         raise HTTPException(400, detail={"error": "invalid_geojson", "message": str(e)})
-    fcount = vector_utils.feature_count(text)
+    fcount = len(doc["features"])
     with transaction("IMMEDIATE") as conn:
-        row = conn.execute(
-            "SELECT status, assigned_to, version FROM tiles WHERE id=?", (tile_id,)
-        ).fetchone()
-        if not row:
-            raise HTTPException(404, "tile not found")
-        if expected_version is not None and row["version"] != expected_version:
-            raise HTTPException(409, detail={
-                "error": "tile_modified",
-                "current_version": row["version"],
-            })
-        if row["assigned_to"] != user_id:
-            raise HTTPException(403, "not assigned to you")
+        row = _lock_tile_for_user(conn, tile_id, user_id, expected_version)
         if row["status"] not in ("in_progress", "in_review"):
             raise HTTPException(409, f"cannot pause from state: {row['status']}")
         conn.execute(

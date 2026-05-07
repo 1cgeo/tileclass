@@ -7,66 +7,17 @@ attribute schema editor, the immutable-kind invariant, and topology
 validation gating.
 """
 import json
-import sqlite3
 
 import pytest
 from tests.conftest import token
-
-
-def h(t):
-    return {"Authorization": f"Bearer {t}"}
-
-
-def _real_mbtiles(tmp_path, name="real.mbtiles", fmt="png") -> str:
-    path = tmp_path / name
-    if path.exists():
-        path.unlink()
-    conn = sqlite3.connect(path)
-    conn.executescript(
-        "CREATE TABLE metadata(name TEXT, value TEXT);"
-        "CREATE TABLE tiles(zoom_level INT, tile_column INT, tile_row INT, tile_data BLOB,"
-        " PRIMARY KEY(zoom_level, tile_column, tile_row));"
-    )
-    conn.execute("INSERT INTO metadata VALUES('format',?)", (fmt,))
-    conn.execute("INSERT INTO metadata VALUES('minzoom','0'),('maxzoom','3')")
-    conn.commit()
-    conn.close()
-    return str(path)
-
-
-def _vector_project_body(tmp_path, *, name, attributes=None, topology=False):
-    return {
-        "name": name,
-        "kind": "vector",
-        "topology_required": topology,
-        "primary_mbtiles": _real_mbtiles(tmp_path, f"{name}.mbtiles"),
-        "attributes": attributes or [
-            {"key": "tipo", "type": "enum", "label": "Tipo",
-             "required": True, "options": ["arroio", "rio"]},
-        ],
-    }
-
-
-def _create_vector_project(client, tok, tmp_path, *, name="hidro", **kw):
-    r = client.post(
-        "/api/admin/projects",
-        json=_vector_project_body(tmp_path, name=name, **kw),
-        headers=h(tok),
-    )
-    assert r.status_code == 200, r.text
-    return r.json()
-
-
-def _line_feature(coords, **props):
-    return {
-        "type": "Feature",
-        "geometry": {"type": "LineString", "coordinates": coords},
-        "properties": props,
-    }
-
-
-def _fc(*features):
-    return {"type": "FeatureCollection", "features": list(features)}
+from tests._vector_helpers import (
+    auth as h,
+    create_vector_project as _create_vector_project,
+    fc as _fc,
+    line_feature as _line_feature,
+    make_real_mbtiles as _real_mbtiles,
+    vector_project_body as _vector_project_body,
+)
 
 
 def _seed_tile(project_id: int, name="vt"):

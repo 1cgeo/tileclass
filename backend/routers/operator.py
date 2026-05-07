@@ -33,7 +33,7 @@ async def _read_body_for_kind(request: Request, tile_id: int) -> bytes:
     """Pick the right body reader by the project's kind. Raster tiles still
     expect 65536 raw bytes; vector tiles accept any well-formed body and
     push validation deeper into tile_service."""
-    proj = tile_service._project_for_tile(tile_id)
+    proj = tile_service.project_for_tile(tile_id)
     if proj.get("kind") == "vector":
         # Light cap; tile_service._submit_vector enforces the real bound.
         cl = request.headers.get("content-length")
@@ -183,7 +183,7 @@ def get_tile_image(tile_id: int = Path(ge=1),
                    user: auth.CurrentUser = Depends(auth.get_current_user)):
     """Raster body. Vector tiles use /features instead — calling /image
     on a vector tile returns 415 so the editor knows to switch fetchers."""
-    proj = tile_service._project_for_tile(tile_id)
+    proj = tile_service.project_for_tile(tile_id)
     if proj.get("kind") == "vector":
         raise HTTPException(415, detail={
             "error": "vector_tile",
@@ -200,7 +200,7 @@ def get_tile_features(tile_id: int = Path(ge=1),
                       user: auth.CurrentUser = Depends(auth.get_current_user)):
     """Vector body — returns the FeatureCollection JSON, or the canonical
     empty FC if the tile has never been submitted."""
-    proj = tile_service._project_for_tile(tile_id)
+    proj = tile_service.project_for_tile(tile_id)
     if proj.get("kind") != "vector":
         raise HTTPException(415, detail={
             "error": "raster_tile",

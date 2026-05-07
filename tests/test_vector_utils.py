@@ -213,7 +213,9 @@ def test_submission_returns_ok_for_clean_input():
     ))
     ok, payload = validate_submission(body, _SCHEMA, topology_required=False)
     assert ok is True
-    assert payload == {"errors": []}
+    assert payload["errors"] == []
+    # Parsed doc piggy-backs on success so callers don't re-parse for a count.
+    assert payload["doc"]["features"][0]["properties"]["pavimento"] == "asfalto"
 
 
 def test_submission_aggregates_errors():

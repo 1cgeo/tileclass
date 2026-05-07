@@ -6,7 +6,7 @@
 
 export const SNAP_TOLERANCE_DEG = 1.5e-5;
 
-const ALLOWED_DIRECTIONS = ["forward", "reverse", "both"];
+export const ALLOWED_DIRECTIONS = ["forward", "reverse", "both"];
 
 export function emptyFC() {
     return { type: "FeatureCollection", features: [] };

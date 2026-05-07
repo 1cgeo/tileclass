@@ -5,78 +5,26 @@ admin/dashboard. Cache file naming and reuse are inherited from the raster
 suite (per-project mbtiles in `cache_path(project_id)`)."""
 import io
 import json
-import sqlite3
 
 import numpy as np
 import pytest
 from PIL import Image
 from tests.conftest import token
-
-
-def h(t):
-    return {"Authorization": f"Bearer {t}"}
-
-
-def _real_mbtiles(tmp_path, name="real.mbtiles", fmt="png") -> str:
-    path = tmp_path / name
-    if path.exists():
-        path.unlink()
-    conn = sqlite3.connect(path)
-    conn.executescript(
-        "CREATE TABLE metadata(name TEXT, value TEXT);"
-        "CREATE TABLE tiles(zoom_level INT, tile_column INT, tile_row INT, tile_data BLOB,"
-        " PRIMARY KEY(zoom_level, tile_column, tile_row));"
-    )
-    conn.execute("INSERT INTO metadata VALUES('format',?)", (fmt,))
-    conn.execute("INSERT INTO metadata VALUES('minzoom','0'),('maxzoom','18')")
-    conn.commit()
-    conn.close()
-    return str(path)
+from tests._vector_helpers import (
+    auth as h,
+    line_feature as _line,
+    seed_classified_vector as _seed_classified_vector,
+)
+from tests._vector_helpers import create_vector_project as _create_vp_helper
 
 
 def _create_vector_project(client, tok, tmp_path, name="hidro", attrs=None,
                             topology=False):
-    body = {
-        "name": name,
-        "kind": "vector",
-        "topology_required": topology,
-        "primary_mbtiles": _real_mbtiles(tmp_path, f"{name}.mbtiles"),
-        "attributes": attrs or [
-            {"key": "tipo", "type": "enum", "label": "Tipo",
-             "required": True, "options": ["rio", "arroio"]},
-        ],
-    }
-    r = client.post("/api/admin/projects", json=body, headers=h(tok))
-    assert r.status_code == 200, r.text
-    return r.json()
-
-
-def _seed_classified_vector(project_id: int, *, name: str, bbox, features) -> int:
-    """Insert a tile with a pre-populated FeatureCollection in 'classified'
-    state so the overlay/distribution queries see it immediately."""
-    from backend.database import connect
-    body = json.dumps({"type": "FeatureCollection", "features": features})
-    fc = len(features)
-    conn = connect()
-    try:
-        conn.execute(
-            """INSERT INTO tiles(project_id, name, bbox_west, bbox_south,
-                                 bbox_east, bbox_north, status,
-                                 data_geojson, feature_count, classified_at)
-               VALUES (?,?,?,?,?,?,'classified',?,?,datetime('now'))""",
-            (project_id, name, *bbox, body, fc),
-        )
-        return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-    finally:
-        conn.close()
-
-
-def _line(coords, **props):
-    return {
-        "type": "Feature",
-        "geometry": {"type": "LineString", "coordinates": coords},
-        "properties": props,
-    }
+    # Overlay tests need maxzoom=18 to query at z=15+ realistically.
+    return _create_vp_helper(
+        client, tok, tmp_path,
+        name=name, attributes=attrs, topology=topology, maxzoom=18,
+    )
 
 
 # ---- Overlay ---------------------------------------------------------------

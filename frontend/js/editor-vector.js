@@ -3,18 +3,18 @@
 // Activation contract (called by editor.js):
 //   await enterVectorTile(tile, project)  // load + render features
 //   getCurrentBody() -> string             // JSON FC for submit/pause
+//   validateForSubmit() -> string[]        // empty when ok
 //   exitVectorTile()                       // dispose MapLibre + listeners
-//   onAttributesUpdated(handler)           // (UI shows mode pill / etc.)
 //
 // The footer (submit/pause/problem/request-changes) lives in editor.js;
 // this module only manages the canvas area + a sidebar attribute panel.
-import { apiGet } from "./api.js";
+import { apiGet, getTokens } from "./api.js";
 import { showToast } from "./toast.js";
 import { tileTransformRequest, makeRasterStyle } from "./maplib.js";
 import {
     addFeature, removeFeature, updateFeatureProps, snapToEndpoint,
     makeHistory, push, undo, redo,
-    validateBeforeSubmit, emptyFC, SNAP_TOLERANCE_DEG,
+    validateBeforeSubmit, emptyFC, SNAP_TOLERANCE_DEG, ALLOWED_DIRECTIONS,
 } from "./vector-core.js";
 
 let _map = null;
@@ -25,7 +25,7 @@ let _history = makeHistory();
 let _tool = "pen";       // 'pen' | 'select'
 let _draftCoords = null;  // [[lng, lat], ...] in-progress feature
 let _selectedIdx = -1;
-let _onChange = () => {};
+let _kbHandler = null;
 
 const VECTOR_LAYERS = {
     committed: "vec-committed",
@@ -36,10 +36,9 @@ const VECTOR_LAYERS = {
 
 // -------- Public ------------------------------------------------------------
 
-export async function enterVectorTile(tile, project, { onChange = () => {} } = {}) {
+export async function enterVectorTile(tile, project) {
     _project = project;
     _tile = tile;
-    _onChange = onChange;
     _history = makeHistory();
     _selectedIdx = -1;
     _draftCoords = null;
@@ -95,6 +94,10 @@ export function exitVectorTile() {
     if (_map) {
         try { _map.remove(); } catch {}
         _map = null;
+    }
+    if (_kbHandler) {
+        window.removeEventListener("keydown", _kbHandler);
+        _kbHandler = null;
     }
     document.getElementById("map-vector")?.classList.add("hidden");
     document.getElementById("vector-attr-panel")?.classList.add("hidden");
@@ -178,10 +181,8 @@ function _setTool(t) {
 }
 
 function _bindKeyboard() {
-    if (window._vectorKbBound) return;
-    window._vectorKbBound = true;
-    window.addEventListener("keydown", (ev) => {
-        if (!_map) return;
+    if (_kbHandler) return;
+    _kbHandler = (ev) => {
         if (ev.target?.tagName === "INPUT" || ev.target?.tagName === "TEXTAREA"
             || ev.target?.tagName === "SELECT") return;
         if (ev.key === "p" || ev.key === "P") _setTool("pen");
@@ -205,7 +206,8 @@ function _bindKeyboard() {
             _fc = r.snapshot;
             _refreshLayers(); _refreshMeta();
         }
-    });
+    };
+    window.addEventListener("keydown", _kbHandler);
 }
 
 // -------- MapLibre: layers + events --------------------------------------
@@ -367,7 +369,6 @@ function _commit(newFc) {
     _fc = newFc;
     _refreshLayers();
     _refreshMeta();
-    _onChange();
 }
 
 // -------- Attribute form -------------------------------------------------
@@ -382,13 +383,14 @@ function _refreshAttrForm() {
     }
     const props = _fc.features[_selectedIdx].properties || {};
     const schema = _project?.attributes || [];
+    const dirArrow = { forward: "→", reverse: "←", both: "↔" };
     const directionRow = _project?.topology_required ? `
         <label class="field">
             <span>direção *</span>
             <select data-attr-key="direction">
-                <option value="forward" ${props.direction === "forward" ? "selected" : ""}>→ forward</option>
-                <option value="reverse" ${props.direction === "reverse" ? "selected" : ""}>← reverse</option>
-                <option value="both" ${props.direction === "both" ? "selected" : ""}>↔ both</option>
+                ${ALLOWED_DIRECTIONS.map(d =>
+                    `<option value="${d}" ${props.direction === d ? "selected" : ""}>${dirArrow[d]} ${d}</option>`,
+                ).join("")}
             </select>
         </label>
     ` : "";
@@ -457,10 +459,6 @@ function _attrFieldHTML(a, value) {
 // -------- Auth header passthrough ----------------------------------------
 
 function _authHeaders() {
-    try {
-        const tok = JSON.parse(localStorage.getItem("tileclass_tokens"))?.access_token;
-        return tok ? { Authorization: `Bearer ${tok}` } : {};
-    } catch {
-        return {};
-    }
+    const tok = getTokens()?.access_token;
+    return tok ? { Authorization: `Bearer ${tok}` } : {};
 }

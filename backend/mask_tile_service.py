@@ -75,7 +75,11 @@ def _resolve_cache_base() -> Path:
 
 def cache_path(project_id: int) -> Path:
     """Per-project cache file: `<base>_p<id>.mbtiles`. Projects with
-    different palettes/tilesets never share a cache row."""
+    different palettes/tilesets never share a cache row.
+
+    No `kind` suffix is needed: `kind` is immutable after project creation
+    (enforced in project_service.update_project), so a project_id maps to a
+    single render pipeline (raster or vector) for the lifetime of its cache."""
     base = _resolve_cache_base()
     return base.with_name(f"{base.stem}_p{project_id}{base.suffix}")
 

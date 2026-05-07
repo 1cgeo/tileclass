@@ -3,24 +3,10 @@
 Confirms the file/manifest contract used by ML pipelines downstream."""
 import csv
 import json
-import sqlite3
 import sys
 from pathlib import Path
 
-
-def _real_mbtiles(tmp_path, name="real.mbtiles"):
-    path = tmp_path / name
-    if path.exists():
-        path.unlink()
-    conn = sqlite3.connect(path)
-    conn.executescript(
-        "CREATE TABLE metadata(name TEXT, value TEXT);"
-        "CREATE TABLE tiles(zoom_level INT, tile_column INT, tile_row INT,"
-        " tile_data BLOB, PRIMARY KEY(zoom_level, tile_column, tile_row));"
-    )
-    conn.execute("INSERT INTO metadata VALUES('format','png'),('minzoom','0'),('maxzoom','3')")
-    conn.commit(); conn.close()
-    return str(path)
+from tests._vector_helpers import create_vector_project
 
 
 def _seed(client, admin_user, tmp_path, *, status="reviewed", count=2,
@@ -29,19 +15,11 @@ def _seed(client, admin_user, tmp_path, *, status="reviewed", count=2,
     real GeoJSON bodies. Returns (project_id, [tile_id, ...])."""
     from tests.conftest import token
     tok = token(client, admin_user["username"], admin_user["password"])
-    body = {
-        "name": name,
-        "kind": "vector",
-        "primary_mbtiles": _real_mbtiles(tmp_path, f"{name}.mbtiles"),
-        "attributes": [
-            {"key": "tipo", "type": "enum", "label": "Tipo",
-             "required": True, "options": ["rio", "arroio"]},
-        ] if with_attrs else [],
-    }
-    proj = client.post(
-        "/api/admin/projects", json=body,
-        headers={"Authorization": f"Bearer {tok}"},
-    ).json()
+    proj = create_vector_project(
+        client, tok, tmp_path,
+        name=name,
+        attributes=None if with_attrs else [],
+    )
     pid = proj["id"]
     from backend.database import connect
     conn = connect()

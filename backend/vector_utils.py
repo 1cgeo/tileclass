@@ -202,9 +202,11 @@ def validate_topology(features: list[dict]) -> list[str]:
 
 def validate_submission(text: str, schema: list[dict], *,
                         topology_required: bool = False) -> tuple[bool, dict]:
-    """End-to-end validation. Returns (ok, {'errors': [...]}) where errors
-    is a flat list of user-facing strings. The order is: structural (raises
-    early via parse_geojson) → attributes → topology."""
+    """End-to-end validation. Returns (ok, payload) where payload always has
+    'errors' (list of user-facing strings) and — when parsing succeeded —
+    'doc' (the parsed FeatureCollection). Callers that need the parsed body
+    can read payload['doc'] instead of re-running parse_geojson/feature_count.
+    Order: structural (parse_geojson) → attributes → topology."""
     try:
         doc = parse_geojson(text)
     except ValueError as e:
@@ -213,7 +215,9 @@ def validate_submission(text: str, schema: list[dict], *,
     errs = validate_attributes(feats, schema)
     if topology_required:
         errs.extend(validate_topology(feats))
-    return (not errs), {"errors": errs}
+    if errs:
+        return False, {"errors": errs}
+    return True, {"errors": [], "doc": doc}
 
 
 def empty_feature_collection() -> str:

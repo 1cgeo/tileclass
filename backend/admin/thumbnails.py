@@ -64,7 +64,7 @@ def tile_thumbnail(tile_id: int, size: int = 128) -> bytes:
             raw = b"\xff" * PIXELS
     if raw.count(b"\xff") == PIXELS and primary is not None and primary.is_open():
         try:
-            return _tile_satellite_png(tile_id, size)
+            return _tile_satellite_png(tile_id, size, row=row)
         except HTTPException:
             pass
     arr = np.frombuffer(raw, dtype=np.uint8).reshape(TILE_SIZE, TILE_SIZE)
@@ -88,11 +88,13 @@ def _lat_to_tile_y(lat: float, z: int) -> float:
     return (1.0 - math.asinh(math.tan(lat_rad)) / math.pi) / 2.0 * (1 << z)
 
 
-def _tile_satellite_png(tile_id: int, size: int = 128) -> bytes:
+def _tile_satellite_png(tile_id: int, size: int = 128, *, row=None) -> bytes:
     """Composite satellite imagery from the tile's project primary mbtiles.
     Raises 404 if the project's primary isn't open or the tile isn't found —
-    callers decide whether to fall through."""
-    row = _tile_row(tile_id)
+    callers decide whether to fall through. Pass `row` to skip the SELECT
+    when the caller already fetched it."""
+    if row is None:
+        row = _tile_row(tile_id)
     if not row:
         raise HTTPException(404, "tile not found")
     pid = row["project_id"]
@@ -154,7 +156,7 @@ def _vector_thumbnail(row, proj: dict, size: int) -> bytes:
     from ..mask_tile_service import _vector_color_resolver
     pid = row["project_id"]
     try:
-        backdrop = _tile_satellite_png(row["id"], size)
+        backdrop = _tile_satellite_png(row["id"], size, row=row)
         from io import BytesIO
         base = Image.open(BytesIO(backdrop)).convert("RGBA")
     except Exception:
