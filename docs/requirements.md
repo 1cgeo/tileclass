@@ -21,7 +21,15 @@ HTML5, MapLibre GL JS).
 ## 2. Arquitetura
 
 - API REST (FastAPI) servindo o frontend estático.
-- SQLite WAL como banco único; máscaras como PNG single-band (BLOB).
+- SQLite WAL como banco único.
+- **Dois tipos de projeto** (coluna `projects.kind`, imutável após criação):
+  - `raster` — body do tile é uma **máscara PNG single-band** (BLOB,
+    65536 bytes). Schema de domínio em `project_classes` (id+name+color).
+  - `vector` — body é um **GeoJSON FeatureCollection** (TEXT) com
+    LineStrings + properties. Schema de domínio em `project_attributes`
+    (key+label+type+required+options). Para drenagem como grafo, o flag
+    `topology_required` ativa validação de direção, conectividade
+    (snap-tolerância intra-tile) e ausência de ciclos.
 - Imagens e máscaras de referência por projeto. Cada projeto declara até 5
   layers: `primary` (obrigatório), `secondary`, `tertiary` (atalhos D/R),
   `ref_primary`, `ref_secondary` (atalhos T/Y, máscaras categorizadas). Cada
@@ -53,7 +61,9 @@ HTML5, MapLibre GL JS).
 | id                           | INTEGER | PK                                                                   |
 | name                         | TEXT    | Único                                                                |
 | description                  | TEXT    | Livre                                                                |
-| mask_complete_required       | INTEGER | 0/1; quando 1, submit rejeita pixels=255                             |
+| kind                         | TEXT    | `raster` (default) ou `vector`. **Imutável após criação.**           |
+| topology_required            | INTEGER | 0/1 — vector projects only; ativa direction + cycle check no submit  |
+| mask_complete_required       | INTEGER | 0/1; raster only — quando 1, submit rejeita pixels=255               |
 | primary_mbtiles              | TEXT    | Path mbtiles **ou** URL remota com `{z}/{x}/{y}`. Obrigatório.       |
 | secondary_mbtiles            | TEXT    | Opcional — path ou URL — atalho `D`                                  |
 | tertiary_mbtiles             | TEXT    | Opcional — path ou URL — atalho `R`                                  |
@@ -82,7 +92,31 @@ http(s) são resolvidos como arquivo local (relativos a `backend/` ou absolutos)
 PK: `(project_id, class_id)`. Renomear/recolorir é livre; **remover** uma
 classe é rejeitado quando o projeto tem qualquer tile.
 
-### 3.4 `project_members`
+`project_classes` só é usado por projetos com `kind='raster'`. Projetos
+vetoriais usam `project_attributes` (próxima seção).
+
+### 3.4 `project_attributes` (vector projects)
+
+| Coluna       | Tipo    | Notas                                                              |
+|--------------|---------|--------------------------------------------------------------------|
+| project_id   | INTEGER | FK projects.id                                                     |
+| key          | TEXT    | snake_case (a-z, 0-9, _) — usada em `feature.properties[key]`      |
+| label        | TEXT    | Rótulo legível para o painel do operador                           |
+| type         | TEXT    | `text` \| `number` \| `enum` \| `boolean`                          |
+| required     | INTEGER | 0/1; submit rejeita features sem este atributo quando 1            |
+| options_json | TEXT    | JSON list de strings, obrigatório quando type=`enum`               |
+| ordering     | INTEGER | Ordem do form                                                      |
+
+PK: `(project_id, key)`. Renomear/relabel é livre; **remover** uma chave
+é rejeitado se alguma feature em `tiles.data_geojson` desse projeto a
+referencia (`409 attribute_in_use`).
+
+Para projetos com `topology_required=True`, a chave reservada `direction`
+(enum {forward, reverse, both}) é obrigatória por feature, e o backend
+roda `vector_utils.validate_topology` no submit (snap-tolerância de
+endpoints, sem ciclos via DFS).
+
+### 3.5 `project_members`
 
 | Coluna     | Tipo    | Notas                                                                |
 |------------|---------|----------------------------------------------------------------------|
@@ -93,7 +127,7 @@ classe é rejeitado quando o projeto tem qualquer tile.
 PK: `(project_id, user_id)`. Admins globais (`users.role='admin'`) ignoram
 membership. `users.can_review` permanece como veto temporário.
 
-### 3.5 `tiles`
+### 3.6 `tiles`
 
 | Coluna         | Tipo    | Notas                                                    |
 |----------------|---------|----------------------------------------------------------|
@@ -110,11 +144,15 @@ membership. `users.can_review` permanece como veto temporário.
 | reviewed_by    | INTEGER | FK users.id                                              |
 | classified_at  | TEXT    | ISO 8601                                                 |
 | reviewed_at    | TEXT    | ISO 8601                                                 |
-| data_png       | BLOB    | PNG single-band 256×256, IDs do projeto + `255`          |
+| data_png       | BLOB    | Raster body — PNG single-band 256×256, IDs + `255`. Null em vector. |
+| data_geojson   | TEXT    | Vector body — FeatureCollection serializado. Null em raster. |
+| feature_count  | INTEGER | Cache do nº de features em data_geojson (vector)         |
+| class_counts   | TEXT    | Cache JSON {class_id: pixel_count} em raster             |
 | problem_note   | TEXT    | Nota livre quando `status='problem'`                     |
 | version        | INTEGER | Incrementado a cada mutação; usado em CAS                |
 | paused_at      | TEXT    | ISO 8601 quando o tile está pausado                      |
 | blocked_from   | TEXT    | Status original guardado durante `status='blocked'`      |
+| last_heartbeat_at | TEXT | Editor pings; auto-pause sweep usa pra liberar zumbis    |
 
 **Geometria do tile.** Cada tile é definido pelo **centro geodésico**.
 `backend/geo.bbox_from_center(lat, lon)` calcula ±320 m em cada direção
@@ -122,7 +160,7 @@ cardeal usando `pyproj.Geod` (WGS84). Pixel = 2.5 m em qualquer latitude.
 Não há `zoom`/`tile_x`/`tile_y` no schema — composição XYZ é resolvida no
 frontend pelo MapLibre a partir da bbox.
 
-### 3.6 `action_log`
+### 3.7 `action_log`
 
 | Coluna     | Tipo    | Notas                                                 |
 |------------|---------|-------------------------------------------------------|
@@ -143,7 +181,7 @@ Ações principais: `assign_classify`, `assign_review`, `classify`, `review`,
 Pareamento `assign_*→classify/review` em pares por `(user_id, tile_id)` é o
 que alimenta as métricas de duração no dashboard.
 
-### 3.7 Status do Tile
+### 3.8 Status do Tile
 
 ```
 pending ──> in_progress ──> classified ──> in_review ──> reviewed

@@ -30,7 +30,8 @@ python -m backend.scripts.import_points --point <lat> <lon> <name> [--project <i
 python -m backend.scripts.import_points --csv pontos.csv [--block 3] [--project <id|name>] # CSV lat,lon,name; block NxN
 python -m backend.scripts.import_cq_tiles --geoparquet cq_selection.geoparquet [--seed empty|raw] [--project <id|name>]
 python -m backend.scripts.import_qc_tiles --csv qc_tiles.csv --bdf-dir <dir> [--project <id|name>]
-python -m backend.scripts.export_tiles <out_dir> [--status reviewed|reviewed+classified] [--raw] [--mosaic] [--manifest <path>] [--project <id|name>]
+python -m backend.scripts.export_tiles <out_dir> [--status reviewed|reviewed+classified] [--raw] [--mosaic] [--manifest <path>] [--project <id|name>]      # raster (GeoTIFF)
+python -m backend.scripts.export_features <out_dir> [--status ...] [--mosaic] [--manifest <path>] [--project <id|name>]                                  # vector (GeoJSON)
 python -m backend.scripts.build_mbtiles <raster_in> <out.mbtiles>           # raster grande → tiles XYZ
 python -m backend.scripts.build_xyz_pyramid <raster_in> <out_dir>            # alternativa em disco
 python -m backend.scripts.merge_db <other.db>                                # funde tileclass.db de outra equipe
@@ -150,6 +151,44 @@ Cada campo aceita dois formatos:
 **Mask overlay (admin):** `mask_tile_service` é per-projeto. Endpoint `/api/admin/mask-tiles/{project_id}/{z}/{x}/{y}.png`. Cache em arquivo separado `<base>_p<project_id>.mbtiles` para garantir que paletas/conjuntos de tiles de projetos diferentes não compartilhem rows. LUT vem de `project_classes[project_id]`. Invalidações (`safe_invalidate_tile`/`safe_invalidate_bbox(project_id, ...)`/`safe_invalidate_tiles`) buscam o `project_id` da tile e direcionam para o cache file correto.
 
 **Regra inegociável de classes:** renomear/recolorir IDs é livre; **remover** uma classe é rejeitado quando o projeto tem qualquer tile (bytes da máscara são imutáveis e podem referenciar o ID removido). Adicionar novos IDs é livre.
+
+## Projetos vetoriais (kind=vector)
+
+Projetos têm `kind ∈ {raster, vector}` (default raster, **imutável após criação**). Vector é para anotações de linhas com atributos — drenagem (com direção/conectividade), rodovias (com pavimento/faixas), etc. O dataset é consumido por modelos de IA via export GeoJSON.
+
+**Onde diverge de raster:**
+
+| Camada | Raster | Vector |
+|---|---|---|
+| Body do tile | `tiles.data_png` (PNG 65536 bytes) | `tiles.data_geojson` (TEXT, FeatureCollection) + `feature_count` cache |
+| Schema de domínio | `project_classes` (id, name, color) | `project_attributes` (key, label, type, required, options) |
+| Validação no submit | `mask_complete_required` + IDs em `{1..6, 255}` | GeoJSON parsável, attributes do schema, `topology_required` (drenagem) |
+| Submit body | `Content-Type: application/octet-stream` (65536 bytes) | `Content-Type: application/json` (FeatureCollection) |
+| Endpoint de leitura | `GET /api/tiles/{id}/image` (PNG) | `GET /api/tiles/{id}/features` (JSON) |
+| Editor | `editor.js` canvas paint (mask-core.js) | `editor-vector.js` MapLibre interactive (vector-core.js) |
+| Overlay admin | rasteriza máscaras → PNG | rasteriza LineStrings → PNG (`_render_vector_tile`) |
+| Distribuição no dashboard | `class_distribution` (pixel counts) | `feature_distribution` (counts por enum/boolean attribute) |
+| Export CLI | `export_tiles.py` (GeoTIFF) | `export_features.py` (GeoJSON) |
+
+**Atributos** (`project_attributes`): tipos `text`/`number`/`enum`/`boolean`. `enum` precisa ≥2 `options`. Keys são snake_case. Adicionar/renomear/relabel é livre; remover só quando nenhuma feature do projeto referencia a chave (`attribute_in_use` 409). Para drenagem com `topology_required=True`, a chave `direction ∈ {forward, reverse, both}` é obrigatória por feature.
+
+**Validação de topologia** (`vector_utils.validate_topology`): só roda quando `topology_required=True`. Cada LineString precisa ter `direction`; endpoints próximos (≤ `SNAP_TOLERANCE_DEG ≈ 1.5e-5`, ~1m) snapam ao mesmo nó; ciclos via DFS (forward/reverse/both definem a direção das arestas) são rejeitados. **Validação é por tile** — drenagens cruzando bordas viram features distintas em tiles distintos; reconexão cross-tile é responsabilidade do consumer.
+
+**Editor vetorial:**
+- **Pen (P):** clique adiciona vértice; duplo-clique encerra; ESC cancela. Snap automático no primeiro/último vértice se estiver perto de um endpoint existente.
+- **Select (V):** clique numa feature → painel de atributos à direita; Del/Backspace remove.
+- **Undo/redo:** Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z. 50 frames.
+- O painel de atributos é schema-driven; campo extra "direção" aparece quando `topology_required`. Required marcado com `*`; submit bloqueia se faltar.
+
+**Pause vs submit:** pause persiste o body do jeito que está (qualquer GeoJSON parsável, mesmo com required ausente ou ciclos), submit valida tudo. Operador pode pausar parcial sem perder trabalho.
+
+**Mutual exclusion no payload:** `POST /api/admin/projects` rejeita `attributes` em projeto raster (400 `attributes_on_raster`) e `classes` em projeto vector (400 `classes_on_vector`). Tentar mudar `kind` via PATCH é silenciosamente ignorado (campo fora do allow-list — invariante de imutabilidade).
+
+**Invariantes críticos do dispatch:**
+- `tile_service._project_for_tile()` resolve a kind antes de cada submit/pause; `_submit_raster`/`_submit_vector` (e `_pause_*`) ficam isolados.
+- `routers/operator._read_body_for_kind` lê o body certo (raster: 65536 bytes exatos; vector: até 1MB JSON).
+- `report_problem` limpa **ambos** `data_png` e `data_geojson` para que mudanças futuras não vazem corpo de tipo errado.
+- `mask_tile_service.get_tile()` despacha por kind. Cache mbtiles é per-projeto (`<base>_p<id>.mbtiles`); kinds diferentes em projetos diferentes não compartilham linhas.
 
 ## Invariantes do domínio
 
