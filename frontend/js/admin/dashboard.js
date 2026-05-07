@@ -76,6 +76,7 @@ export async function renderDashboard(root) {
     }
 
     await renderClassDistribution(root);
+    await renderFeatureDistribution(root);
 
     const opH = document.createElement("h3");
     opH.textContent = "Por operador";
@@ -212,5 +213,48 @@ async function renderClassDistribution(root) {
         count.textContent = `${c.pct}% (${c.pixels.toLocaleString("pt-BR")})`;
         row.append(name, wrap, count);
         root.appendChild(row);
+    }
+}
+
+
+async function renderFeatureDistribution(root) {
+    let dist = [];
+    try { dist = await apiGet("/api/admin/feature-distribution"); } catch { return; }
+    if (!dist.length) return;
+    const h = document.createElement("h3");
+    h.textContent = "Distribuição por atributo (features classificadas)";
+    root.appendChild(h);
+    // Group by (project_id, attribute_key) so each attribute gets a section.
+    const groups = new Map();
+    for (const e of dist) {
+        const key = `${e.project_id}:${e.attribute_key}`;
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(e);
+    }
+    for (const [key, entries] of groups) {
+        const [pid, attrKey] = key.split(":");
+        const sub = document.createElement("h4");
+        sub.style.cssText = "margin-top:12px;font-size:13px;font-weight:600;";
+        sub.textContent = `Projeto ${pid} · ${attrKey}`;
+        root.appendChild(sub);
+        const total = entries.reduce((s, e) => s + e.count, 0) || 1;
+        for (const e of entries) {
+            const row = document.createElement("div");
+            row.className = "bar-row";
+            const name = document.createElement("span");
+            name.className = "name";
+            name.textContent = e.value;
+            const wrap = document.createElement("span");
+            wrap.className = "bar-wrap";
+            const bar = document.createElement("span");
+            bar.className = "bar";
+            bar.style.width = `${(e.count / total) * 100}%`;
+            wrap.appendChild(bar);
+            const count = document.createElement("span");
+            count.className = "count";
+            count.textContent = `${e.pct}% (${e.count.toLocaleString("pt-BR")})`;
+            row.append(name, wrap, count);
+            root.appendChild(row);
+        }
     }
 }

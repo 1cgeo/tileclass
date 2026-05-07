@@ -47,18 +47,19 @@ function renderProjectList(projects) {
     tbl.className = "admin-table";
     tbl.innerHTML = `
         <thead><tr>
-            <th>Nome</th><th>Descrição</th><th>Status</th><th>Máscara completa?</th><th></th>
+            <th>Nome</th><th>Tipo</th><th>Descrição</th><th>Status</th><th></th>
         </tr></thead>
         <tbody></tbody>
     `;
     const tbody = tbl.querySelector("tbody");
     for (const p of projects) {
+        const kindChip = p.kind === "vector" ? "vetorial" : "matricial";
         const tr = document.createElement("tr");
         tr.innerHTML = `
             <td><strong>${escapeHtml(p.name)}</strong></td>
+            <td>${kindChip}</td>
             <td>${escapeHtml(p.description || "")}</td>
             <td>${p.active ? "ativo" : "inativo"}</td>
-            <td>${p.mask_complete_required ? "sim" : "não"}</td>
             <td>
                 <button class="link" data-act="edit" data-pid="${p.id}">Editar</button>
                 ·
@@ -94,6 +95,7 @@ async function selectProject(projectId) {
 }
 
 function renderProjectDetail(proj, members) {
+    const isVector = proj.kind === "vector";
     const layerRows = LAYER_FIELDS.map(f => {
         const v = proj[f.key] || "";
         return `
@@ -112,6 +114,7 @@ function renderProjectDetail(proj, members) {
             <td><button class="link" data-rm-cls="${i}">remover</button></td>
         </tr>
     `).join("");
+    const attrRows = (proj.attributes || []).map((a, i) => renderAttrRow(a, i)).join("");
     const membersRows = (members || []).map(m => `
         <tr>
             <td>${escapeHtml(m.username)}</td>
@@ -128,10 +131,50 @@ function renderProjectDetail(proj, members) {
     `).join("");
     const inactiveBadge = proj.active ? "" :
         ' <span class="chip warn">desativado</span>';
+    const kindBadge = isVector
+        ? ' <span class="chip info">vetorial</span>'
+        : ' <span class="chip">matricial</span>';
+    const maskCompleteBlock = isVector ? `
+            <label class="field">
+                <input type="checkbox" data-field="topology_required" ${proj.topology_required ? "checked" : ""}>
+                Validar topologia (drenagem como grafo: direção + conectividade + sem ciclos)
+            </label>
+    ` : `
+            <label class="field">
+                <input type="checkbox" data-field="mask_complete_required" ${proj.mask_complete_required ? "checked" : ""}>
+                Exigir máscara completa para submeter
+            </label>
+    `;
+    const classesOrAttrsSection = isVector ? `
+        <section class="project-section">
+            <h4>Atributos</h4>
+            <p class="muted">Schema de propriedades por feature. Renomear/relabel é livre. Remover uma chave só é permitido quando nenhuma feature a referencia.</p>
+            <table class="admin-table">
+                <thead><tr>
+                    <th>Chave</th><th>Label</th><th>Tipo</th><th>Obrig.</th>
+                    <th>Opções (enum, vírgula)</th><th></th>
+                </tr></thead>
+                <tbody id="attrs-tbody">${attrRows}</tbody>
+            </table>
+            <button id="btn-add-attr">+ Adicionar atributo</button>
+            <button class="primary" id="btn-save-attrs">Salvar atributos</button>
+        </section>
+    ` : `
+        <section class="project-section">
+            <h4>Classes</h4>
+            <p class="muted">Renomear/recolorir é livre. Remover classes só é permitido se o projeto não tiver tiles.</p>
+            <table class="admin-table">
+                <thead><tr><th>ID</th><th>Nome</th><th>Cor</th><th></th></tr></thead>
+                <tbody id="classes-tbody">${classesRows}</tbody>
+            </table>
+            <button id="btn-add-class">+ Adicionar classe</button>
+            <button class="primary" id="btn-save-classes">Salvar classes</button>
+        </section>
+    `;
     return `
         <h3>
             ${escapeHtml(proj.name)}
-            <span class="muted">(id ${proj.id})</span>${inactiveBadge}
+            <span class="muted">(id ${proj.id})</span>${kindBadge}${inactiveBadge}
         </h3>
 
         <section class="project-section">
@@ -144,10 +187,7 @@ function renderProjectDetail(proj, members) {
                 <span>Descrição</span>
                 <input type="text" data-field="description" value="${escapeHtml(proj.description || "")}">
             </label>
-            <label class="field">
-                <input type="checkbox" data-field="mask_complete_required" ${proj.mask_complete_required ? "checked" : ""}>
-                Exigir máscara completa para submeter
-            </label>
+            ${maskCompleteBlock}
             <label class="field">
                 <input type="checkbox" data-field="active" ${proj.active ? "checked" : ""}>
                 Ativo
@@ -160,16 +200,7 @@ function renderProjectDetail(proj, members) {
             <p class="muted">Excluir só funciona quando o projeto não tem tiles. Para parar de distribuir novas tarefas mas manter o histórico, desmarque <strong>Ativo</strong>.</p>
         </section>
 
-        <section class="project-section">
-            <h4>Classes</h4>
-            <p class="muted">Renomear/recolorir é livre. Remover classes só é permitido se o projeto não tiver tiles.</p>
-            <table class="admin-table">
-                <thead><tr><th>ID</th><th>Nome</th><th>Cor</th><th></th></tr></thead>
-                <tbody id="classes-tbody">${classesRows}</tbody>
-            </table>
-            <button id="btn-add-class">+ Adicionar classe</button>
-            <button class="primary" id="btn-save-classes">Salvar classes</button>
-        </section>
+        ${classesOrAttrsSection}
 
         <section class="project-section">
             <h4>Membros</h4>
@@ -213,6 +244,17 @@ function wireProjectDetail(proj, members) {
             if (tr) tr.remove();
         };
     });
+    // Vector-only attribute editor
+    const btnAddAttr = document.getElementById("btn-add-attr");
+    if (btnAddAttr) btnAddAttr.onclick = () => addAttrRow();
+    const btnSaveAttrs = document.getElementById("btn-save-attrs");
+    if (btnSaveAttrs) btnSaveAttrs.onclick = () => saveAttributes(proj.id);
+    document.querySelectorAll("[data-rm-attr]").forEach(b => {
+        b.onclick = () => {
+            const tr = document.querySelector(`tr[data-aidx="${b.dataset.rmAttr}"]`);
+            if (tr) tr.remove();
+        };
+    });
 }
 
 function readField(field) {
@@ -224,7 +266,8 @@ function readField(field) {
 
 async function saveProjectFields(projectId) {
     const fields = {};
-    for (const f of ["name", "description", "mask_complete_required", "active"]) {
+    for (const f of ["name", "description", "mask_complete_required",
+                      "topology_required", "active"]) {
         const v = readField(f);
         if (v !== undefined) fields[f] = v;
     }
@@ -278,6 +321,76 @@ async function saveClasses(projectId) {
     try {
         await apiPutJson(`/api/admin/projects/${projectId}/classes`, { classes });
         showToast("Classes salvas.", "ok");
+        await selectProject(projectId);
+    } catch (e) {
+        showToast(`Falha: ${e.message}`, "err", 6000);
+    }
+}
+
+
+// ---- Vector attributes editor ---------------------------------------------
+
+const ATTR_TYPES = ["text", "number", "enum", "boolean"];
+
+function renderAttrRow(a, idx) {
+    const opts = (a.options || []).join(",");
+    return `
+        <tr data-aidx="${idx}">
+            <td><input type="text" data-af="key" value="${escapeHtml(a.key || "")}"
+                       placeholder="snake_case" style="width:10em"></td>
+            <td><input type="text" data-af="label" value="${escapeHtml(a.label || "")}"></td>
+            <td>
+                <select data-af="type">
+                    ${ATTR_TYPES.map(t => `<option value="${t}" ${a.type === t ? "selected" : ""}>${t}</option>`).join("")}
+                </select>
+            </td>
+            <td><input type="checkbox" data-af="required" ${a.required ? "checked" : ""}></td>
+            <td><input type="text" data-af="options" value="${escapeHtml(opts)}"
+                       placeholder="opc1,opc2 (enum)"></td>
+            <td><button class="link" data-rm-attr="${idx}">remover</button></td>
+        </tr>
+    `;
+}
+
+function addAttrRow() {
+    const tbody = document.getElementById("attrs-tbody");
+    if (!tbody) return;
+    const idx = tbody.children.length;
+    const wrap = document.createElement("tr");
+    wrap.innerHTML = renderAttrRow({ type: "text" }, idx);
+    const tr = wrap.firstElementChild;
+    tr.querySelector("[data-rm-attr]").onclick = () => tr.remove();
+    tbody.appendChild(tr);
+}
+
+function readAttributes() {
+    const rows = document.querySelectorAll("#attrs-tbody tr");
+    const out = [];
+    for (const r of rows) {
+        const key = r.querySelector('[data-af="key"]').value.trim();
+        const label = r.querySelector('[data-af="label"]').value.trim();
+        const type = r.querySelector('[data-af="type"]').value;
+        const required = r.querySelector('[data-af="required"]').checked;
+        const optStr = r.querySelector('[data-af="options"]').value.trim();
+        const options = optStr
+            ? optStr.split(",").map(s => s.trim()).filter(Boolean)
+            : null;
+        if (!key || !label) continue;
+        const a = { key, label, type, required };
+        if (options) a.options = options;
+        out.push(a);
+    }
+    return out;
+}
+
+async function saveAttributes(projectId) {
+    const attributes = readAttributes();
+    try {
+        await apiPutJson(
+            `/api/admin/projects/${projectId}/attributes`,
+            { attributes },
+        );
+        showToast("Atributos salvos.", "ok");
         await selectProject(projectId);
     } catch (e) {
         showToast(`Falha: ${e.message}`, "err", 6000);
@@ -373,12 +486,24 @@ function showProjectForm(root, _) {
                 <input type="text" id="np-name" required>
             </label>
             <label class="field">
+                <span>Tipo *</span>
+                <select id="np-kind">
+                    <option value="raster">Matricial (máscara pixel)</option>
+                    <option value="vector">Vetorial (linhas com atributos)</option>
+                </select>
+            </label>
+            <p class="muted">O tipo é imutável após a criação — para mudar, clone para um projeto novo.</p>
+            <label class="field">
                 <span>Descrição</span>
                 <input type="text" id="np-description">
             </label>
-            <label class="field">
+            <label class="field" id="np-mask-row">
                 <input type="checkbox" id="np-mask-required" checked>
                 Exigir máscara completa para submeter
+            </label>
+            <label class="field hidden" id="np-topo-row">
+                <input type="checkbox" id="np-topology-required">
+                Validar topologia (drenagem como grafo)
             </label>
             ${LAYER_FIELDS.map(f => `
                 <label class="field">
@@ -386,31 +511,71 @@ function showProjectForm(root, _) {
                     <input type="text" id="np-${f.key}" placeholder="${escapeHtml(f.hint || "")}">
                 </label>
             `).join("")}
-            <h4>Classes iniciais</h4>
-            <table class="admin-table">
-                <thead><tr><th>ID</th><th>Nome</th><th>Cor</th><th></th></tr></thead>
-                <tbody id="classes-tbody">
-                    <tr data-idx="0">
-                        <td><input type="number" min="1" max="254" data-cf="id" value="1" style="width:5em"></td>
-                        <td><input type="text" data-cf="name" value="classe_1"></td>
-                        <td><input type="color" data-cf="color" value="#377eb8"></td>
-                        <td><button class="link" data-rm-cls="0">remover</button></td>
-                    </tr>
-                </tbody>
-            </table>
-            <button id="btn-add-class">+ Adicionar classe</button>
+
+            <div id="np-classes-block">
+                <h4>Classes iniciais</h4>
+                <table class="admin-table">
+                    <thead><tr><th>ID</th><th>Nome</th><th>Cor</th><th></th></tr></thead>
+                    <tbody id="classes-tbody">
+                        <tr data-idx="0">
+                            <td><input type="number" min="1" max="254" data-cf="id" value="1" style="width:5em"></td>
+                            <td><input type="text" data-cf="name" value="classe_1"></td>
+                            <td><input type="color" data-cf="color" value="#377eb8"></td>
+                            <td><button class="link" data-rm-cls="0">remover</button></td>
+                        </tr>
+                    </tbody>
+                </table>
+                <button id="btn-add-class">+ Adicionar classe</button>
+            </div>
+
+            <div id="np-attrs-block" class="hidden">
+                <h4>Atributos iniciais</h4>
+                <p class="muted">Schema das propriedades por feature. Pode editar depois.</p>
+                <table class="admin-table">
+                    <thead><tr>
+                        <th>Chave</th><th>Label</th><th>Tipo</th><th>Obrig.</th>
+                        <th>Opções (enum, vírgula)</th><th></th>
+                    </tr></thead>
+                    <tbody id="attrs-tbody">
+                        ${renderAttrRow({key: "tipo", label: "Tipo", type: "text"}, 0)}
+                    </tbody>
+                </table>
+                <button id="btn-add-attr">+ Adicionar atributo</button>
+            </div>
+
             <button class="primary" id="btn-create-project">Criar</button>
         </section>
     `;
+    const kindSel = document.getElementById("np-kind");
+    const refreshKindUI = () => {
+        const isVector = kindSel.value === "vector";
+        document.getElementById("np-classes-block").classList.toggle("hidden", isVector);
+        document.getElementById("np-attrs-block").classList.toggle("hidden", !isVector);
+        document.getElementById("np-mask-row").classList.toggle("hidden", isVector);
+        document.getElementById("np-topo-row").classList.toggle("hidden", !isVector);
+    };
+    kindSel.onchange = refreshKindUI;
+    refreshKindUI();
+
     document.querySelector("[data-rm-cls]").onclick = (ev) => ev.target.closest("tr").remove();
     document.getElementById("btn-add-class").onclick = () => addClassRow();
+    document.getElementById("btn-add-attr").onclick = () => addAttrRow();
+    document.querySelector("[data-rm-attr]").onclick = (ev) => ev.target.closest("tr").remove();
+
     document.getElementById("btn-create-project").onclick = async () => {
+        const isVector = kindSel.value === "vector";
         const body = {
             name: document.getElementById("np-name").value.trim(),
+            kind: kindSel.value,
             description: document.getElementById("np-description").value,
-            mask_complete_required: document.getElementById("np-mask-required").checked,
-            classes: readClasses(),
         };
+        if (isVector) {
+            body.topology_required = document.getElementById("np-topology-required").checked;
+            body.attributes = readAttributes();
+        } else {
+            body.mask_complete_required = document.getElementById("np-mask-required").checked;
+            body.classes = readClasses();
+        }
         for (const f of LAYER_FIELDS) {
             const v = document.getElementById(`np-${f.key}`).value.trim();
             if (v) body[f.key] = v;
