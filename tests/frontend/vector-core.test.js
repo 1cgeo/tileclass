@@ -1,0 +1,254 @@
+/**
+ * vector-core: pure FeatureCollection helpers + client-side validation.
+ *
+ * These mirror tests/test_vector_utils.py — both must agree, since the
+ * editor uses vector-core to surface errors before the submit round-trip.
+ */
+import { describe, it, expect } from "vitest";
+import {
+    addFeature, removeFeature, updateFeatureProps, updateFeatureGeometry,
+    snapToEndpoint, SNAP_TOLERANCE_DEG,
+    makeHistory, push, undo, redo,
+    validateAttributes, validateTopology, validateBeforeSubmit,
+    emptyFC,
+} from "../../frontend/js/vector-core.js";
+
+
+function _line(coords, props = {}) {
+    return {
+        type: "Feature",
+        geometry: { type: "LineString", coordinates: coords },
+        properties: props,
+    };
+}
+
+
+describe("addFeature", () => {
+    it("appends a LineString with copied coords + props", () => {
+        const fc = addFeature(emptyFC(), [[0, 0], [1, 1]], { tipo: "rio" });
+        expect(fc.features).toHaveLength(1);
+        expect(fc.features[0].geometry.type).toBe("LineString");
+        expect(fc.features[0].geometry.coordinates).toEqual([[0, 0], [1, 1]]);
+        expect(fc.features[0].properties).toEqual({ tipo: "rio" });
+    });
+
+    it("does not mutate the source collection", () => {
+        const src = emptyFC();
+        addFeature(src, [[0, 0], [1, 1]]);
+        expect(src.features).toHaveLength(0);
+    });
+});
+
+describe("removeFeature", () => {
+    it("removes by index, returns same FC for OOB", () => {
+        let fc = addFeature(emptyFC(), [[0, 0], [1, 1]]);
+        fc = addFeature(fc, [[2, 2], [3, 3]]);
+        const after = removeFeature(fc, 0);
+        expect(after.features).toHaveLength(1);
+        expect(after.features[0].geometry.coordinates).toEqual([[2, 2], [3, 3]]);
+        expect(removeFeature(fc, 99).features).toHaveLength(2);
+    });
+});
+
+describe("updateFeatureProps", () => {
+    it("merges properties without losing existing keys", () => {
+        const fc = addFeature(emptyFC(), [[0, 0], [1, 1]], { tipo: "rio", existente: "x" });
+        const updated = updateFeatureProps(fc, 0, { tipo: "arroio" });
+        expect(updated.features[0].properties).toEqual({ tipo: "arroio", existente: "x" });
+    });
+});
+
+describe("updateFeatureGeometry", () => {
+    it("replaces coordinates", () => {
+        const fc = addFeature(emptyFC(), [[0, 0], [1, 1]]);
+        const moved = updateFeatureGeometry(fc, 0, [[5, 5], [6, 6]]);
+        expect(moved.features[0].geometry.coordinates).toEqual([[5, 5], [6, 6]]);
+    });
+});
+
+describe("snapToEndpoint", () => {
+    it("returns the existing endpoint within tolerance", () => {
+        const fc = addFeature(emptyFC(), [[0, 0], [1, 1]]);
+        const eps = SNAP_TOLERANCE_DEG / 2;
+        const snapped = snapToEndpoint(fc, [1.0 + eps, 1.0 - eps]);
+        expect(snapped).toEqual([1, 1]);
+    });
+
+    it("returns null beyond tolerance", () => {
+        const fc = addFeature(emptyFC(), [[0, 0], [1, 1]]);
+        const far = SNAP_TOLERANCE_DEG * 100;
+        expect(snapToEndpoint(fc, [1.0 + far, 1.0])).toBeNull();
+    });
+
+    it("ignores interior vertices", () => {
+        const fc = addFeature(emptyFC(), [[0, 0], [0.5, 0.5], [1, 1]]);
+        // [0.5, 0.5] is interior; only [0,0] and [1,1] are snap candidates.
+        const eps = SNAP_TOLERANCE_DEG / 2;
+        expect(snapToEndpoint(fc, [0.5 + eps, 0.5 + eps])).toBeNull();
+    });
+});
+
+describe("undo/redo", () => {
+    it("rolls forward and back through edits", () => {
+        let fc = emptyFC();
+        let h = makeHistory();
+        h = push(h, fc);
+        fc = addFeature(fc, [[0, 0], [1, 1]]);
+        h = push(h, fc);
+        fc = addFeature(fc, [[2, 2], [3, 3]]);
+
+        // Undo twice.
+        let r = undo(h, fc);
+        expect(r.snapshot.features).toHaveLength(1);
+        r = undo(r.history, r.snapshot);
+        expect(r.snapshot.features).toHaveLength(0);
+
+        // Redo back.
+        r = redo(r.history, r.snapshot);
+        expect(r.snapshot.features).toHaveLength(1);
+        r = redo(r.history, r.snapshot);
+        expect(r.snapshot.features).toHaveLength(2);
+    });
+
+    it("push clears the redo stack", () => {
+        let fc = emptyFC();
+        let h = makeHistory();
+        h = push(h, fc);
+        const v1 = addFeature(fc, [[0, 0], [1, 1]]);
+        h = push(h, v1);
+        const r = undo(h, v1);
+        // history.future now has v1 — but a new push must clear it.
+        const h2 = push(r.history, r.snapshot);
+        expect(h2.future).toEqual([]);
+    });
+
+    it("undo on empty history is a no-op", () => {
+        const r = undo(makeHistory(), emptyFC());
+        expect(r.snapshot).toEqual(emptyFC());
+        expect(r.history.past).toEqual([]);
+    });
+});
+
+describe("validateAttributes", () => {
+    const schema = [
+        { key: "tipo", type: "enum", required: true, options: ["a", "b"] },
+        { key: "lanes", type: "number", required: false },
+        { key: "iluminacao", type: "boolean", required: false },
+    ];
+
+    it("flags required missing", () => {
+        const errs = validateAttributes([{ properties: {} }], schema);
+        expect(errs.some(e => e.includes("tipo"))).toBe(true);
+    });
+
+    it("rejects out-of-options enum", () => {
+        const errs = validateAttributes([{ properties: { tipo: "z" } }], schema);
+        expect(errs.some(e => e.includes("'z'"))).toBe(true);
+    });
+
+    it("treats empty string as missing", () => {
+        const errs = validateAttributes([{ properties: { tipo: "" } }], schema);
+        expect(errs.some(e => e.includes("obrigatório"))).toBe(true);
+    });
+
+    it("rejects truthy-string for boolean", () => {
+        const errs = validateAttributes(
+            [{ properties: { tipo: "a", iluminacao: "true" } }],
+            schema,
+        );
+        expect(errs.some(e => e.includes("boolean"))).toBe(true);
+    });
+
+    it("accepts a clean feature", () => {
+        expect(validateAttributes(
+            [{ properties: { tipo: "a", lanes: 2, iluminacao: true } }],
+            schema,
+        )).toEqual([]);
+    });
+});
+
+describe("validateTopology", () => {
+    it("requires direction property", () => {
+        const errs = validateTopology([_line([[0, 0], [1, 1]])]);
+        expect(errs.some(e => e.includes("direction"))).toBe(true);
+    });
+
+    it("accepts a chain", () => {
+        expect(validateTopology([
+            _line([[0, 0], [1, 1]], { direction: "forward" }),
+            _line([[1, 1], [2, 2]], { direction: "forward" }),
+        ])).toEqual([]);
+    });
+
+    it("detects a cycle", () => {
+        const errs = validateTopology([
+            _line([[0, 0], [1, 0]], { direction: "forward" }),
+            _line([[1, 0], [1, 1]], { direction: "forward" }),
+            _line([[1, 1], [0, 0]], { direction: "forward" }),
+        ]);
+        expect(errs.some(e => e.toLowerCase().includes("ciclo"))).toBe(true);
+    });
+
+    it("snaps endpoints within tolerance", () => {
+        const eps = SNAP_TOLERANCE_DEG / 2;
+        expect(validateTopology([
+            _line([[0, 0], [1, 1]], { direction: "forward" }),
+            _line([[1 + eps, 1 - eps], [2, 2]], { direction: "forward" }),
+        ])).toEqual([]);
+    });
+
+    it("flags self-loop", () => {
+        const errs = validateTopology([
+            _line([[0, 0], [1, 1], [0, 0]], { direction: "forward" }),
+        ]);
+        expect(errs.some(e => e.includes("loop") || e.toLowerCase().includes("ciclo"))).toBe(true);
+    });
+
+    it("undirected edge counts both ways for cycle detection", () => {
+        const errs = validateTopology([
+            _line([[0, 0], [1, 0]], { direction: "both" }),
+            _line([[1, 0], [0, 0]], { direction: "forward" }),
+        ]);
+        expect(errs.some(e => e.toLowerCase().includes("ciclo"))).toBe(true);
+    });
+});
+
+describe("validateBeforeSubmit", () => {
+    const schema = [
+        { key: "tipo", type: "enum", required: true, options: ["rio"] },
+    ];
+
+    it("returns [] for clean input", () => {
+        const fc = addFeature(emptyFC(), [[0, 0], [1, 1]], { tipo: "rio" });
+        expect(validateBeforeSubmit(fc, schema)).toEqual([]);
+    });
+
+    it("rejects non-LineString geometry", () => {
+        const bad = {
+            type: "FeatureCollection",
+            features: [{ type: "Feature",
+                          geometry: { type: "Point", coordinates: [0, 0] },
+                          properties: {} }],
+        };
+        const errs = validateBeforeSubmit(bad, schema);
+        expect(errs.some(e => e.includes("LineString"))).toBe(true);
+    });
+
+    it("rejects single-vertex line", () => {
+        const fc = { type: "FeatureCollection", features: [_line([[0, 0]])] };
+        const errs = validateBeforeSubmit(fc, schema);
+        expect(errs.some(e => e.includes("≥2"))).toBe(true);
+    });
+
+    it("rejects malformed FC root", () => {
+        expect(validateBeforeSubmit(null, schema)).toEqual(["FeatureCollection inválida"]);
+        expect(validateBeforeSubmit({ type: "X" }, schema)).toEqual(["FeatureCollection inválida"]);
+    });
+
+    it("aggregates topology errors when topology_required", () => {
+        const fc = addFeature(emptyFC(), [[0, 0], [1, 1]], { tipo: "rio" });
+        // No direction → topology error.
+        const errs = validateBeforeSubmit(fc, schema, { topologyRequired: true });
+        expect(errs.some(e => e.includes("direction"))).toBe(true);
+    });
+});
