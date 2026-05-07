@@ -104,20 +104,23 @@ def _row_to_project(row) -> dict:
     }
 
 
-# Allowed tile_px values. Capped at 512 in practice (1024 doubles browser
-# memory pressure and PNG encode time without much added value at our 2.5 m/px
-# baseline). The DB CHECK still permits 1024 for future growth.
-ALLOWED_TILE_PX = (64, 128, 256, 512, 1024)
+# Sanity bounds for tile_px. The lower bound is just "positive integer";
+# the upper bound caps the per-tile mask body at ~16 MB (4096² bytes), past
+# which browser memory and PNG encode times stop being interactive.
+MIN_TILE_PX = 1
+MAX_TILE_PX = 4096
 
 
 def _validate_tile_geometry(tile_px: int, meters_per_pixel: float) -> None:
-    if tile_px not in ALLOWED_TILE_PX:
+    if not isinstance(tile_px, int) or isinstance(tile_px, bool) \
+            or tile_px < MIN_TILE_PX or tile_px > MAX_TILE_PX:
         raise HTTPException(400, detail={
             "error": "invalid_tile_px",
-            "allowed": list(ALLOWED_TILE_PX),
-            "message": f"tile_px deve ser um de {ALLOWED_TILE_PX}",
+            "min": MIN_TILE_PX, "max": MAX_TILE_PX,
+            "message": f"tile_px deve ser inteiro entre {MIN_TILE_PX} e {MAX_TILE_PX}",
         })
-    if not isinstance(meters_per_pixel, (int, float)) or meters_per_pixel <= 0:
+    if not isinstance(meters_per_pixel, (int, float)) \
+            or isinstance(meters_per_pixel, bool) or meters_per_pixel <= 0:
         raise HTTPException(400, detail={
             "error": "invalid_meters_per_pixel",
             "message": "meters_per_pixel deve ser > 0",

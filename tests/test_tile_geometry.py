@@ -79,12 +79,30 @@ def test_create_project_accepts_custom_tile_geometry(client, admin_user, tmp_pat
     assert proj["tile_meters"] == 128.0
 
 
-def test_create_project_rejects_disallowed_tile_px(client, admin_user, tmp_path):
+def test_create_project_accepts_arbitrary_positive_tile_px(client, admin_user, tmp_path):
+    """tile_px is a free positive integer: 226 is just as valid as 256."""
     tok = token(client, admin_user["username"], admin_user["password"])
     body = {
-        "name": "weird",
+        "name": "odd_size",
         "primary_mbtiles": _real_mbtiles(tmp_path),
-        "tile_px": 200,  # not in {64,128,256,512,1024}
+        "tile_px": 226,
+        "meters_per_pixel": 2.5,
+        "classes": [{"id": 1, "name": "a", "color": "#ff0000"}],
+    }
+    r = client.post("/api/admin/projects", json=body, headers=h(tok))
+    assert r.status_code == 200, r.text
+    proj = r.json()
+    assert proj["tile_px"] == 226
+    assert proj["tile_meters"] == 226 * 2.5
+
+
+@pytest.mark.parametrize("bad", [0, -1, 4097])
+def test_create_project_rejects_out_of_range_tile_px(client, admin_user, tmp_path, bad):
+    tok = token(client, admin_user["username"], admin_user["password"])
+    body = {
+        "name": f"bad_{bad}",
+        "primary_mbtiles": _real_mbtiles(tmp_path),
+        "tile_px": bad,
         "meters_per_pixel": 2.5,
         "classes": [{"id": 1, "name": "a", "color": "#ff0000"}],
     }
@@ -202,9 +220,10 @@ def test_get_project_surfaces_geometry_locked_flag(client, admin_user, tmp_path)
 
 # ---- mask_utils round-trip at non-default tile_px ---------------------------
 
-@pytest.mark.parametrize("tile_px", [64, 128, 256, 512])
+@pytest.mark.parametrize("tile_px", [64, 128, 226, 256, 512])
 def test_mask_roundtrip_at_arbitrary_tile_px(tile_px):
-    """encode_mask / decode_mask must agree for every supported tile_px."""
+    """encode_mask / decode_mask must agree at any positive tile_px,
+    including non-power-of-two sizes like 226."""
     rng = np.random.default_rng(seed=42)
     arr = rng.integers(0, 7, size=tile_px * tile_px, dtype=np.uint8).tobytes()
     png = mask_utils.encode_mask(arr, tile_px)

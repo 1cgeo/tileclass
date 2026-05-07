@@ -66,12 +66,11 @@ CREATE TABLE IF NOT EXISTS projects (
     -- Tile geometry. tile_px is the side of the square mask in pixels;
     -- meters_per_pixel is the ground sampling distance. Together they fix
     -- the bbox span (tile_meters = tile_px * meters_per_pixel) and the
-    -- mask body size (tile_px**2 bytes). Editable while the project has
+    -- mask body size (tile_px**2 bytes). Any positive integer / float
+    -- accepted — admin chooses freely. Editable while the project has
     -- no tiles; locked afterwards (mask bytes assume the original shape).
-    tile_px INTEGER NOT NULL DEFAULT 256
-        CHECK (tile_px IN (64, 128, 256, 512, 1024)),
-    meters_per_pixel REAL NOT NULL DEFAULT 2.5
-        CHECK (meters_per_pixel > 0),
+    tile_px INTEGER NOT NULL DEFAULT 256 CHECK (tile_px > 0),
+    meters_per_pixel REAL NOT NULL DEFAULT 2.5 CHECK (meters_per_pixel > 0),
     mask_complete_required INTEGER NOT NULL DEFAULT 1,
     primary_mbtiles TEXT NOT NULL,
     secondary_mbtiles TEXT,

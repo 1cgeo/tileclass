@@ -158,11 +158,10 @@ function renderProjectDetail(proj, members) {
                 <legend>Geometria do tile${lockedHint}</legend>
                 <label class="field" title="${escapeHtml(tilePxTooltip)}">
                     <span>Lado em pixels (tile_px)</span>
-                    <select data-field="tile_px" ${geoLocked ? "disabled" : ""}>
-                        ${[64, 128, 256, 512, 1024].map(px =>
-                            `<option value="${px}" ${proj.tile_px === px ? "selected" : ""}>${px}</option>`
-                        ).join("")}
-                    </select>
+                    <input type="number" step="1" min="1" max="4096"
+                           data-field="tile_px"
+                           value="${proj.tile_px ?? 256}"
+                           ${geoLocked ? "disabled" : ""}>
                 </label>
                 <label class="field" title="Resolução no chão por pixel (m/px). Tile cobre tile_px × m/px metros.">
                     <span>Metros por pixel</span>
@@ -552,13 +551,7 @@ function showProjectForm(root, _) {
                 <legend>Geometria do tile</legend>
                 <label class="field">
                     <span>Lado em pixels (tile_px)</span>
-                    <select id="np-tile-px">
-                        <option value="64">64</option>
-                        <option value="128">128</option>
-                        <option value="256" selected>256</option>
-                        <option value="512">512</option>
-                        <option value="1024">1024</option>
-                    </select>
+                    <input type="number" id="np-tile-px" step="1" min="1" max="4096" value="256">
                 </label>
                 <label class="field">
                     <span>Metros por pixel</span>
@@ -623,11 +616,11 @@ function showProjectForm(root, _) {
 
     // Live "tile no chão" derived label so admins see the consequence of
     // changing px / m/px before submitting the form.
-    const pxSel = document.getElementById("np-tile-px");
+    const pxInp = document.getElementById("np-tile-px");
     const mppInp = document.getElementById("np-mpp");
     const derivedP = document.getElementById("np-geom-derived");
     const refreshGeomDerived = () => {
-        const px = parseInt(pxSel.value, 10) || 256;
+        const px = parseInt(pxInp.value, 10) || 256;
         const mpp = parseFloat(mppInp.value) || 0;
         const m = px * mpp;
         derivedP.innerHTML = `
@@ -636,7 +629,7 @@ function showProjectForm(root, _) {
             <br>Após o primeiro tile inserido, esses valores travam — mask bytes e bbox dependem deles.
         `;
     };
-    pxSel.addEventListener("change", refreshGeomDerived);
+    pxInp.addEventListener("input", refreshGeomDerived);
     mppInp.addEventListener("input", refreshGeomDerived);
 
     document.querySelector("[data-rm-cls]").onclick = (ev) => ev.target.closest("tr").remove();
@@ -650,7 +643,7 @@ function showProjectForm(root, _) {
             name: document.getElementById("np-name").value.trim(),
             kind: kindSel.value,
             description: document.getElementById("np-description").value,
-            tile_px: parseInt(pxSel.value, 10) || 256,
+            tile_px: parseInt(pxInp.value, 10) || 256,
             meters_per_pixel: parseFloat(mppInp.value) || 2.5,
         };
         if (isVector) {
