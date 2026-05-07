@@ -404,6 +404,61 @@ def test_xyz_403_for_non_member(client, admin_user, operators, tmp_path):
     assert r.status_code == 403
 
 
+def test_remote_url_accepted_as_layer(client, admin_user):
+    """A Martin / TileServer-GL URL is a valid layer source; no file check."""
+    tok = token(client, admin_user["username"], admin_user["password"])
+    r = client.post(
+        "/api/admin/projects",
+        json={
+            "name": "remote",
+            "primary_mbtiles": "https://martin.example.com/sat/{z}/{x}/{y}.webp",
+            "classes": [{"id": 1, "name": "x", "color": "#112233"}],
+        },
+        headers=h(tok),
+    )
+    assert r.status_code == 200, r.text
+    pid = r.json()["id"]
+    body = client.get(f"/api/projects/{pid}", headers=h(tok)).json()
+    primary = body["layers"]["primary"]
+    assert primary["url"] == "https://martin.example.com/sat/{z}/{x}/{y}.webp"
+    assert primary["remote"] is True
+    assert primary["ext"] == "webp"
+
+
+def test_remote_url_rejects_missing_placeholders(client, admin_user):
+    tok = token(client, admin_user["username"], admin_user["password"])
+    r = client.post(
+        "/api/admin/projects",
+        json={
+            "name": "broken-url",
+            "primary_mbtiles": "https://martin.example.com/sat/0/0/0.png",
+            "classes": [{"id": 1, "name": "x", "color": "#112233"}],
+        },
+        headers=h(tok),
+    )
+    assert r.status_code == 400
+    detail = r.json()["detail"]
+    assert detail["error"] == "missing_url_placeholders"
+    assert set(detail["missing"]) == {"{z}", "{x}", "{y}"}
+
+
+def test_remote_layer_xyz_endpoint_returns_404(client, admin_user):
+    """The proxied /xyz/{layer} endpoint only serves mbtiles. Remote-URL
+    layers are fetched by MapLibre directly, so the proxy 404s."""
+    tok = token(client, admin_user["username"], admin_user["password"])
+    pid = client.post(
+        "/api/admin/projects",
+        json={
+            "name": "remote-xyz",
+            "primary_mbtiles": "https://martin.example.com/sat/{z}/{x}/{y}.png",
+            "classes": [{"id": 1, "name": "x", "color": "#112233"}],
+        },
+        headers=h(tok),
+    ).json()["id"]
+    r = client.get(f"/api/projects/{pid}/xyz/primary/0/0/0.png", headers=h(tok))
+    assert r.status_code == 404
+
+
 def test_xyz_extension_must_match_format(client, admin_user, tmp_path):
     """An mbtiles whose metadata says format=png must reject .webp requests."""
     tok = token(client, admin_user["username"], admin_user["password"])

@@ -281,16 +281,19 @@ def admin_set_user_role(body: SetRoleIn, user_id: int = Path(ge=1),
 
 def _layer_info(project_id: int, layer: str) -> dict:
     """Per-layer status for the maintenance overview: not-configured,
-    configured-but-broken, or open with reader metadata."""
+    remote (Martin / TileServer-GL URL), configured-but-broken, or open
+    with reader metadata."""
     proj = project_service.get_project(project_id)
     if not proj:
         return {"open": False, "configured": False}
-    path = project_service.layer_path(proj, layer)
-    if not path:
+    src = project_service.layer_path(proj, layer)
+    if not src:
         return {"open": False, "configured": False}
+    if project_service.is_remote_layer(src):
+        return {"open": True, "configured": True, "remote": True, "path": src}
     reader = mbtiles_service.get_reader(project_id, layer)
     if reader is None or not reader.is_open():
-        return {"open": False, "configured": True, "path": path}
+        return {"open": False, "configured": True, "path": src}
     lo, hi = reader.zoom_range()
     p = reader.path()
     return {

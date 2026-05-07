@@ -29,16 +29,23 @@ LAYER_COLUMN = {
 
 
 def layer_path(project: dict, layer: str) -> str | None:
-    """Return the stored mbtiles path for `layer` on a project record, or None
-    when the layer isn't configured. Single point of truth for the layer →
-    column mapping."""
+    """Stored layer source for `layer` on a project — either an mbtiles path
+    (file) or a tile-server URL template (e.g. Martin / TileServer-GL).
+    Single point of truth for the layer → column mapping."""
     column = LAYER_COLUMN.get(layer)
     return project.get(column) if column else None
 
 
+def is_remote_layer(value: str | None) -> bool:
+    """A layer source is treated as a remote tile server when it starts with
+    http:// or https://. Otherwise it's a local mbtiles file path."""
+    return bool(value) and (value.startswith("http://") or value.startswith("https://"))
+
+
 def resolve_mbtiles_path(stored: str | None) -> Optional[Path]:
-    """Resolve an mbtiles path: relative entries become `backend/<path>`."""
-    if not stored:
+    """Resolve an mbtiles path: relative entries become `backend/<path>`.
+    Returns None for remote URLs (those are not file-backed)."""
+    if not stored or is_remote_layer(stored):
         return None
     p = Path(stored)
     if not p.is_absolute():
@@ -188,14 +195,27 @@ _ALLOWED_LAYER_FIELDS = {
 }
 
 
+_REQUIRED_URL_PLACEHOLDERS = ("{z}", "{x}", "{y}")
+
+
 def _validate_layer_path(stored: str, *, required: bool) -> None:
-    """Path must resolve to an existing file. Empty/None only allowed for
-    optional layers."""
+    """Layer source must be a remote tile-server URL (with {z}/{x}/{y}
+    placeholders) or a local mbtiles file that exists on disk. Empty/None
+    only allowed for optional layers."""
     if stored is None or stored == "":
         if required:
             raise HTTPException(400, detail={
                 "error": "missing_primary",
                 "message": "primary_mbtiles é obrigatório",
+            })
+        return
+    if is_remote_layer(stored):
+        missing = [p for p in _REQUIRED_URL_PLACEHOLDERS if p not in stored]
+        if missing:
+            raise HTTPException(400, detail={
+                "error": "missing_url_placeholders",
+                "missing": missing,
+                "message": f"URL precisa de {missing} no template",
             })
         return
     resolved = resolve_mbtiles_path(stored)

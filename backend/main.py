@@ -55,7 +55,9 @@ async def lifespan(app: FastAPI):
 def _prewarm_primary_readers() -> None:
     """Open the primary mbtiles for every active project at startup so the
     first GET /api/projects/{id} doesn't pay a sequential file-open per layer.
-    Optional layers stay lazy — they're rarer than the primary."""
+    Remote-URL layers (Martin / TileServer-GL) skip this since they don't
+    open as files; optional layers stay lazy."""
+    from . import project_service
     from .database import connect
     conn = connect()
     try:
@@ -65,6 +67,12 @@ def _prewarm_primary_readers() -> None:
     finally:
         conn.close()
     for r in rows:
+        proj = project_service.get_project(r["id"])
+        if not proj:
+            continue
+        primary = project_service.layer_path(proj, "primary")
+        if not primary or project_service.is_remote_layer(primary):
+            continue
         try:
             mbtiles_service.get_reader(r["id"], "primary")
         except Exception:

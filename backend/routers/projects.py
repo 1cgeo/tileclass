@@ -19,16 +19,42 @@ def list_projects(user: auth.CurrentUser = Depends(auth.get_current_user)):
     return project_service.list_projects_for_user(user.id, is_admin=user.role == "admin")
 
 
+_REMOTE_DEFAULT_EXT = {"primary": "webp", "secondary": "webp", "tertiary": "webp",
+                       "ref_primary": "png", "ref_secondary": "png"}
+
+
+def _ext_from_url(url: str) -> str | None:
+    # `https://host/.../{z}/{x}/{y}.png?key=…` → png
+    head, _, _ = url.partition("?")
+    if "." in head:
+        ext = head.rsplit(".", 1)[-1].lower()
+        if ext in ("png", "webp", "jpg", "jpeg"):
+            return ext
+    return None
+
+
 def _build_layers(project_id: int, proj: dict) -> dict:
-    """Layer URL templates the editor consumes. Includes ext (from mbtiles
-    metadata) so the client doesn't round-trip to discover the format.
-    Absent layer → None; configured-but-broken → {error: 'mbtiles_not_open'}
-    so the admin can spot the problem and the client still skips the shortcut."""
+    """Layer URL templates the editor consumes. Local mbtiles get the
+    proxied `/api/projects/{id}/xyz/...` URL; remote tile-server URLs
+    (Martin/TileServer-GL) pass through directly so MapLibre fetches them
+    without a backend hop. Absent layer → None; configured-but-broken
+    mbtiles → {error: 'mbtiles_not_open'} so admins can spot it."""
     base = f"/api/projects/{project_id}/xyz"
     out = {}
     for layer in project_service.LAYER_KEYS:
-        if not project_service.layer_path(proj, layer):
+        src = project_service.layer_path(proj, layer)
+        if not src:
             out[layer] = None
+            continue
+        if project_service.is_remote_layer(src):
+            ext = _ext_from_url(src) or _REMOTE_DEFAULT_EXT[layer]
+            out[layer] = {
+                "url": src,
+                "ext": ext,
+                "min_zoom": 0,
+                "max_zoom": 22,
+                "remote": True,
+            }
             continue
         reader = mbtiles_service.get_reader(project_id, layer)
         if reader is None:

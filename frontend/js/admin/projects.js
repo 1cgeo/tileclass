@@ -6,12 +6,16 @@ import { apiGet, apiPostJson, apiPatchJson, apiPutJson, apiDelete } from "../api
 import { showToast } from "../toast.js";
 import { escapeHtml } from "../utils.js";
 
+// Each field accepts either a local mbtiles path (relative to backend/ or
+// absolute) OR a remote tile-server URL template (Martin / TileServer-GL),
+// e.g. https://martin.example.com/sat/{z}/{x}/{y}.webp. URLs must contain
+// {z}, {x}, {y} placeholders.
 const LAYER_FIELDS = [
-    { key: "primary_mbtiles",          label: "Imagem primária (.mbtiles)",          required: true,  hint: "Caminho relativo a backend/ ou absoluto" },
-    { key: "secondary_mbtiles",        label: "Imagem secundária (.mbtiles)",        required: false, hint: "Atalho D — opcional" },
-    { key: "tertiary_mbtiles",         label: "Imagem terciária (.mbtiles)",         required: false, hint: "Atalho R — opcional" },
-    { key: "ref_mask_primary_mbtiles", label: "Máscara de referência primária",      required: false, hint: "Atalho T — opcional, raster categorizado" },
-    { key: "ref_mask_secondary_mbtiles", label: "Máscara de referência secundária", required: false, hint: "Atalho Y — opcional, raster categorizado" },
+    { key: "primary_mbtiles",          label: "Imagem primária",            required: true,  hint: "Path .mbtiles ou URL com {z}/{x}/{y}" },
+    { key: "secondary_mbtiles",        label: "Imagem secundária",          required: false, hint: "Atalho D — path .mbtiles ou URL" },
+    { key: "tertiary_mbtiles",         label: "Imagem terciária",           required: false, hint: "Atalho R — path .mbtiles ou URL" },
+    { key: "ref_mask_primary_mbtiles", label: "Máscara de referência 1ª",   required: false, hint: "Atalho T — raster categorizado (path ou URL)" },
+    { key: "ref_mask_secondary_mbtiles", label: "Máscara de referência 2ª", required: false, hint: "Atalho Y — raster categorizado (path ou URL)" },
 ];
 
 export async function renderProjects(root) {
