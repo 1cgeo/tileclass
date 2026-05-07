@@ -22,10 +22,13 @@ HTML5, MapLibre GL JS).
 
 - API REST (FastAPI) servindo o frontend estático.
 - SQLite WAL como banco único; máscaras como PNG single-band (BLOB).
-- Imagens e máscaras de referência por projeto via mbtiles servidos por
-  `/api/projects/{id}/xyz/{layer}/{z}/{x}/{y}.{ext}`. Cada projeto declara
-  até 5 layers: `primary` (obrigatório), `secondary`, `tertiary` (atalhos
-  D/R), `ref_primary`, `ref_secondary` (atalhos T/Y, máscaras categorizadas).
+- Imagens e máscaras de referência por projeto. Cada projeto declara até 5
+  layers: `primary` (obrigatório), `secondary`, `tertiary` (atalhos D/R),
+  `ref_primary`, `ref_secondary` (atalhos T/Y, máscaras categorizadas). Cada
+  layer pode apontar para um **mbtiles local** (servido por
+  `/api/projects/{id}/xyz/{layer}/{z}/{x}/{y}.{ext}`) ou para uma **URL
+  remota** de tile-server (Martin, TileServer-GL etc., contendo `{z}/{x}/{y}`).
+  URL remota é fetchada direto pelo MapLibre — backend não é proxy.
 - JWT (access 8h, refresh 24h, HS256). Role global `operator|admin` + flag
   `can_review`. Por projeto: `project_members.role ∈ {operator,reviewer,admin}`.
 
@@ -51,14 +54,20 @@ HTML5, MapLibre GL JS).
 | name                         | TEXT    | Único                                                                |
 | description                  | TEXT    | Livre                                                                |
 | mask_complete_required       | INTEGER | 0/1; quando 1, submit rejeita pixels=255                             |
-| primary_mbtiles              | TEXT    | Path obrigatório (relativo a `backend/` ou absoluto)                 |
-| secondary_mbtiles            | TEXT    | Opcional — atalho `D`                                                |
-| tertiary_mbtiles             | TEXT    | Opcional — atalho `R`                                                |
-| ref_mask_primary_mbtiles     | TEXT    | Opcional — máscara categorizada de referência (atalho `T`)           |
-| ref_mask_secondary_mbtiles   | TEXT    | Opcional — máscara categorizada de referência (atalho `Y`)           |
+| primary_mbtiles              | TEXT    | Path mbtiles **ou** URL remota com `{z}/{x}/{y}`. Obrigatório.       |
+| secondary_mbtiles            | TEXT    | Opcional — path ou URL — atalho `D`                                  |
+| tertiary_mbtiles             | TEXT    | Opcional — path ou URL — atalho `R`                                  |
+| ref_mask_primary_mbtiles     | TEXT    | Opcional — máscara de referência (path ou URL) — atalho `T`          |
+| ref_mask_secondary_mbtiles   | TEXT    | Opcional — máscara de referência (path ou URL) — atalho `Y`          |
 | active                       | INTEGER | 0/1; quando 0, `/next` e `/next-preview` retornam 409 `project_inactive` |
 | created_by                   | INTEGER | FK users.id (admin que criou)                                        |
 | created_at                   | TEXT    | ISO 8601                                                             |
+
+**Detecção de URL remota:** valores começando com `http://` ou `https://` são
+tratados como tile-server remoto (Martin, TileServer-GL etc.). O backend
+valida que a URL contém os placeholders `{z}/{x}/{y}` mas não baixa nem abre
+o recurso — quem fetch é o MapLibre no cliente. Paths que não começam com
+http(s) são resolvidos como arquivo local (relativos a `backend/` ou absolutos).
 
 ### 3.3 `project_classes`
 
@@ -182,7 +191,7 @@ JWT carrega `sub` (user_id), `username`, `role`, `typ` (`access`/`refresh`),
 |--------|-------------------------------------------------|----------------------------------------------------------------|
 | GET    | `/`                                             | Lista projetos visíveis ao user (membership; admin vê todos).  |
 | GET    | `/{id}`                                         | Detalhes + classes + map de layers (URLs prontas com extensão). 403 se não-membro. |
-| GET    | `/{id}/xyz/{layer}/{z}/{x}/{y}.{ext}`           | Tile bytes do mbtiles do projeto. `layer ∈ {primary, secondary, tertiary, ref_primary, ref_secondary}`. 404 se não configurada; 403 se não-membro. |
+| GET    | `/{id}/xyz/{layer}/{z}/{x}/{y}.{ext}`           | Tile bytes do mbtiles do projeto. `layer ∈ {primary, secondary, tertiary, ref_primary, ref_secondary}`. 404 se layer for URL remota (cliente fetch direto) ou não configurada; 403 se não-membro. |
 
 Admin (`/api/admin/projects`):
 
@@ -254,7 +263,7 @@ Todos atrás de `Depends(auth.require_admin)`.
 | GET    | `/tiles/problems`                      | Atalho para `status=problem`.                          |
 | GET    | `/tiles/{id}/thumbnail`                | PNG colorizado da máscara (param `size`).              |
 | GET    | `/tiles/{id}/satellite-thumbnail`      | PNG do satélite recortado pela bbox.                   |
-| GET    | `/mask-tiles/{z}/{x}/{y}.png`          | Overlay XYZ rasterizado on-the-fly + cache mbtiles.    |
+| GET    | `/mask-tiles/{project_id}/{z}/{x}/{y}.png` | Overlay XYZ rasterizado on-the-fly + cache mbtiles per-projeto (palette = `project_classes[project_id]`, cache em `<base>_p<project_id>.mbtiles`). |
 | POST   | `/tiles/{id}/reset`                    | Limpa máscara, volta para `pending`.                   |
 | POST   | `/tiles/{id}/re-review`                | `reviewed → in_review`.                                |
 | POST   | `/tiles/{id}/assign`                   | Atribui a um user específico.                          |

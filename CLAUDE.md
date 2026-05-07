@@ -114,7 +114,7 @@ tileclass/
 
 Cada projeto define seu próprio mundo de classificação. As tabelas-chave são `projects`, `project_classes` (PK `(project_id, class_id)`) e `project_members` (PK `(project_id, user_id)` com role `operator|reviewer|admin`). `tiles.project_id` é `NOT NULL` e referencia `projects(id)`.
 
-**Layers (mbtiles, paths relativos a `backend/`):**
+**Layers (cada slot aceita path mbtiles OU URL de tile-server remoto):**
 
 | Coluna | Layer (frontend) | Atalho | Obrigatório |
 |---|---|---|---|
@@ -124,7 +124,11 @@ Cada projeto define seu próprio mundo de classificação. As tabelas-chave são
 | `ref_mask_primary_mbtiles` | `ref_primary` | `T` (hold) | não |
 | `ref_mask_secondary_mbtiles` | `ref_secondary` | `Y` (hold) | não |
 
-Layers ausentes não registram atalho nem aparecem na sidebar/cheat-sheet (`rebuildShortcutMap` filtra `KEY_TO_OVERLAY` em runtime). `ref_*` são overlays de referência (raster categorizado, não-editável); ao serem segurados, escondem a máscara do operador (`HIDE_MASK_OVERLAYS`).
+Cada campo aceita dois formatos:
+- **Path mbtiles** (relativo a `backend/` ou absoluto): backend abre via pool `mbtiles_service.get_reader(project_id, layer)` e serve em `/api/projects/{id}/xyz/{layer}/{z}/{x}/{y}.{ext}`. JWT exigido (autenticação intra-rede).
+- **URL de tile-server remoto** (Martin / TileServer-GL / similares): valor começando com `http(s)://` e contendo `{z}/{x}/{y}`. MapLibre busca direto, sem proxy do backend. Útil para integrar com infraestrutura existente. CSP do servidor pode precisar ajuste (`connect-src` em `main.py`).
+
+`project_service.is_remote_layer(value)` detecta URL; `layer_path(proj, layer)` é o único ponto de leitura. Layers ausentes não registram atalho nem aparecem na sidebar/cheat-sheet — `refreshShortcutsBadges()` esconde os badges via `data-overlay-key` no HTML. `ref_*` são overlays de referência (raster categorizado, não-editável); ao serem segurados, escondem a máscara do operador (`HIDE_MASK_OVERLAYS`).
 
 **`mask_complete_required`:** quando `True` (default), submit rejeita pixels=255 com `unfilled_pixels`; quando `False`, aceita. Frontend espelha o gate: `updateSubmitButton` só pinta `incomplete` no projeto estrito.
 
@@ -141,7 +145,9 @@ Layers ausentes não registram atalho nem aparecem na sidebar/cheat-sheet (`rebu
 
 **Migração (idempotente, em `database.py`):** DBs pré-projetos ganham um projeto "default" semeado a partir de `config.yaml.classes/tileserver/dsg/mapbiomas`; todos os tiles existentes recebem `project_id=<default>`; usuários ativos viram membros com role derivada de `role+can_review`. A coluna é tornada `NOT NULL` via tabela espelho. DBs novos passam pela mesma seed automaticamente em `init_db()`.
 
-**Pool de mbtiles readers:** `mbtiles_service` mantém um LRU de até 32 readers, chaveado por `(project_id, layer)`. Editar paths via admin invalida o reader correspondente. Arquivos inválidos/corruptos são tolerados (reader fica `closed`, layer some do payload).
+**Pool de mbtiles readers:** `mbtiles_service` mantém um LRU de até 32 readers, chaveado por `(project_id, layer)`. Editar paths via admin invalida o reader correspondente. Arquivos inválidos/corruptos são tolerados (reader fica `closed`, layer some do payload). URLs remotos não consomem slots do pool — só paths mbtiles. Lifespan pré-aquece o reader `primary` de cada projeto ativo (apenas mbtiles locais) para evitar latência na primeira requisição.
+
+**Mask overlay (admin):** `mask_tile_service` é per-projeto. Endpoint `/api/admin/mask-tiles/{project_id}/{z}/{x}/{y}.png`. Cache em arquivo separado `<base>_p<project_id>.mbtiles` para garantir que paletas/conjuntos de tiles de projetos diferentes não compartilhem rows. LUT vem de `project_classes[project_id]`. Invalidações (`safe_invalidate_tile`/`safe_invalidate_bbox(project_id, ...)`/`safe_invalidate_tiles`) buscam o `project_id` da tile e direcionam para o cache file correto.
 
 **Regra inegociável de classes:** renomear/recolorir IDs é livre; **remover** uma classe é rejeitado quando o projeto tem qualquer tile (bytes da máscara são imutáveis e podem referenciar o ID removido). Adicionar novos IDs é livre.
 
