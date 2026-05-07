@@ -54,10 +54,23 @@ let nextMissingCursor = 0;     // N: walks through missing pixels in raster orde
 let tileserverUrl = "";
 let tileserverMaxZoom = 22;
 // Overlays are hold-to-show; each cfg is { url, minZoom?, maxZoom? } or null.
-const overlayCfg = { secondary: null, tertiary: null, dsg: null, mb: null };
-const overlayHeld = { secondary: false, tertiary: false, dsg: false, mb: false };
-const OVERLAY_LABEL = { secondary: "secundária", tertiary: "terciária", dsg: "DSG", mb: "MapBiomas" };
-const KEY_TO_OVERLAY = { d: "secondary", r: "tertiary", t: "dsg", y: "mb" };
+// Two image layers (secondary/tertiary) and two reference-mask layers
+// (ref_primary/ref_secondary). Empty when the project hasn't configured them.
+const overlayCfg = { secondary: null, tertiary: null, ref_primary: null, ref_secondary: null };
+const overlayHeld = { secondary: false, tertiary: false, ref_primary: false, ref_secondary: false };
+const OVERLAY_LABEL = {
+    secondary: "imagem secundária",
+    tertiary: "imagem terciária",
+    ref_primary: "máscara de referência primária",
+    ref_secondary: "máscara de referência secundária",
+};
+// Static key→layer map; the actual registered shortcuts are filtered to only
+// layers the project has configured (see refreshOverlayConfig).
+const KEY_TO_OVERLAY_ALL = { d: "secondary", r: "tertiary", t: "ref_primary", y: "ref_secondary" };
+let KEY_TO_OVERLAY = {};
+let activeProjectId = null;
+let activeProject = null;
+let maskCompleteRequired = true;
 let todayCount = 0;
 
 // Preload cache for the "next" tile while user paints
@@ -153,32 +166,110 @@ export async function initEditor(user) {
     onSessionWarning(() => {
         showToast("Sua sessão expira em breve. Submeta seu trabalho e faça login novamente.", "warn", 30_000);
     });
-    const [cfg, cls] = await Promise.all([
-        apiGet("/api/config/tileserver"),
-        apiGet("/api/config/classes"),
-    ]);
-    tileserverUrl = cfg.url_template;
-    tileserverMaxZoom = cfg.max_zoom ?? 22;
-    overlayCfg.secondary = cfg.secondary_url_template
-        ? { url: cfg.secondary_url_template, maxZoom: cfg.secondary_max_zoom ?? 22 }
-        : null;
-    overlayCfg.tertiary = cfg.tertiary_url_template
-        ? { url: cfg.tertiary_url_template, maxZoom: cfg.tertiary_max_zoom ?? 22 }
-        : null;
-    overlayCfg.dsg = cfg.dsg_url_template
-        ? { url: cfg.dsg_url_template, minZoom: cfg.dsg_min_zoom ?? 0, maxZoom: cfg.dsg_max_zoom ?? 22 }
-        : null;
-    overlayCfg.mb = cfg.mb_url_template
-        ? { url: cfg.mb_url_template, minZoom: cfg.mb_min_zoom ?? 0, maxZoom: cfg.mb_max_zoom ?? 22 }
-        : null;
-    classes = cls;
-    classesById = Object.fromEntries(classes.map(c => [c.id, c]));
+    await refreshActiveProjectConfig();
     buildClassPanel();
     buildColorLut();
     attachEvents();
     applySecondaryButtonLabels();
     _editorInitialized = true;
     await enterEditor();
+}
+
+
+// ---- Project bootstrap ------------------------------------------------------
+
+const LS_ACTIVE_PROJECT = "tileclass_active_project_id";
+
+async function refreshActiveProjectConfig() {
+    /** Fetch the project list, pick the active one (last-used → first), load
+     * its full config. Renders the header dropdown when the user has more
+     * than one project. */
+    const projects = await apiGet("/api/projects");
+    if (!projects || !projects.length) {
+        showToast("Nenhum projeto disponível para o seu usuário.", "err", 8000);
+        throw new Error("no projects");
+    }
+    let saved = null;
+    try { saved = parseInt(localStorage.getItem(LS_ACTIVE_PROJECT), 10); } catch {}
+    const initial = projects.find(p => p.id === saved) || projects[0];
+    activeProjectId = initial.id;
+    try { localStorage.setItem(LS_ACTIVE_PROJECT, String(activeProjectId)); } catch {}
+    renderProjectPicker(projects);
+    await loadProjectConfig(activeProjectId);
+}
+
+function renderProjectPicker(projects) {
+    const wrap = document.getElementById("project-picker-wrap");
+    const sel = document.getElementById("project-picker");
+    if (!wrap || !sel) return;
+    sel.innerHTML = "";
+    for (const p of projects) {
+        const opt = document.createElement("option");
+        opt.value = String(p.id);
+        opt.textContent = p.name;
+        if (p.id === activeProjectId) opt.selected = true;
+        sel.appendChild(opt);
+    }
+    if (projects.length > 1) {
+        wrap.classList.remove("hidden");
+        sel.onchange = async () => {
+            const newId = parseInt(sel.value, 10);
+            if (!Number.isFinite(newId) || newId === activeProjectId) return;
+            activeProjectId = newId;
+            try { localStorage.setItem(LS_ACTIVE_PROJECT, String(newId)); } catch {}
+            currentTile = null;
+            await loadProjectConfig(newId);
+            buildClassPanel();
+            buildColorLut();
+            await enterEditor();
+        };
+    } else {
+        wrap.classList.add("hidden");
+    }
+}
+
+async function loadProjectConfig(projectId) {
+    const proj = await apiGet(`/api/projects/${projectId}`);
+    activeProject = proj;
+    classes = proj.classes || [];
+    classesById = Object.fromEntries(classes.map(c => [c.id, c]));
+    maskCompleteRequired = !!proj.mask_complete_required;
+    const layers = proj.layers || {};
+    const primary = layers.primary;
+    tileserverUrl = primary?.url || "";
+    tileserverMaxZoom = primary?.max_zoom ?? 22;
+    // Build overlayCfg from the layers map; keep null when a layer is absent
+    // or configured-but-not-open so the shortcut path stays disabled.
+    for (const k of Object.keys(overlayCfg)) {
+        const info = layers[k];
+        overlayCfg[k] = info && info.url
+            ? { url: info.url, minZoom: info.min_zoom ?? 0, maxZoom: info.max_zoom ?? 22 }
+            : null;
+    }
+    rebuildShortcutMap();
+}
+
+function rebuildShortcutMap() {
+    /** Restrict the keyboard map to layers the project actually exposes.
+     * Keys with no configured layer never fire — and the shortcuts list /
+     * cheat-sheet only show the ones that are live. */
+    KEY_TO_OVERLAY = {};
+    for (const [key, layer] of Object.entries(KEY_TO_OVERLAY_ALL)) {
+        if (overlayCfg[layer]) KEY_TO_OVERLAY[key] = layer;
+    }
+    refreshShortcutsBadges();
+}
+
+function refreshShortcutsBadges() {
+    /** Hide kbd badges and shortcut-list rows whose layer is absent from
+     * the active project. Idempotent — re-runs on every project switch. */
+    const slots = document.querySelectorAll("[data-overlay-key]");
+    for (const el of slots) {
+        const key = el.getAttribute("data-overlay-key");
+        const layer = KEY_TO_OVERLAY_ALL[key];
+        if (overlayCfg[layer]) el.classList.remove("hidden");
+        else el.classList.add("hidden");
+    }
 }
 
 // Admins shouldn't logout when they cancel the "start next tile" / "no tiles"
@@ -214,7 +305,7 @@ export async function enterEditor() {
         [, , resume] = await Promise.all([
             loadTodayCount(),
             loadQueueStats(),
-            apiGet("/api/tiles/assigned").catch(() => null),
+            apiGet(`/api/tiles/assigned?project_id=${activeProjectId}`).catch(() => null),
         ]);
     } catch {}
     if (resume) {
@@ -231,7 +322,7 @@ export async function enterEditor() {
 
 async function loadTodayCount() {
     try {
-        const r = await apiGet("/api/me/stats-today");
+        const r = await apiGet(`/api/me/stats-today?project_id=${activeProjectId}`);
         todayCount = r.count || 0;
         document.getElementById("today-count").textContent = todayCount;
     } catch {}
@@ -239,7 +330,7 @@ async function loadTodayCount() {
 
 async function loadQueueStats() {
     try {
-        const q = await apiGet("/api/tiles/queue-stats");
+        const q = await apiGet(`/api/tiles/queue-stats?project_id=${activeProjectId}`);
         const el = document.getElementById("queue-progress");
         el.textContent = `${q.reviewed}/${q.total} revisados · ${q.classified}/${q.total} classificados`;
     } catch {}
@@ -301,7 +392,7 @@ async function loadNext() {
         if (preloadedNext) {
             t = preloadedNext.tile;
             // We still must call /next to actually assign. Preloaded PNG may differ.
-            const real = await apiGet("/api/tiles/next");
+            const real = await apiGet(`/api/tiles/next?project_id=${activeProjectId}`);
             if (!real) {
                 preloadedNext = null;
                 showNoTilesScreen();
@@ -314,7 +405,7 @@ async function loadNext() {
             }
             preloadedNext = null;
         } else {
-            t = await apiGet("/api/tiles/next");
+            t = await apiGet(`/api/tiles/next?project_id=${activeProjectId}`);
             if (!t) {
                 showNoTilesScreen();
                 return;
@@ -330,7 +421,7 @@ async function loadNext() {
 
 async function preloadNext() {
     try {
-        const peek = await apiGet("/api/tiles/next-preview");
+        const peek = await apiGet(`/api/tiles/next-preview?project_id=${activeProjectId}`);
         if (!peek) { preloadedNext = null; return; }
         const blob = await apiGetBlob(`/api/tiles/${peek.id}/image`, { retries: 2, timeout: 8_000 });
         const img = await blobToImage(blob);
@@ -451,7 +542,11 @@ function updateProgress() {
     const missLine = document.getElementById("missing-line");
     const missCount = document.getElementById("missing-count");
     if (missLine && missCount) {
-        missLine.classList.toggle("hidden", missing === 0);
+        // The "missing pixels" warning only matters when the project requires
+        // a fully-painted mask. Loose projects keep it hidden — the badge
+        // would otherwise nag the operator about a non-condition.
+        const showMissing = maskCompleteRequired && missing > 0;
+        missLine.classList.toggle("hidden", !showMissing);
         missCount.textContent = missing.toLocaleString("pt-BR");
     }
     updateSubmitButton(missing);
@@ -463,7 +558,7 @@ function updateSubmitButton(missing) {
     if (!btn || !label) return;
     const isReview = currentTile && currentTile.status === "in_review";
     const baseLabel = isReview ? "Aprovar revisão" : "Submeter";
-    if (missing > 0) {
+    if (missing > 0 && maskCompleteRequired) {
         btn.classList.add("incomplete");
         label.textContent = `Faltam ${missing.toLocaleString("pt-BR")} px`;
         btn.title = `Complete a máscara — faltam ${missing} pixels`;
@@ -476,10 +571,11 @@ function updateSubmitButton(missing) {
 
 // --- Rendering ---
 
-// Categorical overlays (dsg/mb) hide the user mask while held so the operator
-// sees the overlay clean. Imagery overlays (secondary/tertiary) keep the mask
-// visible because they are alternative satellite views, not a comparison layer.
-const HIDE_MASK_OVERLAYS = new Set(["dsg", "mb"]);
+// Reference-mask overlays (ref_primary / ref_secondary) hide the user mask
+// while held so the operator sees the reference clean. Imagery overlays
+// (secondary/tertiary) keep the mask visible because they are alternative
+// satellite views, not a comparison layer.
+const HIDE_MASK_OVERLAYS = new Set(["ref_primary", "ref_secondary"]);
 
 function setOverlayHold(key, on) {
     if (!satMap) return;
@@ -1103,7 +1199,9 @@ function adjustOpacity(delta) {
 let _submitting = false;
 async function submit() {
     if (!currentTile || _submitting) return;
-    if (filledCount < PIXELS) {
+    // Loose projects (mask_complete_required=false) accept any mask — skip
+    // the client-side completeness gate; the backend mirrors the same rule.
+    if (maskCompleteRequired && filledCount < PIXELS) {
         const missing = PIXELS - filledCount;
         showToast(`Faltam ${missing} pixels.`, "error");
         flashMissing();
@@ -1262,7 +1360,7 @@ async function updateIdleNextHint() {
     if (!msg || !idle) return;
     const token = _previewToken;
     try {
-        const next = await apiGet("/api/tiles/next-preview");
+        const next = await apiGet(`/api/tiles/next-preview?project_id=${activeProjectId}`);
         // Avoid overwriting if the user already left the idle screen while the
         // preview was in flight (e.g. clicked "Iniciar tile" quickly).
         if (idle.classList.contains("hidden") || token !== _previewToken) return;
