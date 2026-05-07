@@ -24,11 +24,14 @@ def reset_many(tile_ids: list[int], admin_id: int, reason: str | None = None) ->
     detail = _clean_reason(reason)
     with transaction("IMMEDIATE") as conn:
         for tid in tile_ids:
+            # class_counts cleared too, otherwise the dashboard's
+            # class-distribution panel keeps reporting pixels from a mask
+            # that has been wiped.
             conn.execute(
                 """UPDATE tiles SET status='pending', data_png=?, assigned_to=NULL,
                    classified_by=NULL, reviewed_by=NULL, classified_at=NULL,
                    reviewed_at=NULL, problem_note=NULL, paused_at=NULL,
-                   version=version+1 WHERE id=?""",
+                   class_counts=NULL, version=version+1 WHERE id=?""",
                 (empty, tid),
             )
             log_action(conn, admin_id, tid, "reset", detail)
@@ -63,7 +66,7 @@ def report_problem_many(tile_ids: list[int], admin_id: int, note: str) -> dict:
             conn.execute(
                 """UPDATE tiles SET status='problem', problem_note=?, data_png=?,
                    assigned_to=NULL, paused_at=NULL, blocked_from=NULL,
-                   version=version+1 WHERE id=?""",
+                   class_counts=NULL, version=version+1 WHERE id=?""",
                 (note, empty, tid),
             )
             log_action(conn, admin_id, tid, "report_problem", note)

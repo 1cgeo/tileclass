@@ -327,10 +327,10 @@ def get_next_tile(user_id: int, project_id: int) -> dict | None:
             (user_id, project_id, user_id),
         ).fetchone()
         if row:
-            # Auto-resume only if the last pause was from an admin bulk-assign
-            # (`detail='queue'`). Manual pauses from the operator must survive
-            # `/next` calls — hitting "Próximo" should never silently reset
-            # the user's own paused timer.
+            # Auto-resume the system pauses (admin bulk-assign 'queue', or
+            # heartbeat-timeout 'auto' — operator just came back to work).
+            # Manual pauses (detail=NULL) must survive /next so the user's
+            # own paused timer doesn't silently restart on "Próximo".
             if row["paused_at"] is not None:
                 last_pause = conn.execute(
                     """SELECT detail FROM action_log
@@ -338,7 +338,7 @@ def get_next_tile(user_id: int, project_id: int) -> dict | None:
                        ORDER BY id DESC LIMIT 1""",
                     (row["id"], user_id),
                 ).fetchone()
-                if last_pause and last_pause["detail"] == "queue":
+                if last_pause and last_pause["detail"] in ("queue", "auto"):
                     conn.execute(
                         "UPDATE tiles SET paused_at=NULL, version=version+1 WHERE id=?",
                         (row["id"],),
@@ -568,7 +568,7 @@ def report_problem(tile_id: int, user_id: int, note: str) -> dict:
             raise HTTPException(403, "not assigned to you")
         conn.execute(
             """UPDATE tiles SET status='problem', problem_note=?, data_png=?,
-               assigned_to=NULL, paused_at=NULL WHERE id=?""",
+               assigned_to=NULL, paused_at=NULL, class_counts=NULL WHERE id=?""",
             (note, empty_mask_png(), tile_id),
         )
         log_action(conn, user_id, tile_id, "report_problem", note)

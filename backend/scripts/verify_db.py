@@ -67,7 +67,9 @@ def main() -> None:
                      problems)
 
         # mbtiles paths: local must exist, remote must have placeholders.
-        for proj in conn.execute("SELECT * FROM projects").fetchall():
+        # Inactive projects are skipped — admin may have archived them and
+        # cleaned up the source files; flagging them is noise.
+        for proj in conn.execute("SELECT * FROM projects WHERE active=1").fetchall():
             for layer in LAYER_KEYS:
                 col = {
                     "primary": "primary_mbtiles",
