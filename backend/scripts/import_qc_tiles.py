@@ -65,22 +65,48 @@ def render_seed_from_bdf(
     return raw, (west, south, east, north), info
 
 
-def insert_tile(conn, name: str, bbox: tuple[float, float, float, float],
-                png: bytes) -> bool:
+def _resolve_project(conn, project_arg: str | None) -> int:
+    rows = conn.execute("SELECT id, name FROM projects ORDER BY id").fetchall()
+    if not rows:
+        print("erro: nenhum projeto cadastrado.")
+        sys.exit(1)
+    if project_arg is None and len(rows) == 1:
+        return rows[0]["id"]
+    if project_arg is None:
+        names = ", ".join(f"{r['id']}={r['name']}" for r in rows)
+        print(f"--project é obrigatório (vários projetos): {names}")
+        sys.exit(1)
+    try:
+        pid = int(project_arg)
+        for r in rows:
+            if r["id"] == pid:
+                return pid
+    except ValueError:
+        pass
+    for r in rows:
+        if r["name"] == project_arg:
+            return r["id"]
+    print(f"projeto não encontrado: {project_arg}")
+    sys.exit(1)
+
+
+def insert_tile(conn, project_id: int, name: str,
+                bbox: tuple[float, float, float, float], png: bytes) -> bool:
     west, south, east, north = bbox
     existing = conn.execute(
         """SELECT id FROM tiles
-           WHERE ABS(bbox_west - ?) < 1e-6 AND ABS(bbox_south - ?) < 1e-6
+           WHERE project_id=?
+             AND ABS(bbox_west - ?) < 1e-6 AND ABS(bbox_south - ?) < 1e-6
              AND ABS(bbox_east - ?) < 1e-6 AND ABS(bbox_north - ?) < 1e-6""",
-        (west, south, east, north),
+        (project_id, west, south, east, north),
     ).fetchone()
     if existing:
         return False
     conn.execute(
-        """INSERT INTO tiles(name, bbox_west, bbox_south, bbox_east, bbox_north,
+        """INSERT INTO tiles(project_id, name, bbox_west, bbox_south, bbox_east, bbox_north,
                              status, data_png)
-           VALUES (?,?,?,?,?,'pending',?)""",
-        (name, west, south, east, north, png),
+           VALUES (?,?,?,?,?,?,'pending',?)""",
+        (project_id, name, west, south, east, north, png),
     )
     return True
 
@@ -95,6 +121,8 @@ def main():
                     help="diretório com {cell_id}_argmax.tif")
     ap.add_argument("--dry-run", action="store_true",
                     help="só imprime o que faria, sem tocar o DB")
+    ap.add_argument("--project", type=str, default=None,
+                    help="id ou nome do projeto que recebe os tiles. Obrigatório quando há mais de um.")
     args = ap.parse_args()
 
     if not args.csv.exists():
@@ -108,9 +136,11 @@ def main():
     if not args.dry_run:
         init_db()
         conn = connect()
+        project_id = _resolve_project(conn, args.project)
         conn.execute("BEGIN")
     else:
         conn = None
+        project_id = None
 
     inserted = skipped = errors = 0
     try:
@@ -124,13 +154,12 @@ def main():
                 errors += 1; continue
             raw, bbox, info = render_seed_from_bdf(lat, lon, arg_path)
             png = encode_mask(raw)
-            ok, missing = validate_submission(raw)
             ncls = len(info["class_counts"])
             print(f"  [{i}/{len(rows)}] {name}  cls={ncls}  fill={info['n_filled']:>5}/65536"
                   f"  classes={info['class_counts']}")
             if args.dry_run:
                 continue
-            if insert_tile(conn, name, bbox, png):
+            if insert_tile(conn, project_id, name, bbox, png):
                 inserted += 1
             else:
                 skipped += 1

@@ -68,16 +68,83 @@ def build_user_map(pri: sqlite3.Connection, sec: sqlite3.Connection,
     return user_map, reused, inserted
 
 
+def build_project_map(pri: sqlite3.Connection, sec: sqlite3.Connection,
+                      user_map: dict[int, int],
+                      ) -> tuple[dict[int, int], int, int]:
+    """Map secondary projects → primary project ids.
+       - Same-name match → reuse the primary project (paths/classes/members
+         from the primary win; secondary metadata is ignored).
+       - No match → insert a new project, copying classes and members from
+         the secondary (with users remapped through user_map).
+    Returns (project_map, n_reused, n_inserted)."""
+    pri_by_name = {r["name"]: r["id"] for r in pri.execute(
+        "SELECT id, name FROM projects"
+    ).fetchall()}
+    project_map: dict[int, int] = {}
+    reused = inserted = 0
+    sec.row_factory = sqlite3.Row
+    sec_projects = sec.execute("SELECT * FROM projects").fetchall()
+    for sp in sec_projects:
+        sid = sp["id"]
+        if sp["name"] in pri_by_name:
+            project_map[sid] = pri_by_name[sp["name"]]
+            reused += 1
+            continue
+        # Insert new project; created_by may be a secondary user id we just
+        # mapped, otherwise NULL.
+        created_by = user_map.get(sp["created_by"]) if sp["created_by"] else None
+        cur = pri.execute(
+            """INSERT INTO projects(name, description, mask_complete_required,
+               primary_mbtiles, secondary_mbtiles, tertiary_mbtiles,
+               ref_mask_primary_mbtiles, ref_mask_secondary_mbtiles,
+               active, created_by, created_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+            (sp["name"], sp["description"], sp["mask_complete_required"],
+             sp["primary_mbtiles"], sp["secondary_mbtiles"], sp["tertiary_mbtiles"],
+             sp["ref_mask_primary_mbtiles"], sp["ref_mask_secondary_mbtiles"],
+             sp["active"], created_by, sp["created_at"]),
+        )
+        new_pid = cur.lastrowid
+        project_map[sid] = new_pid
+        pri_by_name[sp["name"]] = new_pid
+        # Copy classes verbatim.
+        for cl in sec.execute(
+            "SELECT class_id, name, color, ordering FROM project_classes WHERE project_id=?",
+            (sid,),
+        ):
+            pri.execute(
+                """INSERT INTO project_classes(project_id, class_id, name, color, ordering)
+                   VALUES(?,?,?,?,?)""",
+                (new_pid, cl["class_id"], cl["name"], cl["color"], cl["ordering"]),
+            )
+        # Copy memberships through user_map.
+        for m in sec.execute(
+            "SELECT user_id, role FROM project_members WHERE project_id=?", (sid,)
+        ):
+            mapped = user_map.get(m["user_id"])
+            if mapped is not None:
+                pri.execute(
+                    "INSERT OR IGNORE INTO project_members(project_id, user_id, role) VALUES (?,?,?)",
+                    (new_pid, mapped, m["role"]),
+                )
+        inserted += 1
+    return project_map, reused, inserted
+
+
 def build_tile_map(pri: sqlite3.Connection, sec: sqlite3.Connection,
                    user_map: dict[int, int],
+                   project_map: dict[int, int],
                    ) -> tuple[dict[int, int], int, int, int]:
     """Insere tiles novos; retorna (tile_map, n_new, n_skipped, n_reset).
-    Tiles in_progress/in_review viram pending (sessão do secundário não existe aqui)."""
-    pri_bboxes: dict[tuple, int] = {}
-    for row in pri.execute("SELECT id, bbox_west, bbox_south, bbox_east, bbox_north FROM tiles"):
-        pri_bboxes[bbox_key(row[1], row[2], row[3], row[4])] = row[0]
+    Tiles in_progress/in_review viram pending. Uniqueness is per (project, bbox),
+    so two projects covering the same area both keep their tiles."""
+    pri_bboxes: dict[tuple[int, tuple], int] = {}
+    for row in pri.execute(
+        "SELECT id, project_id, bbox_west, bbox_south, bbox_east, bbox_north FROM tiles"
+    ):
+        pri_bboxes[(row[1], bbox_key(row[2], row[3], row[4], row[5]))] = row[0]
 
-    cols = ("name", "bbox_west", "bbox_south", "bbox_east", "bbox_north",
+    cols = ("project_id", "name", "bbox_west", "bbox_south", "bbox_east", "bbox_north",
             "status", "assigned_to", "classified_by", "reviewed_by",
             "classified_at", "reviewed_at", "data_png", "problem_note",
             "version", "paused_at")
@@ -89,7 +156,18 @@ def build_tile_map(pri: sqlite3.Connection, sec: sqlite3.Connection,
     for row in sec.execute(f"SELECT id, {', '.join(cols)} FROM tiles"):
         sid = row[0]
         vals = dict(zip(cols, row[1:]))
-        key = bbox_key(vals["bbox_west"], vals["bbox_south"], vals["bbox_east"], vals["bbox_north"])
+        # Remap project id.
+        sec_pid = vals["project_id"]
+        new_pid = project_map.get(sec_pid)
+        if new_pid is None:
+            # Project couldn't be mapped (shouldn't happen — every secondary
+            # tile must reference a project that exists). Skip defensively.
+            skipped += 1
+            continue
+        vals["project_id"] = new_pid
+
+        key = (new_pid, bbox_key(vals["bbox_west"], vals["bbox_south"],
+                                  vals["bbox_east"], vals["bbox_north"]))
         if key in pri_bboxes:
             skipped += 1
             continue
@@ -187,8 +265,11 @@ def _run(pri: sqlite3.Connection, sec: sqlite3.Connection) -> None:
     user_map, u_reused, u_new = build_user_map(pri, sec)
     print(f"[users] {u_new} novos, {u_reused} reusados (username ja existia)")
 
-    tile_map, t_new, t_skipped, t_reset = build_tile_map(pri, sec, user_map)
-    print(f"[tiles] {t_new} novos, {t_skipped} skipados (bbox duplicada), "
+    project_map, p_reused, p_new = build_project_map(pri, sec, user_map)
+    print(f"[projects] {p_new} novos, {p_reused} reusados (mesmo nome)")
+
+    tile_map, t_new, t_skipped, t_reset = build_tile_map(pri, sec, user_map, project_map)
+    print(f"[tiles] {t_new} novos, {t_skipped} skipados (bbox duplicada por projeto), "
           f"{t_reset} resetados (in_progress/in_review -> pending)")
 
     log_new, log_orphan = migrate_action_log(pri, sec, user_map, tile_map)

@@ -81,20 +81,55 @@ def _write_geotiff(out: Path, arr: np.ndarray, bbox: tuple[float, float, float, 
         dst.write(arr, 1)
 
 
-def _select_rows(statuses: tuple[str, ...]) -> list:
+def _resolve_project(project_arg: str | None) -> int | None:
+    """Resolve --project to a project_id. None = export all projects."""
+    if project_arg is None:
+        return None
+    conn = connect()
+    try:
+        rows = conn.execute("SELECT id, name FROM projects").fetchall()
+    finally:
+        conn.close()
+    try:
+        pid = int(project_arg)
+        for r in rows:
+            if r["id"] == pid:
+                return pid
+    except ValueError:
+        pass
+    for r in rows:
+        if r["name"] == project_arg:
+            return r["id"]
+    print(f"projeto não encontrado: {project_arg}")
+    sys.exit(1)
+
+
+def _select_rows(statuses: tuple[str, ...], project_id: int | None) -> list:
     placeholders = ",".join("?" for _ in statuses)
     conn = connect()
     try:
+        if project_id is None:
+            return conn.execute(
+                f"""SELECT id, project_id, name, status,
+                           classified_by, reviewed_by,
+                           classified_at, reviewed_at,
+                           bbox_west, bbox_south, bbox_east, bbox_north,
+                           data_png
+                    FROM tiles
+                    WHERE status IN ({placeholders})
+                    ORDER BY name""",
+                statuses,
+            ).fetchall()
         return conn.execute(
-            f"""SELECT id, name, status,
+            f"""SELECT id, project_id, name, status,
                        classified_by, reviewed_by,
                        classified_at, reviewed_at,
                        bbox_west, bbox_south, bbox_east, bbox_north,
                        data_png
                 FROM tiles
-                WHERE status IN ({placeholders})
+                WHERE status IN ({placeholders}) AND project_id=?
                 ORDER BY name""",
-            statuses,
+            (*statuses, project_id),
         ).fetchall()
     finally:
         conn.close()
@@ -130,7 +165,7 @@ def _write_mosaic(out_dir: Path, tile_paths: list[Path]) -> Path:
 
 
 MANIFEST_HEADER = [
-    "filename", "tile_id", "name", "status",
+    "filename", "tile_id", "project_id", "name", "status",
     "classified_by", "reviewed_by",
     "classified_at", "reviewed_at",
     "bbox_west", "bbox_south", "bbox_east", "bbox_north",
@@ -139,7 +174,7 @@ MANIFEST_HEADER = [
 
 def _manifest_row(fname: str, r) -> list:
     return [
-        fname, r["id"], r["name"], r["status"],
+        fname, r["id"], r["project_id"], r["name"], r["status"],
         r["classified_by"], r["reviewed_by"],
         r["classified_at"], r["reviewed_at"],
         r["bbox_west"], r["bbox_south"], r["bbox_east"], r["bbox_north"],
@@ -158,14 +193,17 @@ def main() -> None:
     p.add_argument("--mosaic", action="store_true")
     p.add_argument("--manifest", default=None,
                    help="manifest CSV path (default: <out_dir>/manifest.csv)")
+    p.add_argument("--project", type=str, default=None,
+                   help="id ou nome do projeto a exportar. Omitir = todos.")
     args = p.parse_args()
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = Path(args.manifest) if args.manifest else out_dir / "manifest.csv"
     statuses = STATUS_FILTERS[args.status]
+    project_id = _resolve_project(args.project)
 
-    rows = _select_rows(statuses)
+    rows = _select_rows(statuses, project_id)
     paths: list[Path] = []
     with manifest_path.open("w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
