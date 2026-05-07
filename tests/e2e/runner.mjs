@@ -117,6 +117,14 @@ async function getMask(page) {
     return await page.evaluate(() => Array.from(window.__tcTest__.mask));
 }
 
+// submit() and pause() open #modal-action-confirm before mutating state; tests
+// need to confirm it after clicking the trigger or the underlying handler
+// stays parked on the modal's promise.
+async function confirmModal(page) {
+    await page.waitForSelector("#modal-action-confirm:not(.hidden)", { timeout: 2000 });
+    await page.click("#action-confirm-ok");
+}
+
 async function paintWholeCanvas(page, classKey = "1") {
     await page.keyboard.press(classKey);
     // Switch to fill tool via the button click (more reliable than keyboard)
@@ -193,6 +201,7 @@ try {
         assert(filled === 65536, `filledCount=${filled}, expected 65536`);
 
         await page.click("#btn-submit");
+        await confirmModal(page);
 
         // Idle screen must appear after submit; tile must NOT auto-advance.
         await page.waitForSelector("#idle-screen:not(.hidden)", { timeout: 5000 });
@@ -378,6 +387,7 @@ try {
         const maskBefore = await getMask(page1);
 
         await page1.click("#btn-pause");
+        await confirmModal(page1);
         // After pause: idle screen visible, currentTile cleared.
         await page1.waitForSelector("#idle-screen:not(.hidden)", { timeout: 5000 });
         const cleared = await page1.evaluate(() => window.__tcTest__?.currentTile);
