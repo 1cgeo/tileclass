@@ -15,6 +15,7 @@ from .routers import admin as admin_router
 from .routers import auth as auth_router
 from .routers import config as config_router
 from .routers import operator as operator_router
+from .routers import projects as projects_router
 
 
 # Anything not listed here falls back to the raw message.
@@ -115,6 +116,8 @@ def health():
 
 app.include_router(auth_router.router)
 app.include_router(config_router.router)
+app.include_router(projects_router.router)
+app.include_router(projects_router.admin_router)
 app.include_router(operator_router.router)
 app.include_router(admin_router.router)
 

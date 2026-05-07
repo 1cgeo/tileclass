@@ -109,3 +109,44 @@ class BulkAssignIn(BaseModel):
     tile_ids: list[int] = Field(min_length=1)
     user_id: int
     reason: Optional[str] = Field(default=None, max_length=500)
+
+
+# ---- Projects ---------------------------------------------------------------
+
+class ProjectClassIn(BaseModel):
+    id: int = Field(ge=1, le=254)
+    name: str = Field(min_length=1, max_length=64)
+    color: str = Field(pattern=r"^#[0-9A-Fa-f]{6}$")
+
+
+class ProjectCreateIn(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+    description: str = ""
+    mask_complete_required: bool = True
+    primary_mbtiles: str = Field(min_length=1)
+    secondary_mbtiles: Optional[str] = None
+    tertiary_mbtiles: Optional[str] = None
+    ref_mask_primary_mbtiles: Optional[str] = None
+    ref_mask_secondary_mbtiles: Optional[str] = None
+    classes: list[ProjectClassIn] = Field(min_length=1)
+
+
+class ProjectUpdateIn(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    mask_complete_required: Optional[bool] = None
+    active: Optional[bool] = None
+    primary_mbtiles: Optional[str] = None
+    secondary_mbtiles: Optional[str] = None
+    tertiary_mbtiles: Optional[str] = None
+    ref_mask_primary_mbtiles: Optional[str] = None
+    ref_mask_secondary_mbtiles: Optional[str] = None
+
+
+class ProjectClassesIn(BaseModel):
+    classes: list[ProjectClassIn] = Field(min_length=1)
+
+
+class ProjectMemberIn(BaseModel):
+    user_id: int
+    role: Literal["operator", "reviewer", "admin"]
