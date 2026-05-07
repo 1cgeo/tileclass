@@ -240,6 +240,19 @@ def test_admin_dashboard_scoped_to_project(client, admin_user, operators, two_pr
     assert g["total_tiles"] == 14  # global view sums both projects
 
 
+def test_assigned_resume_returns_tile_when_project_matches(client, admin_user, operators, tiles):
+    """Regression test: the parameter binding for `project_id` used to clobber
+    the ORDER BY user_id placeholder in get_resume_tile, so /api/tiles/assigned
+    returned 204 even when the tile was in-progress."""
+    op = operators[0]
+    op_tok = token(client, op["username"], op["password"])
+    nxt = client.get("/api/tiles/next?project_id=1", headers=h(op_tok)).json()
+    assert nxt["status"] == "in_progress"
+    r = client.get("/api/tiles/assigned?project_id=1", headers=h(op_tok))
+    assert r.status_code == 200, r.text
+    assert r.json()["id"] == nxt["id"]
+
+
 def test_admin_tiles_listing_scoped_to_project(client, admin_user, operators, two_projects):
     """The admin tiles listing accepts project_id and the X-Total-Count header
     reflects the filtered count, not the global count."""

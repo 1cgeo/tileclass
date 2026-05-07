@@ -103,10 +103,14 @@ def get_resume_tile(user_id: int, project_id: int | None = None) -> dict | None:
     conn = connect()
     try:
         where = "tiles.assigned_to=? AND tiles.status IN ('in_progress','in_review')"
-        params = [user_id, user_id]
+        # Placeholder order is: WHERE assigned_to=?, optional WHERE project_id=?,
+        # then ORDER BY's `(SELECT ... WHERE user_id=?)` subquery. Build params
+        # in SQL-positional order or the bindings shift silently.
+        params: list = [user_id]
         if project_id is not None:
             where += " AND tiles.project_id=?"
             params.append(project_id)
+        params.append(user_id)
         row = conn.execute(
             f"""{_TILE_SELECT}
                 WHERE {where}
