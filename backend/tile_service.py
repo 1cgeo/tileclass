@@ -4,7 +4,7 @@ import json
 from fastapi import HTTPException
 from .database import connect, transaction, log_action
 from .mask_utils import encode_mask, decode_mask, empty_mask_png, validate_submission, validate_partial
-from . import mask_tile_service
+from . import mask_tile_service, project_service
 
 
 def _now() -> str:
@@ -52,6 +52,7 @@ _RESUME_ORDER_BY = """
 def _row_to_tile_dict(row) -> dict:
     d = {
         "id": row["id"],
+        "project_id": row["project_id"],
         "name": row["name"],
         "bbox_west": row["bbox_west"],
         "bbox_south": row["bbox_south"],
@@ -94,68 +95,88 @@ def _row_to_tile_dict(row) -> dict:
     return d
 
 
-def get_resume_tile(user_id: int) -> dict | None:
+def get_resume_tile(user_id: int, project_id: int | None = None) -> dict | None:
     """Return the tile currently assigned to the user (in_progress or in_review),
     or None. Read-only: does NOT assign from the queue and does NOT unpause.
     Used by the editor to decide whether to skip the idle screen on login.
 
+    `project_id` scopes the lookup to a single project; omit to look across
+    every project the user is touching.
+
     Selection order when multiple tiles are assigned: see `_RESUME_ORDER_BY`."""
     conn = connect()
     try:
+        where = "tiles.assigned_to=? AND tiles.status IN ('in_progress','in_review')"
+        params = [user_id, user_id]
+        if project_id is not None:
+            where += " AND tiles.project_id=?"
+            params.append(project_id)
         row = conn.execute(
             f"""{_TILE_SELECT}
-                WHERE tiles.assigned_to=? AND tiles.status IN ('in_progress','in_review')
+                WHERE {where}
                 {_RESUME_ORDER_BY}
                 LIMIT 1""",
-            (user_id, user_id),
+            params,
         ).fetchone()
         return _row_to_tile_dict(row) if row else None
     finally:
         conn.close()
 
 
-def peek_next_tile(user_id: int) -> dict | None:
-    """Read-only look-ahead: returns the tile the user would get next, without assigning.
-    Used by the frontend to pre-load the next image while the current one is being painted."""
+def peek_next_tile(user_id: int, project_id: int) -> dict | None:
+    """Read-only look-ahead: returns the tile the user would get next from the
+    given project, without assigning. Pre-load helper for the editor."""
     conn = connect()
     try:
         row = conn.execute(
             f"""{_TILE_SELECT}
-                WHERE tiles.assigned_to=? AND tiles.status IN ('in_progress','in_review')
+                WHERE tiles.assigned_to=? AND tiles.project_id=?
+                  AND tiles.status IN ('in_progress','in_review')
                 {_RESUME_ORDER_BY}
                 LIMIT 1""",
-            (user_id, user_id),
+            (user_id, project_id, user_id),
         ).fetchone()
         if row:
             return _row_to_tile_dict(row)
-        if _user_can_review(conn, user_id):
+        if _user_can_review_project(conn, user_id, project_id):
             row = conn.execute(
                 f"""{_TILE_SELECT}
-                    WHERE tiles.status='classified'
+                    WHERE tiles.status='classified' AND tiles.project_id=?
                       AND (tiles.classified_by IS NULL OR tiles.classified_by != ?)
                     ORDER BY tiles.classified_at LIMIT 1""",
-                (user_id,),
+                (project_id, user_id),
             ).fetchone()
             if row:
                 return _row_to_tile_dict(row)
         row = conn.execute(
-            f"{_TILE_SELECT} WHERE tiles.status='pending' ORDER BY tiles.id LIMIT 1"
+            f"{_TILE_SELECT} WHERE tiles.status='pending' AND tiles.project_id=? "
+            "ORDER BY tiles.id LIMIT 1",
+            (project_id,),
         ).fetchone()
         return _row_to_tile_dict(row) if row else None
     finally:
         conn.close()
 
 
-def queue_stats() -> dict:
-    """Global queue counters for header display."""
+def queue_stats(project_id: int | None = None) -> dict:
+    """Queue counters for header display. Scoped to a project when given,
+    aggregated across all when omitted."""
     conn = connect()
     try:
-        row = conn.execute("SELECT COUNT(*) c FROM tiles").fetchone()
+        where = "1=1"
+        params: list = []
+        if project_id is not None:
+            where = "project_id=?"
+            params = [project_id]
+        row = conn.execute(f"SELECT COUNT(*) c FROM tiles WHERE {where}", params).fetchone()
         total = int(row["c"]) if row else 0
-        row = conn.execute("SELECT COUNT(*) c FROM tiles WHERE status='reviewed'").fetchone()
+        row = conn.execute(
+            f"SELECT COUNT(*) c FROM tiles WHERE {where} AND status='reviewed'", params
+        ).fetchone()
         reviewed = int(row["c"]) if row else 0
         row = conn.execute(
-            "SELECT COUNT(*) c FROM tiles WHERE status IN ('classified','reviewed')"
+            f"SELECT COUNT(*) c FROM tiles WHERE {where} AND status IN ('classified','reviewed')",
+            params,
         ).fetchone()
         classified = int(row["c"]) if row else 0
     finally:
@@ -178,47 +199,78 @@ def tile_history(tile_id: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def today_classify_count(user_id: int) -> int:
-    """Count classify+review actions by user today (UTC)."""
+def today_classify_count(user_id: int, project_id: int | None = None) -> int:
+    """Count classify+review actions by user today (UTC). Optionally scoped
+    to a single project — useful for per-project session stats in the header."""
     from datetime import datetime, timezone
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     conn = connect()
     try:
-        row = conn.execute(
-            """SELECT COUNT(*) c FROM action_log
-               WHERE user_id=? AND action IN ('classify','review')
-                 AND substr(created_at,1,10)=?""",
-            (user_id, today),
-        ).fetchone()
+        if project_id is None:
+            row = conn.execute(
+                """SELECT COUNT(*) c FROM action_log
+                   WHERE user_id=? AND action IN ('classify','review')
+                     AND substr(created_at,1,10)=?""",
+                (user_id, today),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                """SELECT COUNT(*) c FROM action_log a
+                   JOIN tiles t ON t.id=a.tile_id
+                   WHERE a.user_id=? AND a.action IN ('classify','review')
+                     AND substr(a.created_at,1,10)=?
+                     AND t.project_id=?""",
+                (user_id, today, project_id),
+            ).fetchone()
     finally:
         conn.close()
     return int(row["c"]) if row else 0
 
 
-def _user_can_review(conn, user_id: int) -> bool:
+def _user_can_review_project(conn, user_id: int, project_id: int) -> bool:
+    """A user can review tiles in a project iff:
+       - they are a global admin, OR
+       - their global `can_review` flag is on AND they are a project member
+         with role 'reviewer' or 'admin'.
+
+    The global flag stays as a veto so the existing admin toggle keeps working
+    while the per-project membership becomes the primary control. Plan: drop
+    the global flag once the admin UI fully migrates to per-project roles."""
     row = conn.execute(
-        "SELECT can_review, role FROM users WHERE id=?", (user_id,)
+        "SELECT role, can_review FROM users WHERE id=?", (user_id,)
     ).fetchone()
     if not row:
         return False
-    return bool(row["can_review"]) or row["role"] == "admin"
+    if row["role"] == "admin":
+        return True
+    if not row["can_review"]:
+        return False
+    member = conn.execute(
+        "SELECT role FROM project_members WHERE project_id=? AND user_id=?",
+        (project_id, user_id),
+    ).fetchone()
+    return bool(member) and member["role"] in ("reviewer", "admin")
 
 
-def get_next_tile(user_id: int) -> dict | None:
-    """Atomically assign next tile to user. Review > pending. Never own classification.
+def get_next_tile(user_id: int, project_id: int) -> dict | None:
+    """Atomically assign next tile in `project_id` to user. Review > pending.
+    Never own classification.
 
     Personal queue: if admin pre-assigned tiles to the user (all stored with
     `paused_at` set), `/next` picks the non-paused one first; when only paused
     ones remain, the oldest is unpaused (auto-resume + `resume` log entry so
     the dashboard's assign→done pairing subtracts the queue-wait time)."""
     with transaction("IMMEDIATE") as conn:
-        # 1) Resume: if user already has a tile assigned and in-progress/in-review, return it.
+        # 1) Resume: if user already has a tile assigned in this project,
+        # return it. Resume is project-scoped so switching projects doesn't
+        # silently dump the operator back into the previous project's tile.
         row = conn.execute(
             f"""{_TILE_SELECT}
-                WHERE tiles.assigned_to=? AND tiles.status IN ('in_progress','in_review')
+                WHERE tiles.assigned_to=? AND tiles.project_id=?
+                  AND tiles.status IN ('in_progress','in_review')
                 {_RESUME_ORDER_BY}
                 LIMIT 1""",
-            (user_id, user_id),
+            (user_id, project_id, user_id),
         ).fetchone()
         if row:
             # Auto-resume only if the last pause was from an admin bulk-assign
@@ -243,15 +295,15 @@ def get_next_tile(user_id: int) -> dict | None:
                     ).fetchone()
             return _row_to_tile_dict(row)
 
-        # 2) Review queue — only operators explicitly opted-in by an admin.
+        # 2) Review queue — only project members with role>=reviewer.
         row = None
-        if _user_can_review(conn, user_id):
+        if _user_can_review_project(conn, user_id, project_id):
             row = conn.execute(
                 f"""{_TILE_SELECT}
-                    WHERE tiles.status='classified'
+                    WHERE tiles.status='classified' AND tiles.project_id=?
                       AND (tiles.classified_by IS NULL OR tiles.classified_by != ?)
                     ORDER BY tiles.classified_at LIMIT 1""",
-                (user_id,),
+                (project_id, user_id),
             ).fetchone()
         if row:
             conn.execute(
@@ -264,9 +316,11 @@ def get_next_tile(user_id: int) -> dict | None:
             ).fetchone()
             return _row_to_tile_dict(row)
 
-        # 3) Pending queue
+        # 3) Pending queue, scoped to the project.
         row = conn.execute(
-            f"{_TILE_SELECT} WHERE tiles.status='pending' ORDER BY tiles.id LIMIT 1"
+            f"{_TILE_SELECT} WHERE tiles.status='pending' AND tiles.project_id=? "
+            "ORDER BY tiles.id LIMIT 1",
+            (project_id,),
         ).fetchone()
         if row:
             conn.execute(
@@ -304,10 +358,29 @@ def get_tile_image(tile_id: int) -> bytes | None:
     return row["data_png"] or empty_mask_png()
 
 
+def _project_validation_args(tile_id: int) -> tuple[list[int], bool]:
+    """Resolve (allowed_class_ids, mask_complete_required) for the project
+    that owns the tile. Cached at the project level by project_service."""
+    conn = connect()
+    try:
+        row = conn.execute("SELECT project_id FROM tiles WHERE id=?", (tile_id,)).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        raise HTTPException(404, "tile not found")
+    proj = project_service.get_project(row["project_id"])
+    if not proj:
+        raise HTTPException(404, detail={"error": "project_not_found"})
+    return [c["id"] for c in proj["classes"]], proj["mask_complete_required"]
+
+
 def submit_classification(tile_id: int, user_id: int, raw_mask: bytes,
                           expected_version: int | None = None) -> dict:
+    allowed, require_complete = _project_validation_args(tile_id)
     try:
-        ok, missing = validate_submission(raw_mask)
+        ok, missing = validate_submission(
+            raw_mask, allowed_ids=allowed, require_complete=require_complete,
+        )
     except ValueError as e:
         raise HTTPException(400, detail={"error": "invalid_mask", "message": str(e)})
     if not ok:
@@ -391,8 +464,9 @@ def report_problem(tile_id: int, user_id: int, note: str) -> dict:
 def pause_tile(tile_id: int, user_id: int, raw_mask: bytes,
                expected_version: int | None = None) -> dict:
     """Save partial mask and freeze the timer (dashboard subtracts pause→resume)."""
+    allowed, _ = _project_validation_args(tile_id)
     try:
-        validate_partial(raw_mask)
+        validate_partial(raw_mask, allowed_ids=allowed)
     except ValueError as e:
         raise HTTPException(400, detail={"error": "invalid_mask", "message": str(e)})
     png = encode_mask(raw_mask)

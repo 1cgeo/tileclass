@@ -71,16 +71,19 @@ def test_encode_wrong_size_raises(bad_size):
         encode_mask(b"\x01" * bad_size)
 
 
+_DEFAULT_IDS = [1, 2, 3, 4, 5, 6]
+
+
 def test_validate_accepts_fully_filled():
     raw = np.full(PIXELS, 3, dtype=np.uint8).tobytes()
-    ok, missing = validate_submission(raw)
+    ok, missing = validate_submission(raw, allowed_ids=_DEFAULT_IDS)
     assert ok is True and missing == 0
 
 
 def test_validate_flags_unfilled_count():
     arr = np.full(PIXELS, 1, dtype=np.uint8)
     arr[:7] = 255
-    ok, missing = validate_submission(arr.tobytes())
+    ok, missing = validate_submission(arr.tobytes(), allowed_ids=_DEFAULT_IDS)
     assert ok is False and missing == 7
 
 
@@ -89,39 +92,34 @@ def test_validate_rejects_invalid_class_values(bad):
     arr = np.full(PIXELS, 1, dtype=np.uint8)
     arr[0] = bad
     with pytest.raises(ValueError):
-        validate_submission(arr.tobytes())
+        validate_submission(arr.tobytes(), allowed_ids=_DEFAULT_IDS)
 
 
 def test_validate_rejects_wrong_size():
     with pytest.raises(ValueError):
-        validate_submission(b"\x01" * 1024)
+        validate_submission(b"\x01" * 1024, allowed_ids=_DEFAULT_IDS)
 
 
-def test_validate_accepts_class_added_via_config(monkeypatch):
-    """Adicionar uma 7ª classe ao config.yaml deve passar a aceitar valor=7
-    sem mudança de código. Garante que `validate_partial` resolve os IDs em
-    runtime via get_config() (ver mask_utils.py:46)."""
-    import backend.config as config_mod
-    fake_classes = [{"id": i, "name": f"c{i}", "color": "#000"} for i in range(1, 8)]
-    monkeypatch.setattr(
-        config_mod, "get_config",
-        lambda: {"classes": fake_classes, "auth": {"jwt_secret": "x"}, "database": {"path": ":memory:"}},
-    )
+def test_validate_accepts_class_added_to_project():
+    """Adding a 7th class to the project's allowed_ids accepts value=7."""
     arr = np.full(PIXELS, 7, dtype=np.uint8)
-    ok, missing = validate_submission(arr.tobytes())
+    ok, missing = validate_submission(arr.tobytes(), allowed_ids=list(range(1, 8)))
     assert ok is True and missing == 0
 
 
-def test_validate_rejects_class_removed_via_config(monkeypatch):
-    """Inversa: se a config remove uma classe, máscaras antigas com esse ID
-    são rejeitadas pelo validate. Cobre o cenário de drift de YAML/banco."""
-    import backend.config as config_mod
-    # Apenas classes 1..3 ficam válidas; 4 deixou de existir.
-    fake_classes = [{"id": i, "name": f"c{i}", "color": "#000"} for i in range(1, 4)]
-    monkeypatch.setattr(
-        config_mod, "get_config",
-        lambda: {"classes": fake_classes, "auth": {"jwt_secret": "x"}, "database": {"path": ":memory:"}},
-    )
+def test_validate_rejects_class_removed_from_project():
+    """Conversely, dropping a class id from the project's set rejects masks
+    that still use it. Covers the YAML/DB drift scenario."""
     arr = np.full(PIXELS, 4, dtype=np.uint8)
     with pytest.raises(ValueError):
-        validate_submission(arr.tobytes())
+        validate_submission(arr.tobytes(), allowed_ids=[1, 2, 3])
+
+
+def test_validate_accepts_partial_when_complete_not_required():
+    """Project-level mask_complete_required=False: 255 pixels are tolerated."""
+    arr = np.full(PIXELS, 255, dtype=np.uint8)
+    arr[: PIXELS // 2] = 1
+    ok, missing = validate_submission(
+        arr.tobytes(), allowed_ids=_DEFAULT_IDS, require_complete=False,
+    )
+    assert ok is True and missing == PIXELS // 2

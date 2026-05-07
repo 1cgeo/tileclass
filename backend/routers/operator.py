@@ -3,7 +3,7 @@ pause/resume, history, image. The mask-body helpers are local since only
 operator-side mutations carry a 65536-byte payload."""
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response
 
-from .. import admin_service, auth, tile_service
+from .. import admin_service, auth, project_service, tile_service
 from ..mask_utils import PIXELS
 from ..models import ReportProblemIn, TileOut
 
@@ -44,40 +44,85 @@ async def _submit(tile_id: int, request: Request, user: auth.CurrentUser) -> dic
     return tile_service.submit_classification(tile_id, user.id, raw, _expected_version(request))
 
 
+def _resolve_project_id(
+    project_id: int | None,
+    user: auth.CurrentUser,
+    *,
+    required: bool,
+) -> int | None:
+    """Resolve and authorise the project for queue endpoints. When `required`,
+    a missing query param falls back to the user's single project membership
+    (zero-friction default for single-project deployments). Membership check
+    runs unconditionally so admins still hit the right project's tiles."""
+    if project_id is None:
+        if not required:
+            return None
+        memberships = project_service.list_projects_for_user(
+            user.id, is_admin=user.role == "admin",
+        )
+        if len(memberships) == 1:
+            return memberships[0]["id"]
+        raise HTTPException(400, detail={"error": "project_id_required"})
+    project_service.require_membership(project_id, user)
+    return project_id
+
+
 @router.get("/tiles/next")
-def next_tile(user: auth.CurrentUser = Depends(auth.get_current_user)):
-    t = tile_service.get_next_tile(user.id)
+def next_tile(
+    project_id: int | None = Query(default=None),
+    user: auth.CurrentUser = Depends(auth.get_current_user),
+):
+    pid = _resolve_project_id(project_id, user, required=True)
+    t = tile_service.get_next_tile(user.id, pid)
     if not t:
         return Response(status_code=204)
     return t
 
 
 @router.get("/tiles/assigned")
-def my_assigned_tile(user: auth.CurrentUser = Depends(auth.get_current_user)):
-    """Tile currently assigned (resume target), or 204. Never pulls from queue."""
-    t = tile_service.get_resume_tile(user.id)
+def my_assigned_tile(
+    project_id: int | None = Query(default=None),
+    user: auth.CurrentUser = Depends(auth.get_current_user),
+):
+    """Tile currently assigned (resume target), or 204. Never pulls from queue.
+    `project_id` is optional — when omitted we look across every project the
+    user is touching (useful right after login, before a project is picked)."""
+    pid = _resolve_project_id(project_id, user, required=False)
+    t = tile_service.get_resume_tile(user.id, pid)
     if not t:
         return Response(status_code=204)
     return t
 
 
 @router.get("/tiles/next-preview")
-def next_tile_preview(user: auth.CurrentUser = Depends(auth.get_current_user)):
+def next_tile_preview(
+    project_id: int | None = Query(default=None),
+    user: auth.CurrentUser = Depends(auth.get_current_user),
+):
     """Peek without assigning — used by the frontend to pre-load the next image."""
-    t = tile_service.peek_next_tile(user.id)
+    pid = _resolve_project_id(project_id, user, required=True)
+    t = tile_service.peek_next_tile(user.id, pid)
     if not t:
         return Response(status_code=204)
     return t
 
 
 @router.get("/me/stats-today")
-def my_stats_today(user: auth.CurrentUser = Depends(auth.get_current_user)):
-    return {"count": tile_service.today_classify_count(user.id)}
+def my_stats_today(
+    project_id: int | None = Query(default=None),
+    user: auth.CurrentUser = Depends(auth.get_current_user),
+):
+    pid = _resolve_project_id(project_id, user, required=False)
+    return {"count": tile_service.today_classify_count(user.id, pid)}
 
 
 @router.get("/tiles/queue-stats")
-def queue_stats(_: auth.CurrentUser = Depends(auth.get_current_user)):
-    return tile_service.queue_stats()
+def queue_stats(
+    project_id: int | None = Query(default=None),
+    user: auth.CurrentUser = Depends(auth.get_current_user),
+):
+    pid = _resolve_project_id(project_id, user, required=False)
+    return tile_service.queue_stats(pid)
 
 
 @router.get("/tiles/{tile_id}/history")
