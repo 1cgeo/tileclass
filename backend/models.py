@@ -134,9 +134,10 @@ class ProjectCreateIn(BaseModel):
     topology_required: bool = False
     mask_complete_required: bool = True
     # Tile geometry (defaults match the historical 256×256 @ 2.5 m/px = 640 m
-    # tile). Validated server-side against project_service.ALLOWED_TILE_PX.
-    tile_px: int = 256
-    meters_per_pixel: float = 2.5
+    # tile). Range validated by project_service._validate_tile_geometry too,
+    # but Pydantic rejects out-of-range values with a structured 422 first.
+    tile_px: int = Field(default=256, ge=1, le=4096)
+    meters_per_pixel: float = Field(default=2.5, gt=0)
     primary_mbtiles: str = Field(min_length=1)
     secondary_mbtiles: Optional[str] = None
     tertiary_mbtiles: Optional[str] = None
@@ -157,8 +158,8 @@ class ProjectUpdateIn(BaseModel):
     # Editable only while the project has no tiles (mask bytes / bbox are
     # otherwise tied to the original geometry). Server returns 409
     # tile_geometry_locked if the project already has tiles.
-    tile_px: Optional[int] = None
-    meters_per_pixel: Optional[float] = None
+    tile_px: Optional[int] = Field(default=None, ge=1, le=4096)
+    meters_per_pixel: Optional[float] = Field(default=None, gt=0)
     active: Optional[bool] = None
     primary_mbtiles: Optional[str] = None
     secondary_mbtiles: Optional[str] = None

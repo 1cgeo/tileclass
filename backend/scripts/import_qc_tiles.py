@@ -30,7 +30,9 @@ from rasterio.warp import reproject, Resampling
 from backend.database import init_db, connect
 from backend.geo import bbox_from_center
 from backend.mask_utils import encode_mask, validate_submission
-from backend import project_service
+from backend.scripts._common import (
+    resolve_project_arg, insert_tile_dedup, load_tile_geometry,
+)
 
 
 def render_seed_from_bdf(
@@ -67,9 +69,6 @@ def render_seed_from_bdf(
     return raw, (west, south, east, north), info
 
 
-from backend.scripts._common import resolve_project_arg, insert_tile_dedup
-
-
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -101,10 +100,7 @@ def main():
         conn = None
         project_id = None
 
-    proj = project_service.get_project(project_id) if project_id else {}
-    proj = proj or {}
-    tile_px = int(proj.get("tile_px", 256))
-    tile_meters = float(proj.get("tile_meters", tile_px * float(proj.get("meters_per_pixel", 2.5))))
+    tile_px, tile_meters = load_tile_geometry(project_id)
     pixels = tile_px * tile_px
 
     inserted = skipped = errors = 0

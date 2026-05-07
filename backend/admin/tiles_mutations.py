@@ -5,6 +5,8 @@ import json
 
 from fastapi import HTTPException
 
+from functools import lru_cache
+
 from .. import mask_tile_service, project_service
 from ..database import connect, transaction, log_action, now_iso
 from ..mask_utils import empty_mask_png
@@ -17,28 +19,28 @@ def _clean_reason(reason: str | None) -> str | None:
     return ((reason or "").strip()[:_MAX_REASON_LEN]) or None
 
 
-# Empty-mask cache keyed by tile_px so reset_many doesn't re-encode the same
-# blank PNG once per tile when a batch shares a project.
-_EMPTY_PNG_CACHE: dict[int, bytes] = {}
+@lru_cache(maxsize=None)
+def _empty_png(tile_px: int) -> bytes:
+    return empty_mask_png(tile_px)
 
 
-def _empty_for_tile_px(tile_px: int) -> bytes:
-    cached = _EMPTY_PNG_CACHE.get(tile_px)
-    if cached is None:
-        cached = empty_mask_png(tile_px)
-        _EMPTY_PNG_CACHE[tile_px] = cached
-    return cached
-
-
-def _tile_px_for(conn, tile_id: int) -> int:
-    """Project tile_px for a given tile id (256 if the project is gone)."""
-    row = conn.execute(
-        "SELECT project_id FROM tiles WHERE id=?", (tile_id,)
-    ).fetchone()
-    if not row:
-        return 256
-    proj = project_service.get_project(row["project_id"]) if row["project_id"] else None
-    return int((proj or {}).get("tile_px", 256))
+def _tile_px_by_id(conn, tile_ids: list[int]) -> dict[int, int]:
+    """Bulk-resolve tile_px for each tile in `tile_ids`. One SELECT joining
+    tiles → project_service cache, instead of N round-trips inside the loop."""
+    placeholders = ",".join("?" * len(tile_ids))
+    rows = conn.execute(
+        f"SELECT id, project_id FROM tiles WHERE id IN ({placeholders})",
+        tile_ids,
+    ).fetchall()
+    px_by_pid: dict[int, int] = {}
+    out: dict[int, int] = {}
+    for r in rows:
+        pid = r["project_id"]
+        if pid not in px_by_pid:
+            proj = project_service.get_project(pid) if pid else None
+            px_by_pid[pid] = int((proj or {}).get("tile_px", 256))
+        out[r["id"]] = px_by_pid[pid]
+    return out
 
 
 def reset_many(tile_ids: list[int], admin_id: int, reason: str | None = None) -> int:
@@ -46,12 +48,13 @@ def reset_many(tile_ids: list[int], admin_id: int, reason: str | None = None) ->
         return 0
     detail = _clean_reason(reason)
     with transaction("IMMEDIATE") as conn:
+        px_by_id = _tile_px_by_id(conn, tile_ids)
         for tid in tile_ids:
-            empty = _empty_for_tile_px(_tile_px_for(conn, tid))
-            # class_counts cleared too, otherwise the dashboard's
-            # class-distribution panel keeps reporting pixels from a mask
-            # that has been wiped. data_geojson cleared so a vector tile
-            # round-trips back to an empty FeatureCollection.
+            empty = _empty_png(px_by_id.get(tid, 256))
+            # class_counts cleared so the dashboard's class-distribution panel
+            # stops reporting pixels of a mask that has been wiped.
+            # data_geojson cleared so a vector tile round-trips back to an
+            # empty FeatureCollection.
             conn.execute(
                 """UPDATE tiles SET status='pending', data_png=?, data_geojson=NULL,
                    feature_count=NULL, assigned_to=NULL,
@@ -84,11 +87,11 @@ def report_problem_many(tile_ids: list[int], admin_id: int, note: str) -> dict:
         note = note[:2000]
     affected_ids: list[int] = []
     with transaction("IMMEDIATE") as conn:
+        px_by_id = _tile_px_by_id(conn, tile_ids)
         for tid in tile_ids:
-            row = conn.execute("SELECT id FROM tiles WHERE id=?", (tid,)).fetchone()
-            if not row:
+            if tid not in px_by_id:
                 continue
-            empty = _empty_for_tile_px(_tile_px_for(conn, tid))
+            empty = _empty_png(px_by_id[tid])
             conn.execute(
                 """UPDATE tiles SET status='problem', problem_note=?, data_png=?,
                    data_geojson=NULL, feature_count=NULL,

@@ -1,22 +1,16 @@
 // Pure mask manipulation functions — no DOM, no canvas, no I/O.
 // Extracted from editor.js so they can be unit-tested headlessly.
-// Each function takes `tilePx` so the editor can run at any project tile size
-// (256, 512, ...). Defaults to the historical 256 to keep tests/legacy callers
-// working without changes.
+// Each function takes `tilePx` so the editor can run at any project tile size.
+// Defaults to 256 keep tests + the seed default project working unchanged.
 
-export const DEFAULT_TILE = 256;
-export const TILE = DEFAULT_TILE;
-export const PIXELS = DEFAULT_TILE * DEFAULT_TILE;
+export const TILE = 256;
+export const PIXELS = TILE * TILE;
 export const EMPTY = 255;
-
-export function pixelsFor(tilePx) {
-    return tilePx * tilePx;
-}
 
 // Paint a square brush of radius r centered at (cx, cy) with `value`.
 // Mutates `mask` in place. Returns { touched: Map<index, prevValue>, deltaFilled }.
 export function paintAt(mask, cx, cy, value, r = 0, touched = new Map(),
-                        tilePx = DEFAULT_TILE) {
+                        tilePx = TILE) {
     let deltaFilled = 0;
     const x0 = Math.max(0, cx - r), x1 = Math.min(tilePx, cx + r + 1);
     const y0 = Math.max(0, cy - r), y1 = Math.min(tilePx, cy + r + 1);
@@ -36,7 +30,7 @@ export function paintAt(mask, cx, cy, value, r = 0, touched = new Map(),
 
 // Bresenham line; calls paintAt at every step.
 export function paintLine(mask, x0, y0, x1, y1, value, r = 0,
-                          tilePx = DEFAULT_TILE) {
+                          tilePx = TILE) {
     const touched = new Map();
     let delta = 0;
     const dx = Math.abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
@@ -54,7 +48,7 @@ export function paintLine(mask, x0, y0, x1, y1, value, r = 0,
 }
 
 // 4-way flood fill. Replaces contiguous region of `target` color with `replacement`.
-export function floodFill(mask, cx, cy, replacement, tilePx = DEFAULT_TILE) {
+export function floodFill(mask, cx, cy, replacement, tilePx = TILE) {
     const target = mask[cy * tilePx + cx];
     const touched = new Map();
     if (target === replacement) return { touched, deltaFilled: 0 };
@@ -109,7 +103,7 @@ export function countFilled(mask) {
 
 // Screen-space (clientX, clientY) with a DOMRect → logical pixel in [0..tilePx-1].
 // Pure — rect can be any {left, top, width, height}.
-export function screenToLogical(rect, clientX, clientY, tilePx = DEFAULT_TILE) {
+export function screenToLogical(rect, clientX, clientY, tilePx = TILE) {
     const sx = (clientX - rect.left) / rect.width;
     const sy = (clientY - rect.top) / rect.height;
     const x = Math.floor(sx * tilePx);
@@ -124,8 +118,8 @@ export function screenToLogical(rect, clientX, clientY, tilePx = DEFAULT_TILE) {
 // `validClasses` is an iterable of allowed non-255 class IDs (defaults to 1..6 to
 // preserve callers that don't pass it). Returns { ok, missing } or throws.
 export function validateSubmission(mask, validClasses = [1, 2, 3, 4, 5, 6],
-                                   tilePx = DEFAULT_TILE) {
-    const expected = pixelsFor(tilePx);
+                                   tilePx = TILE) {
+    const expected = (tilePx * tilePx);
     if (mask.length !== expected) {
         throw new Error(`expected ${expected} bytes, got ${mask.length}`);
     }

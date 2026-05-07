@@ -98,6 +98,8 @@ def test_create_project_accepts_arbitrary_positive_tile_px(client, admin_user, t
 
 @pytest.mark.parametrize("bad", [0, -1, 4097])
 def test_create_project_rejects_out_of_range_tile_px(client, admin_user, tmp_path, bad):
+    """Pydantic rejects out-of-range tile_px before the request reaches the
+    service layer; FastAPI surfaces it as 422."""
     tok = token(client, admin_user["username"], admin_user["password"])
     body = {
         "name": f"bad_{bad}",
@@ -107,8 +109,7 @@ def test_create_project_rejects_out_of_range_tile_px(client, admin_user, tmp_pat
         "classes": [{"id": 1, "name": "a", "color": "#ff0000"}],
     }
     r = client.post("/api/admin/projects", json=body, headers=h(tok))
-    assert r.status_code == 400
-    assert r.json()["detail"]["error"] == "invalid_tile_px"
+    assert r.status_code == 422
 
 
 def test_create_project_rejects_non_positive_mpp(client, admin_user, tmp_path):
@@ -121,8 +122,7 @@ def test_create_project_rejects_non_positive_mpp(client, admin_user, tmp_path):
         "classes": [{"id": 1, "name": "a", "color": "#ff0000"}],
     }
     r = client.post("/api/admin/projects", json=body, headers=h(tok))
-    assert r.status_code == 400
-    assert r.json()["detail"]["error"] == "invalid_meters_per_pixel"
+    assert r.status_code == 422  # Pydantic gt=0 constraint
 
 
 # ---- PATCH lock -------------------------------------------------------------

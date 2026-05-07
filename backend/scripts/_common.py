@@ -41,6 +41,18 @@ def resolve_project_arg(conn, project_arg: str | None, *,
     sys.exit(1)
 
 
+def load_tile_geometry(project_id: int | None) -> tuple[int, float]:
+    """Resolve (tile_px, tile_meters) for a project. Returns the seed default
+    (256 px × 2.5 m/px = 640 m) when the project is missing or None — used by
+    import scripts that want to fall back gracefully on dry-run paths."""
+    from backend import project_service
+    proj = project_service.get_project(project_id) if project_id else None
+    proj = proj or {}
+    tile_px = int(proj.get("tile_px", 256))
+    tile_meters = float(proj.get("tile_meters", tile_px * float(proj.get("meters_per_pixel", 2.5))))
+    return tile_px, tile_meters
+
+
 def insert_tile_dedup(conn, project_id: int, name: str,
                       bbox: tuple[float, float, float, float],
                       png: bytes) -> bool:

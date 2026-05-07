@@ -410,7 +410,7 @@ def get_tile_image(tile_id: int) -> bytes | None:
     conn = connect()
     try:
         row = conn.execute(
-            "SELECT data_png, project_id FROM tiles WHERE id=?", (tile_id,)
+            "SELECT data_png FROM tiles WHERE id=?", (tile_id,)
         ).fetchone()
     finally:
         conn.close()
@@ -418,9 +418,7 @@ def get_tile_image(tile_id: int) -> bytes | None:
         return None
     if row["data_png"]:
         return row["data_png"]
-    proj = project_service.get_project(row["project_id"]) if row["project_id"] else None
-    tile_px = int((proj or {}).get("tile_px", 256))
-    return empty_mask_png(tile_px)
+    return empty_mask_png(int(project_for_tile(tile_id).get("tile_px", 256)))
 
 
 def get_tile_geojson(tile_id: int) -> str | None:
@@ -480,11 +478,17 @@ def _lock_tile_for_user(conn, tile_id: int, user_id: int,
 
 
 def submit_classification(tile_id: int, user_id: int, body: bytes,
-                          expected_version: int | None = None) -> dict:
+                          expected_version: int | None = None,
+                          *, proj: dict | None = None) -> dict:
     """Dispatcher: raster expects raw 65536-byte mask; vector expects UTF-8
     JSON FeatureCollection. The project's `kind` decides which path runs;
-    a Content-Type mismatch is caught earlier in the operator router."""
-    proj = project_for_tile(tile_id)
+    a Content-Type mismatch is caught earlier in the operator router.
+
+    `proj` may be passed by callers that already resolved it (e.g. the
+    operator router needs it to size the body) — saves a duplicate
+    project_for_tile lookup on every submit."""
+    if proj is None:
+        proj = project_for_tile(tile_id)
     if proj.get("kind") == "vector":
         return _submit_vector(tile_id, user_id, body, proj, expected_version)
     return _submit_raster(tile_id, user_id, body, proj, expected_version)
@@ -505,10 +509,8 @@ def _submit_raster(tile_id: int, user_id: int, raw_mask: bytes,
     if not ok:
         raise HTTPException(422, detail={"error": "unfilled_pixels", "missing": missing})
     png = encode_mask(raw_mask, tile_px)
-    # Single-band 8-bit PNG: worst-case size scales with tile_px**2. Cap at
-    # 4 bytes/pixel as a safety margin (real masks compress to < 0.5 bpp).
-    max_png = max(200_000, 4 * tile_px * tile_px)
-    if len(png) > max_png:
+    # Cap at 4 bytes/pixel — real masks compress to < 0.5 bpp.
+    if len(png) > 4 * tile_px * tile_px:
         raise HTTPException(413, detail={"error": "mask_too_large"})
 
     with transaction("IMMEDIATE") as conn:
@@ -667,14 +669,17 @@ def report_problem(tile_id: int, user_id: int, note: str) -> dict:
     note = (note or "").strip()
     if len(note) > _MAX_PROBLEM_NOTE:
         note = note[:_MAX_PROBLEM_NOTE]
-    proj = project_for_tile(tile_id)
-    tile_px = int(proj.get("tile_px", 256))
     with transaction("IMMEDIATE") as conn:
-        row = conn.execute("SELECT status, assigned_to FROM tiles WHERE id=?", (tile_id,)).fetchone()
+        row = conn.execute(
+            "SELECT status, assigned_to, project_id FROM tiles WHERE id=?",
+            (tile_id,),
+        ).fetchone()
         if not row:
             raise HTTPException(404, "tile not found")
         if row["assigned_to"] != user_id:
             raise HTTPException(403, "not assigned to you")
+        proj = project_service.get_project(row["project_id"]) or {}
+        tile_px = int(proj.get("tile_px", 256))
         # Wipe both bodies — kind-agnostic so a future kind switch on the
         # project wouldn't leak a stale body into a fresh classify cycle.
         conn.execute(
@@ -691,11 +696,14 @@ def report_problem(tile_id: int, user_id: int, note: str) -> dict:
 
 
 def pause_tile(tile_id: int, user_id: int, body: bytes,
-               expected_version: int | None = None) -> dict:
+               expected_version: int | None = None,
+               *, proj: dict | None = None) -> dict:
     """Save partial body and freeze the timer (dashboard subtracts
     pause→resume). Dispatches by project.kind: raster persists a PNG mask,
-    vector persists a (possibly partial / invalid-topology) FeatureCollection."""
-    proj = project_for_tile(tile_id)
+    vector persists a (possibly partial / invalid-topology) FeatureCollection.
+    `proj` may be passed pre-resolved by the router to skip a duplicate lookup."""
+    if proj is None:
+        proj = project_for_tile(tile_id)
     if proj.get("kind") == "vector":
         return _pause_vector(tile_id, user_id, body, proj, expected_version)
     return _pause_raster(tile_id, user_id, body, proj, expected_version)
@@ -710,8 +718,7 @@ def _pause_raster(tile_id: int, user_id: int, raw_mask: bytes,
     except ValueError as e:
         raise HTTPException(400, detail={"error": "invalid_mask", "message": str(e)})
     png = encode_mask(raw_mask, tile_px)
-    max_png = max(200_000, 4 * tile_px * tile_px)
-    if len(png) > max_png:
+    if len(png) > 4 * tile_px * tile_px:
         raise HTTPException(413, detail={"error": "mask_too_large"})
 
     with transaction("IMMEDIATE") as conn:

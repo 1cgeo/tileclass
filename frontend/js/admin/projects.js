@@ -146,7 +146,10 @@ function renderProjectDetail(proj, members) {
             </label>
     `;
     const geoLocked = proj.tile_geometry_locked;
-    const tileMeters = (proj.tile_px || 256) * (proj.meters_per_pixel || 2.5);
+    // tile_meters is computed server-side in _row_to_project; fall back only
+    // for older payloads that don't include it.
+    const tileMeters = proj.tile_meters
+        ?? (proj.tile_px || 256) * (proj.meters_per_pixel || 2.5);
     const lockedHint = geoLocked
         ? ' <span class="muted">(travado: projeto já tem tiles)</span>'
         : "";
@@ -306,9 +309,6 @@ async function saveProjectFields(projectId) {
         const v = readField(f);
         if (v !== undefined) fields[f] = v;
     }
-    // Geometry fields are disabled when the project has any tile, so the
-    // input is absent from the form. readField returns undefined and the
-    // PATCH never touches the server-side lock branch.
     const tilePxEl = document.querySelector('[data-field="tile_px"]');
     if (tilePxEl && !tilePxEl.disabled) fields.tile_px = parseInt(tilePxEl.value, 10);
     const mppEl = document.querySelector('[data-field="meters_per_pixel"]');

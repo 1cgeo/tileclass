@@ -29,19 +29,21 @@ async def _read_mask_body(request: Request, expected_pixels: int) -> bytes:
     return raw
 
 
-async def _read_body_for_kind(request: Request, tile_id: int) -> bytes:
-    """Pick the right body reader by the project's kind. Raster tiles expect
-    exactly tile_px**2 raw bytes (the project's configured size); vector tiles
-    accept any well-formed body and push validation deeper into tile_service."""
+async def _read_body_for_kind(request: Request, tile_id: int) -> tuple[bytes, dict]:
+    """Pick the right body reader by the project's kind and return both the
+    body and the resolved project dict so callers can hand `proj` to
+    tile_service without a second project_for_tile lookup. Raster tiles
+    expect exactly tile_px**2 raw bytes; vector tiles accept any well-formed
+    body and push validation deeper into tile_service."""
     proj = tile_service.project_for_tile(tile_id)
     if proj.get("kind") == "vector":
         # Light cap; tile_service._submit_vector enforces the real bound.
         cl = request.headers.get("content-length")
         if cl and cl.isdigit() and int(cl) > 1_500_000:
             raise HTTPException(413, "vector body too large")
-        return await request.body()
+        return await request.body(), proj
     tile_px = int(proj.get("tile_px", 256))
-    return await _read_mask_body(request, tile_px * tile_px)
+    return await _read_mask_body(request, tile_px * tile_px), proj
 
 
 def _expected_version(request: Request) -> int | None:
@@ -55,8 +57,10 @@ def _expected_version(request: Request) -> int | None:
 
 
 async def _submit(tile_id: int, request: Request, user: auth.CurrentUser) -> dict:
-    body = await _read_body_for_kind(request, tile_id)
-    return tile_service.submit_classification(tile_id, user.id, body, _expected_version(request))
+    body, proj = await _read_body_for_kind(request, tile_id)
+    return tile_service.submit_classification(
+        tile_id, user.id, body, _expected_version(request), proj=proj,
+    )
 
 
 def _resolve_project_id(
@@ -253,8 +257,10 @@ def request_changes(body: ReportProblemIn, tile_id: int = Path(ge=1),
 @router.post("/tiles/{tile_id}/pause")
 async def pause_tile(tile_id: int = Path(ge=1), *, request: Request,
                      user: auth.CurrentUser = Depends(auth.get_current_user)):
-    body = await _read_body_for_kind(request, tile_id)
-    return tile_service.pause_tile(tile_id, user.id, body, _expected_version(request))
+    body, proj = await _read_body_for_kind(request, tile_id)
+    return tile_service.pause_tile(
+        tile_id, user.id, body, _expected_version(request), proj=proj,
+    )
 
 
 @router.post("/tiles/{tile_id}/resume")

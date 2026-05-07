@@ -498,14 +498,6 @@ def update_project(project_id: int, *, fields: dict, updated_by: int) -> dict:
     if bad:
         raise HTTPException(400, detail={"error": "unknown_fields", "fields": sorted(bad)})
     geometry_changing = "tile_px" in fields or "meters_per_pixel" in fields
-    if geometry_changing:
-        # Validate against the merged values (caller may patch only one).
-        current = get_project(project_id)
-        if not current:
-            raise HTTPException(404, detail={"error": "project_not_found"})
-        new_px = int(fields.get("tile_px", current["tile_px"]))
-        new_mpp = float(fields.get("meters_per_pixel", current["meters_per_pixel"]))
-        _validate_tile_geometry(new_px, new_mpp)
     sets, params = [], []
     if "primary_mbtiles" in fields:
         _validate_layer_path(fields["primary_mbtiles"], required=True)
@@ -528,20 +520,24 @@ def update_project(project_id: int, *, fields: dict, updated_by: int) -> dict:
         return get_project(project_id)
     params.append(project_id)
     with transaction("IMMEDIATE") as conn:
-        row = conn.execute("SELECT id FROM projects WHERE id=?", (project_id,)).fetchone()
+        row = conn.execute(
+            "SELECT id, tile_px, meters_per_pixel FROM projects WHERE id=?",
+            (project_id,),
+        ).fetchone()
         if not row:
             raise HTTPException(404, detail={"error": "project_not_found"})
         if geometry_changing:
-            # Existing tile bytes encode the original tile_px²; changing it
-            # would corrupt every mask body. Ground bbox is also baked into
-            # tiles.bbox_*, so meters_per_pixel changes would mean re-importing.
-            tile_count = conn.execute(
-                "SELECT COUNT(*) c FROM tiles WHERE project_id=?", (project_id,)
-            ).fetchone()["c"]
-            if tile_count:
+            new_px = int(fields.get("tile_px", row["tile_px"]))
+            new_mpp = float(fields.get("meters_per_pixel", row["meters_per_pixel"]))
+            _validate_tile_geometry(new_px, new_mpp)
+            # Mask bytes encode tile_px²; bbox is baked at insert time.
+            # Once any tile exists, both fields are immutable.
+            locked = conn.execute(
+                "SELECT 1 FROM tiles WHERE project_id=? LIMIT 1", (project_id,)
+            ).fetchone()
+            if locked:
                 raise HTTPException(409, detail={
                     "error": "tile_geometry_locked",
-                    "tile_count": tile_count,
                     "message": ("tile_px e meters_per_pixel só podem ser alterados "
                                 "antes do projeto receber tiles."),
                 })

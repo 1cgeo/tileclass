@@ -27,7 +27,9 @@ from backend.database import init_db, connect
 from backend.mask_utils import empty_mask_png
 from backend.geo import bbox_from_center, offset_center
 from backend import project_service
-from backend.scripts._common import resolve_project_arg, insert_tile_dedup
+from backend.scripts._common import (
+    resolve_project_arg, insert_tile_dedup, load_tile_geometry,
+)
 
 
 def _read_points(args) -> list[tuple[float, float, str]]:
@@ -81,13 +83,9 @@ def main():
     conn = connect()
     try:
         project_id = resolve_project_arg(conn, args.project)
+        tile_px, tile_meters = load_tile_geometry(project_id)
         proj = project_service.get_project(project_id) or {}
-        tile_px = int(proj.get("tile_px", 256))
-        tile_meters = float(proj.get("tile_meters",
-                                      tile_px * float(proj.get("meters_per_pixel", 2.5))))
-        # Vector projects don't use data_png, but inserting an empty PNG
-        # keeps the column populated so admin queries see a non-null
-        # placeholder. Vector reset clears it back when needed.
+        # Vector projects don't use data_png; raster gets the canonical empty.
         empty_png = empty_mask_png(tile_px) if proj.get("kind", "raster") == "raster" else None
         conn.execute("BEGIN")
         for lat, lon, name in pts:

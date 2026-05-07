@@ -63,12 +63,9 @@ CREATE TABLE IF NOT EXISTS projects (
     -- Vector projects only: when 1, submits run validate_topology
     -- (each LineString has direction; endpoints snap; no cycles).
     topology_required INTEGER NOT NULL DEFAULT 0,
-    -- Tile geometry. tile_px is the side of the square mask in pixels;
-    -- meters_per_pixel is the ground sampling distance. Together they fix
-    -- the bbox span (tile_meters = tile_px * meters_per_pixel) and the
-    -- mask body size (tile_px**2 bytes). Any positive integer / float
-    -- accepted — admin chooses freely. Editable while the project has
-    -- no tiles; locked afterwards (mask bytes assume the original shape).
+    -- Tile geometry. tile_meters = tile_px * meters_per_pixel; mask body
+    -- size = tile_px². Locked once any tile exists (mask bytes assume the
+    -- original shape).
     tile_px INTEGER NOT NULL DEFAULT 256 CHECK (tile_px > 0),
     meters_per_pixel REAL NOT NULL DEFAULT 2.5 CHECK (meters_per_pixel > 0),
     mask_complete_required INTEGER NOT NULL DEFAULT 1,
@@ -329,9 +326,6 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE projects ADD COLUMN topology_required INTEGER NOT NULL DEFAULT 0"
         )
-    # Per-project tile geometry. Defaults match the historical hardcoded
-    # values (256 px, 2.5 m/px → 640 m on the ground), so legacy projects
-    # keep behaving identically.
     if "tile_px" not in proj_cols:
         conn.execute(
             "ALTER TABLE projects ADD COLUMN tile_px INTEGER NOT NULL DEFAULT 256"

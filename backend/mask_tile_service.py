@@ -39,9 +39,8 @@ from .config import get_config
 from .database import connect as connect_main
 from .mask_utils import decode_mask
 
-# XYZ tiles are rendered at the standard 256×256 size regardless of the
-# source project's tile_px. The source mask is decoded at the project's
-# native size and reprojected onto this destination grid.
+# XYZ output is fixed 256 (Web Mercator standard); source masks are
+# reprojected from their native tile_px onto this grid.
 XYZ_TILE_PX = 256
 
 

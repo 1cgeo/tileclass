@@ -42,7 +42,9 @@ from backend.database import init_db, connect
 from backend.geo import bbox_from_center
 from backend.mask_utils import encode_mask, validate_submission
 from backend.tile_grid import force_crs_3857
-from backend import project_service
+from backend.scripts._common import (
+    resolve_project_arg, insert_tile_dedup, load_tile_geometry,
+)
 
 NODATA = 255
 DEFAULT_RAW_DIR = Path(r"C:/Users/diniz/OneDrive/Desktop/Desenvolvimento/treinamento_6c/teste/teste_masks")
@@ -87,8 +89,6 @@ def tile_name(row) -> str:
     return f"{row['stem']}_x{int(row['x_off'])}_y{int(row['y_off'])}_{role}"
 
 
-from backend.scripts._common import resolve_project_arg, insert_tile_dedup
-
 
 def main():
     ap = argparse.ArgumentParser(
@@ -126,10 +126,7 @@ def main():
         conn = None
         project_id = None
 
-    proj = project_service.get_project(project_id) if project_id else {}
-    proj = proj or {}
-    tile_px = int(proj.get("tile_px", 256))
-    tile_meters = float(proj.get("tile_meters", tile_px * float(proj.get("meters_per_pixel", 2.5))))
+    tile_px, tile_meters = load_tile_geometry(project_id)
     pixels = tile_px * tile_px
 
     inserted = skipped = errors = 0
