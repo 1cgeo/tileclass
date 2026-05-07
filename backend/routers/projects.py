@@ -80,7 +80,13 @@ def get_project(project_id: int, user: auth.CurrentUser = Depends(auth.get_curre
     if not proj:
         raise HTTPException(404, detail={"error": "project_not_found"})
     role = project_service.require_membership(project_id, user)
-    return {**proj, "role": role, "layers": _build_layers(project_id, proj)}
+    return {
+        **proj, "role": role,
+        "layers": _build_layers(project_id, proj),
+        # Surfaces to the admin form so the tile_px/meters_per_pixel inputs
+        # disable once any tile exists (mask bytes / bbox would mismatch).
+        "tile_geometry_locked": project_service.has_any_tile(project_id),
+    }
 
 
 # ---- XYZ passthrough --------------------------------------------------------
@@ -128,6 +134,8 @@ def create_project(
         kind=body.kind,
         topology_required=body.topology_required,
         mask_complete_required=body.mask_complete_required,
+        tile_px=body.tile_px,
+        meters_per_pixel=body.meters_per_pixel,
         primary_mbtiles=body.primary_mbtiles,
         secondary_mbtiles=body.secondary_mbtiles,
         tertiary_mbtiles=body.tertiary_mbtiles,

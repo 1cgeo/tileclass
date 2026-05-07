@@ -133,6 +133,10 @@ class ProjectCreateIn(BaseModel):
     kind: Literal["raster", "vector"] = "raster"
     topology_required: bool = False
     mask_complete_required: bool = True
+    # Tile geometry (defaults match the historical 256×256 @ 2.5 m/px = 640 m
+    # tile). Validated server-side against project_service.ALLOWED_TILE_PX.
+    tile_px: int = 256
+    meters_per_pixel: float = 2.5
     primary_mbtiles: str = Field(min_length=1)
     secondary_mbtiles: Optional[str] = None
     tertiary_mbtiles: Optional[str] = None
@@ -150,6 +154,11 @@ class ProjectUpdateIn(BaseModel):
     description: Optional[str] = None
     mask_complete_required: Optional[bool] = None
     topology_required: Optional[bool] = None
+    # Editable only while the project has no tiles (mask bytes / bbox are
+    # otherwise tied to the original geometry). Server returns 409
+    # tile_geometry_locked if the project already has tiles.
+    tile_px: Optional[int] = None
+    meters_per_pixel: Optional[float] = None
     active: Optional[bool] = None
     primary_mbtiles: Optional[str] = None
     secondary_mbtiles: Optional[str] = None

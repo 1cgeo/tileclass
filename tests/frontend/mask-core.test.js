@@ -266,3 +266,47 @@ describe("validateSubmission — mirrors backend", () => {
         }
     });
 });
+
+describe("non-default tile_px", () => {
+    it("paintAt respects the supplied tilePx for indexing and bounds", () => {
+        const TP = 128;
+        const m = new Uint8Array(TP * TP).fill(EMPTY);
+        // Paint near the right edge at (TP-1, 5). With tilePx=128 the brush
+        // clips at column TP-1; with the legacy 256 default the index would
+        // be wrong (5*256 + 127 ≠ 5*128 + 127).
+        paintAt(m, TP - 1, 5, 3, 0, new Map(), TP);
+        expect(m[5 * TP + (TP - 1)]).toBe(3);
+        // Adjacent pixel must remain untouched.
+        expect(m[5 * TP + (TP - 2)]).toBe(EMPTY);
+    });
+
+    it("floodFill walks the correct row stride for arbitrary tilePx", () => {
+        const TP = 64;
+        const m = new Uint8Array(TP * TP).fill(EMPTY);
+        const { deltaFilled } = floodFill(m, 0, 0, 1, TP);
+        expect(deltaFilled).toBe(TP * TP);  // entire mask filled
+        expect(m.every(v => v === 1)).toBe(true);
+    });
+
+    it("validateSubmission accepts the matching tile_px size", () => {
+        const TP = 512;
+        const big = new Uint8Array(TP * TP).fill(1);
+        expect(validateSubmission(big, [1, 2, 3, 4, 5, 6], TP).ok).toBe(true);
+    });
+
+    it("validateSubmission rejects size ≠ tile_px²", () => {
+        const TP = 128;
+        const wrong = new Uint8Array(64 * 64).fill(1);  // 64² instead of 128²
+        expect(() => validateSubmission(wrong, [1, 2, 3, 4, 5, 6], TP))
+            .toThrow(/expected 16384/);
+    });
+
+    it("screenToLogical clamps to tilePx-1 when given a non-default tile", () => {
+        const TP = 128;
+        const rect = { left: 0, top: 0, width: 100, height: 100 };
+        // Click at the bottom-right corner of the rect → (TP-1, TP-1).
+        const [x, y] = screenToLogical(rect, 99.999, 99.999, TP);
+        expect(x).toBe(TP - 1);
+        expect(y).toBe(TP - 1);
+    });
+});

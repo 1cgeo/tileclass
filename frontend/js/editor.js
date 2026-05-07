@@ -31,10 +31,13 @@ import {
     validateForSubmit as validateVector,
 } from "./editor-vector.js";
 
-const TILE = 256;
+// Tile geometry is per-project (project.tile_px). These are mutated on
+// project load via setTileGeometry. DISPLAY is the on-screen canvas size
+// in CSS pixels — independent of TILE; SCALE renders TILE-space onto it.
+let TILE = 256;
 const DISPLAY = 768;
-const SCALE = DISPLAY / TILE;
-const PIXELS = TILE * TILE;
+let SCALE = DISPLAY / TILE;
+let PIXELS = TILE * TILE;
 const BRUSH_SIZES = [1, 3, 5, 7, 11];
 
 // --- State ---
@@ -88,11 +91,25 @@ const ctxMask = canvasMask.getContext("2d");
 const canvasCursor = document.getElementById("canvas-cursor");
 const ctxCursor = canvasCursor.getContext("2d");
 
-// Offscreen 256x256 for mask imageData
-const maskImageData = ctxMask.createImageData(TILE, TILE);
+// Offscreen TILE×TILE for mask imageData. Reallocated on project change
+// via setTileGeometry — the editor handles operators with multiple projects
+// at different sizes.
+let maskImageData = ctxMask.createImageData(TILE, TILE);
 const offCanvas = document.createElement("canvas");
 offCanvas.width = TILE; offCanvas.height = TILE;
 const offCtx = offCanvas.getContext("2d");
+
+function setTileGeometry(px) {
+    TILE = px;
+    PIXELS = TILE * TILE;
+    SCALE = DISPLAY / TILE;
+    maskImageData = ctxMask.createImageData(TILE, TILE);
+    offCanvas.width = TILE; offCanvas.height = TILE;
+    mask = new Uint8Array(PIXELS);
+    filledCount = 0;
+    undoStack.length = 0;
+    redoStack.length = 0;
+}
 
 let satMap = null;
 
@@ -226,6 +243,9 @@ async function loadProjectConfig(projectId) {
     classes = proj.classes || [];
     classesById = Object.fromEntries(classes.map(c => [c.id, c]));
     maskCompleteRequired = !!proj.mask_complete_required;
+    // Apply per-project tile geometry. setTileGeometry rebuilds the mask
+    // and offscreen surfaces — must run before any blit/paint code reads TILE.
+    setTileGeometry(proj.tile_px || 256);
     const layers = proj.layers || {};
     const primary = layers.primary;
     tileserverUrl = primary?.url || "";
@@ -549,7 +569,7 @@ function tryRestoreBackup() {
     // just loaded, overwrite in-memory mask silently. Backups only exist when
     // the user had unsynced work (F5, browser crash); the canonical save+clear
     // path makes server == backup any other time. Caller re-renders.
-    const restored = bkLoad(currentTile.id);
+    const restored = bkLoad(currentTile.id, PIXELS);
     if (!restored) return;
     // Collect diffs once: lets us skip a no-op restore AND seed an undo entry
     // that reverts to the server state (Ctrl+Z right after a restore).
@@ -737,7 +757,7 @@ function drawOutlines(overlay) {
 // --- Painting ---
 
 function screenToLogical(ev) {
-    return coreScreenToLogical(canvasCursor.getBoundingClientRect(), ev.clientX, ev.clientY);
+    return coreScreenToLogical(canvasCursor.getBoundingClientRect(), ev.clientX, ev.clientY, TILE);
 }
 
 function brushRadius() { return Math.floor(BRUSH_SIZES[brushSizeIdx] / 2); }
@@ -745,7 +765,7 @@ function brushRadius() { return Math.floor(BRUSH_SIZES[brushSizeIdx] / 2); }
 function paintAt(cx, cy) {
     const r = brushRadius();
     const value = tool === "eraser" ? 255 : activeClass;
-    const res = corePaintAt(mask, cx, cy, value, r, gestureTouched);
+    const res = corePaintAt(mask, cx, cy, value, r, gestureTouched, TILE);
     filledCount += res.deltaFilled;
     const [x0, y0, x1, y1] = res.region;
     writeMaskPixels(x0, y0, x1, y1);
@@ -754,7 +774,7 @@ function paintAt(cx, cy) {
 
 function paintLine(x0, y0, x1, y1) {
     const value = tool === "eraser" ? 255 : activeClass;
-    const res = corePaintLine(mask, x0, y0, x1, y1, value, brushRadius());
+    const res = corePaintLine(mask, x0, y0, x1, y1, value, brushRadius(), TILE);
     filledCount += res.deltaFilled;
     // Merge touched into the gesture map
     for (const [i, v] of res.touched) if (!gestureTouched.has(i)) gestureTouched.set(i, v);
@@ -764,7 +784,7 @@ function paintLine(x0, y0, x1, y1) {
 
 function floodFill(cx, cy) {
     const replacement = activeClass;
-    const res = coreFloodFill(mask, cx, cy, replacement);
+    const res = coreFloodFill(mask, cx, cy, replacement, TILE);
     if (res.touched.size === 0) return;
     filledCount += res.deltaFilled;
     pushUndo(res.touched);

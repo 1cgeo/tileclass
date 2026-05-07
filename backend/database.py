@@ -63,6 +63,15 @@ CREATE TABLE IF NOT EXISTS projects (
     -- Vector projects only: when 1, submits run validate_topology
     -- (each LineString has direction; endpoints snap; no cycles).
     topology_required INTEGER NOT NULL DEFAULT 0,
+    -- Tile geometry. tile_px is the side of the square mask in pixels;
+    -- meters_per_pixel is the ground sampling distance. Together they fix
+    -- the bbox span (tile_meters = tile_px * meters_per_pixel) and the
+    -- mask body size (tile_px**2 bytes). Editable while the project has
+    -- no tiles; locked afterwards (mask bytes assume the original shape).
+    tile_px INTEGER NOT NULL DEFAULT 256
+        CHECK (tile_px IN (64, 128, 256, 512, 1024)),
+    meters_per_pixel REAL NOT NULL DEFAULT 2.5
+        CHECK (meters_per_pixel > 0),
     mask_complete_required INTEGER NOT NULL DEFAULT 1,
     primary_mbtiles TEXT NOT NULL,
     secondary_mbtiles TEXT,
@@ -320,6 +329,17 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if "topology_required" not in proj_cols:
         conn.execute(
             "ALTER TABLE projects ADD COLUMN topology_required INTEGER NOT NULL DEFAULT 0"
+        )
+    # Per-project tile geometry. Defaults match the historical hardcoded
+    # values (256 px, 2.5 m/px → 640 m on the ground), so legacy projects
+    # keep behaving identically.
+    if "tile_px" not in proj_cols:
+        conn.execute(
+            "ALTER TABLE projects ADD COLUMN tile_px INTEGER NOT NULL DEFAULT 256"
+        )
+    if "meters_per_pixel" not in proj_cols:
+        conn.execute(
+            "ALTER TABLE projects ADD COLUMN meters_per_pixel REAL NOT NULL DEFAULT 2.5"
         )
     # Indices on migrated columns must run after the ALTER above (cannot live
     # in SCHEMA because executescript runs before this fn on existing DBs).

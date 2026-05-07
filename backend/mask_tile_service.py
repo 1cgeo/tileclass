@@ -37,7 +37,12 @@ from rasterio.warp import reproject, Resampling
 from . import project_service
 from .config import get_config
 from .database import connect as connect_main
-from .mask_utils import decode_mask, TILE_SIZE
+from .mask_utils import decode_mask
+
+# XYZ tiles are rendered at the standard 256×256 size regardless of the
+# source project's tile_px. The source mask is decoded at the project's
+# native size and reprojected onto this destination grid.
+XYZ_TILE_PX = 256
 
 
 _WM_HALF = 20037508.342789244
@@ -192,7 +197,7 @@ _TRANSPARENT_PNG: bytes | None = None
 def _transparent_png() -> bytes:
     global _TRANSPARENT_PNG
     if _TRANSPARENT_PNG is None:
-        img = Image.new("RGBA", (TILE_SIZE, TILE_SIZE), (0, 0, 0, 0))
+        img = Image.new("RGBA", (XYZ_TILE_PX, XYZ_TILE_PX), (0, 0, 0, 0))
         buf = io.BytesIO()
         img.save(buf, format="PNG", optimize=True)
         _TRANSPARENT_PNG = buf.getvalue()
@@ -233,23 +238,28 @@ def _render_raster_tile(project_id: int, z: int, x: int, y: int) -> bytes | None
         return None
 
     left, bottom, right, top = wm_tile_bounds_3857(z, x, y)
-    dst_transform = from_bounds(left, bottom, right, top, TILE_SIZE, TILE_SIZE)
-    acc = np.full((TILE_SIZE, TILE_SIZE), 255, dtype=np.uint8)
+    dst_transform = from_bounds(left, bottom, right, top, XYZ_TILE_PX, XYZ_TILE_PX)
+    acc = np.full((XYZ_TILE_PX, XYZ_TILE_PX), 255, dtype=np.uint8)
     has_data = False
+
+    # All tiles in the project share the same tile_px (geometry is locked
+    # once any tile exists), so we look it up once here.
+    proj = project_service.get_project(project_id) or {}
+    src_px = int(proj.get("tile_px", 256))
 
     for r in rows:
         try:
-            raw = decode_mask(r["data_png"])
+            raw = decode_mask(r["data_png"], src_px)
         except (ValueError, OSError):
             continue
-        src_arr = np.frombuffer(raw, dtype=np.uint8).reshape(TILE_SIZE, TILE_SIZE)
+        src_arr = np.frombuffer(raw, dtype=np.uint8).reshape(src_px, src_px)
         if not np.any(src_arr != 255):
             continue
         src_transform = from_bounds(
             r["bbox_west"], r["bbox_south"], r["bbox_east"], r["bbox_north"],
-            TILE_SIZE, TILE_SIZE,
+            src_px, src_px,
         )
-        dst = np.full((TILE_SIZE, TILE_SIZE), 255, dtype=np.uint8)
+        dst = np.full((XYZ_TILE_PX, XYZ_TILE_PX), 255, dtype=np.uint8)
         # Nearest neighbour: classes are categorical; bilinear would invent
         # ids that don't exist in the LUT.
         reproject(
@@ -316,7 +326,7 @@ def _render_vector_tile(project_id: int, z: int, x: int, y: int,
     if not rows:
         return None
 
-    img = Image.new("RGBA", (TILE_SIZE, TILE_SIZE), (0, 0, 0, 0))
+    img = Image.new("RGBA", (XYZ_TILE_PX, XYZ_TILE_PX), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     color_for = _vector_color_resolver(proj)
     has_any = False
@@ -334,8 +344,8 @@ def _render_vector_tile(project_id: int, z: int, x: int, y: int,
         rad_lat = math.radians(max(min(lat, 85.05112878), -85.05112878))
         mx = lon * _WM_HALF / 180.0
         my = math.log(math.tan((90 + math.degrees(rad_lat)) * math.pi / 360)) / math.pi * _WM_HALF
-        px = (mx - left_3857) / span_x * TILE_SIZE
-        py = (top_3857 - my) / span_y * TILE_SIZE
+        px = (mx - left_3857) / span_x * XYZ_TILE_PX
+        py = (top_3857 - my) / span_y * XYZ_TILE_PX
         return px, py
 
     for r in rows:

@@ -145,6 +145,41 @@ function renderProjectDetail(proj, members) {
                 Exigir máscara completa para submeter
             </label>
     `;
+    const geoLocked = proj.tile_geometry_locked;
+    const tileMeters = (proj.tile_px || 256) * (proj.meters_per_pixel || 2.5);
+    const lockedHint = geoLocked
+        ? ' <span class="muted">(travado: projeto já tem tiles)</span>'
+        : "";
+    const tilePxTooltip = isVector
+        ? "Em projeto vetorial, afeta só a resolução do thumbnail/overlay rasterizado — o editor MapLibre desenha em qualquer escala."
+        : "Lado da máscara em pixels (canvas + bytes do PNG = tile_px²).";
+    const geometryBlock = `
+            <fieldset class="field" style="display:grid;grid-template-columns:auto auto;gap:8px;">
+                <legend>Geometria do tile${lockedHint}</legend>
+                <label class="field" title="${escapeHtml(tilePxTooltip)}">
+                    <span>Lado em pixels (tile_px)</span>
+                    <select data-field="tile_px" ${geoLocked ? "disabled" : ""}>
+                        ${[64, 128, 256, 512, 1024].map(px =>
+                            `<option value="${px}" ${proj.tile_px === px ? "selected" : ""}>${px}</option>`
+                        ).join("")}
+                    </select>
+                </label>
+                <label class="field" title="Resolução no chão por pixel (m/px). Tile cobre tile_px × m/px metros.">
+                    <span>Metros por pixel</span>
+                    <input type="number" step="0.1" min="0.1" max="100"
+                           data-field="meters_per_pixel"
+                           value="${proj.meters_per_pixel ?? 2.5}"
+                           ${geoLocked ? "disabled" : ""}>
+                </label>
+                <p class="muted" style="grid-column:1/3">
+                    Tile no chão: <strong>${tileMeters.toFixed(1)} m × ${tileMeters.toFixed(1)} m</strong>
+                    (${proj.tile_px || 256}×${proj.tile_px || 256} px @ ${(proj.meters_per_pixel ?? 2.5).toFixed(2)} m/px).
+                    ${geoLocked
+                        ? "Geometria fica imutável a partir do primeiro tile inserido."
+                        : "Após o primeiro tile, esses campos travam (mask bytes e bbox dependem deles)."}
+                </p>
+            </fieldset>
+    `;
     const classesOrAttrsSection = isVector ? `
         <section class="project-section">
             <h4>Atributos</h4>
@@ -188,6 +223,7 @@ function renderProjectDetail(proj, members) {
                 <input type="text" data-field="description" value="${escapeHtml(proj.description || "")}">
             </label>
             ${maskCompleteBlock}
+            ${geometryBlock}
             <label class="field">
                 <input type="checkbox" data-field="active" ${proj.active ? "checked" : ""}>
                 Ativo
@@ -271,6 +307,13 @@ async function saveProjectFields(projectId) {
         const v = readField(f);
         if (v !== undefined) fields[f] = v;
     }
+    // Geometry fields are disabled when the project has any tile, so the
+    // input is absent from the form. readField returns undefined and the
+    // PATCH never touches the server-side lock branch.
+    const tilePxEl = document.querySelector('[data-field="tile_px"]');
+    if (tilePxEl && !tilePxEl.disabled) fields.tile_px = parseInt(tilePxEl.value, 10);
+    const mppEl = document.querySelector('[data-field="meters_per_pixel"]');
+    if (mppEl && !mppEl.disabled) fields.meters_per_pixel = parseFloat(mppEl.value);
     for (const f of LAYER_FIELDS) {
         const v = readField(f.key);
         if (v !== undefined) fields[f.key] = v;
@@ -505,6 +548,27 @@ function showProjectForm(root, _) {
                 <input type="checkbox" id="np-topology-required">
                 Validar topologia (drenagem como grafo)
             </label>
+            <fieldset class="field" style="display:grid;grid-template-columns:auto auto;gap:8px;">
+                <legend>Geometria do tile</legend>
+                <label class="field">
+                    <span>Lado em pixels (tile_px)</span>
+                    <select id="np-tile-px">
+                        <option value="64">64</option>
+                        <option value="128">128</option>
+                        <option value="256" selected>256</option>
+                        <option value="512">512</option>
+                        <option value="1024">1024</option>
+                    </select>
+                </label>
+                <label class="field">
+                    <span>Metros por pixel</span>
+                    <input type="number" id="np-mpp" step="0.1" min="0.1" max="100" value="2.5">
+                </label>
+                <p class="muted" style="grid-column:1/3" id="np-geom-derived">
+                    Tile no chão: 640.0 m × 640.0 m (256×256 px @ 2.50 m/px).
+                    <br>Após o primeiro tile inserido, esses valores travam — mask bytes e bbox dependem deles.
+                </p>
+            </fieldset>
             ${LAYER_FIELDS.map(f => `
                 <label class="field">
                     <span>${escapeHtml(f.label)}${f.required ? " *" : ""}</span>
@@ -557,6 +621,24 @@ function showProjectForm(root, _) {
     kindSel.onchange = refreshKindUI;
     refreshKindUI();
 
+    // Live "tile no chão" derived label so admins see the consequence of
+    // changing px / m/px before submitting the form.
+    const pxSel = document.getElementById("np-tile-px");
+    const mppInp = document.getElementById("np-mpp");
+    const derivedP = document.getElementById("np-geom-derived");
+    const refreshGeomDerived = () => {
+        const px = parseInt(pxSel.value, 10) || 256;
+        const mpp = parseFloat(mppInp.value) || 0;
+        const m = px * mpp;
+        derivedP.innerHTML = `
+            Tile no chão: <strong>${m.toFixed(1)} m × ${m.toFixed(1)} m</strong>
+            (${px}×${px} px @ ${mpp.toFixed(2)} m/px).
+            <br>Após o primeiro tile inserido, esses valores travam — mask bytes e bbox dependem deles.
+        `;
+    };
+    pxSel.addEventListener("change", refreshGeomDerived);
+    mppInp.addEventListener("input", refreshGeomDerived);
+
     document.querySelector("[data-rm-cls]").onclick = (ev) => ev.target.closest("tr").remove();
     document.getElementById("btn-add-class").onclick = () => addClassRow();
     document.getElementById("btn-add-attr").onclick = () => addAttrRow();
@@ -568,6 +650,8 @@ function showProjectForm(root, _) {
             name: document.getElementById("np-name").value.trim(),
             kind: kindSel.value,
             description: document.getElementById("np-description").value,
+            tile_px: parseInt(pxSel.value, 10) || 256,
+            meters_per_pixel: parseFloat(mppInp.value) || 2.5,
         };
         if (isVector) {
             body.topology_required = document.getElementById("np-topology-required").checked;

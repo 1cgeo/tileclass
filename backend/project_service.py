@@ -81,13 +81,19 @@ def _invalidate(project_id: int | None = None) -> None:
 # ---- Reads ------------------------------------------------------------------
 
 def _row_to_project(row) -> dict:
+    keys = row.keys()
+    tile_px = int(row["tile_px"]) if "tile_px" in keys else 256
+    mpp = float(row["meters_per_pixel"]) if "meters_per_pixel" in keys else 2.5
     return {
         "id": row["id"],
         "name": row["name"],
         "description": row["description"] or "",
-        "kind": row["kind"] if "kind" in row.keys() else "raster",
-        "topology_required": bool(row["topology_required"]) if "topology_required" in row.keys() else False,
+        "kind": row["kind"] if "kind" in keys else "raster",
+        "topology_required": bool(row["topology_required"]) if "topology_required" in keys else False,
         "mask_complete_required": bool(row["mask_complete_required"]),
+        "tile_px": tile_px,
+        "meters_per_pixel": mpp,
+        "tile_meters": tile_px * mpp,
         "primary_mbtiles": row["primary_mbtiles"],
         "secondary_mbtiles": row["secondary_mbtiles"],
         "tertiary_mbtiles": row["tertiary_mbtiles"],
@@ -96,6 +102,26 @@ def _row_to_project(row) -> dict:
         "active": bool(row["active"]),
         "created_at": row["created_at"],
     }
+
+
+# Allowed tile_px values. Capped at 512 in practice (1024 doubles browser
+# memory pressure and PNG encode time without much added value at our 2.5 m/px
+# baseline). The DB CHECK still permits 1024 for future growth.
+ALLOWED_TILE_PX = (64, 128, 256, 512, 1024)
+
+
+def _validate_tile_geometry(tile_px: int, meters_per_pixel: float) -> None:
+    if tile_px not in ALLOWED_TILE_PX:
+        raise HTTPException(400, detail={
+            "error": "invalid_tile_px",
+            "allowed": list(ALLOWED_TILE_PX),
+            "message": f"tile_px deve ser um de {ALLOWED_TILE_PX}",
+        })
+    if not isinstance(meters_per_pixel, (int, float)) or meters_per_pixel <= 0:
+        raise HTTPException(400, detail={
+            "error": "invalid_meters_per_pixel",
+            "message": "meters_per_pixel deve ser > 0",
+        })
 
 
 def get_project(project_id: int) -> dict | None:
@@ -184,6 +210,21 @@ def list_projects_for_user(user_id: int, *, is_admin: bool = False) -> list[dict
     return out
 
 
+def has_any_tile(project_id: int) -> bool:
+    """Cheap existence check used by the admin form to know whether tile
+    geometry (tile_px / meters_per_pixel) is still editable. Not cached:
+    the result flips the moment a tile is inserted, and tile inserts don't
+    invalidate the project cache."""
+    conn = connect()
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM tiles WHERE project_id=? LIMIT 1", (project_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    return bool(row)
+
+
 def get_membership_role(project_id: int, user_id: int) -> str | None:
     """Returns the user's role inside the project, or None if not a member."""
     conn = connect()
@@ -259,6 +300,7 @@ def create_project(
     *, name: str, description: str = "",
     kind: str = "raster", topology_required: bool = False,
     mask_complete_required: bool = True,
+    tile_px: int = 256, meters_per_pixel: float = 2.5,
     primary_mbtiles: str, secondary_mbtiles: str | None = None,
     tertiary_mbtiles: str | None = None,
     ref_mask_primary_mbtiles: str | None = None,
@@ -272,6 +314,7 @@ def create_project(
         raise HTTPException(400, detail={"error": "invalid_name"})
     if kind not in ("raster", "vector"):
         raise HTTPException(400, detail={"error": "invalid_kind"})
+    _validate_tile_geometry(tile_px, meters_per_pixel)
     # Mutual exclusion: raster expects classes, vector expects attributes.
     # Mixing is rejected so a payload with both never silently picks one.
     if kind == "raster":
@@ -305,12 +348,14 @@ def create_project(
             raise HTTPException(409, detail={"error": "name_taken"})
         conn.execute(
             """INSERT INTO projects(name, description, kind, topology_required,
-               mask_complete_required, primary_mbtiles, secondary_mbtiles,
+               mask_complete_required, tile_px, meters_per_pixel,
+               primary_mbtiles, secondary_mbtiles,
                tertiary_mbtiles, ref_mask_primary_mbtiles, ref_mask_secondary_mbtiles,
                active, created_by, created_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,1,?,?)""",
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)""",
             (name, description, kind, 1 if topology_required else 0,
              1 if mask_complete_required else 0,
+             int(tile_px), float(meters_per_pixel),
              primary_mbtiles, secondary_mbtiles or None, tertiary_mbtiles or None,
              ref_mask_primary_mbtiles or None, ref_mask_secondary_mbtiles or None,
              created_by, now_iso()),
@@ -397,14 +442,17 @@ def clone_project(source_id: int, *, new_name: str | None, by_user: int) -> dict
             raise HTTPException(409, detail={"error": "name_taken"})
         conn.execute(
             """INSERT INTO projects(name, description, kind, topology_required,
-               mask_complete_required, primary_mbtiles, secondary_mbtiles,
+               mask_complete_required, tile_px, meters_per_pixel,
+               primary_mbtiles, secondary_mbtiles,
                tertiary_mbtiles, ref_mask_primary_mbtiles, ref_mask_secondary_mbtiles,
                active, created_by, created_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,1,?,?)""",
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)""",
             (name, source["description"],
              source.get("kind", "raster"),
              1 if source.get("topology_required") else 0,
              1 if source["mask_complete_required"] else 0,
+             int(source.get("tile_px", 256)),
+             float(source.get("meters_per_pixel", 2.5)),
              source["primary_mbtiles"], source["secondary_mbtiles"],
              source["tertiary_mbtiles"], source["ref_mask_primary_mbtiles"],
              source["ref_mask_secondary_mbtiles"],
@@ -439,13 +487,22 @@ def update_project(project_id: int, *, fields: dict, updated_by: int) -> dict:
     or recreate to switch kinds."""
     cols_allowed = {
         "name", "description", "mask_complete_required", "active",
-        "topology_required",
+        "topology_required", "tile_px", "meters_per_pixel",
         "primary_mbtiles", "secondary_mbtiles", "tertiary_mbtiles",
         "ref_mask_primary_mbtiles", "ref_mask_secondary_mbtiles",
     }
     bad = set(fields) - cols_allowed
     if bad:
         raise HTTPException(400, detail={"error": "unknown_fields", "fields": sorted(bad)})
+    geometry_changing = "tile_px" in fields or "meters_per_pixel" in fields
+    if geometry_changing:
+        # Validate against the merged values (caller may patch only one).
+        current = get_project(project_id)
+        if not current:
+            raise HTTPException(404, detail={"error": "project_not_found"})
+        new_px = int(fields.get("tile_px", current["tile_px"]))
+        new_mpp = float(fields.get("meters_per_pixel", current["meters_per_pixel"]))
+        _validate_tile_geometry(new_px, new_mpp)
     sets, params = [], []
     if "primary_mbtiles" in fields:
         _validate_layer_path(fields["primary_mbtiles"], required=True)
@@ -456,6 +513,10 @@ def update_project(project_id: int, *, fields: dict, updated_by: int) -> dict:
     for k, v in fields.items():
         if k in ("mask_complete_required", "active", "topology_required"):
             v = 1 if v else 0
+        if k == "tile_px":
+            v = int(v)
+        elif k == "meters_per_pixel":
+            v = float(v)
         if k in _ALLOWED_LAYER_FIELDS and v == "":
             v = None
         sets.append(f"{k}=?")
@@ -467,6 +528,20 @@ def update_project(project_id: int, *, fields: dict, updated_by: int) -> dict:
         row = conn.execute("SELECT id FROM projects WHERE id=?", (project_id,)).fetchone()
         if not row:
             raise HTTPException(404, detail={"error": "project_not_found"})
+        if geometry_changing:
+            # Existing tile bytes encode the original tile_px²; changing it
+            # would corrupt every mask body. Ground bbox is also baked into
+            # tiles.bbox_*, so meters_per_pixel changes would mean re-importing.
+            tile_count = conn.execute(
+                "SELECT COUNT(*) c FROM tiles WHERE project_id=?", (project_id,)
+            ).fetchone()["c"]
+            if tile_count:
+                raise HTTPException(409, detail={
+                    "error": "tile_geometry_locked",
+                    "tile_count": tile_count,
+                    "message": ("tile_px e meters_per_pixel só podem ser alterados "
+                                "antes do projeto receber tiles."),
+                })
         if "name" in fields:
             taken = conn.execute(
                 "SELECT 1 FROM projects WHERE name=? AND id!=?",

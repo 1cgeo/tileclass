@@ -1,38 +1,38 @@
 """Operator-facing tile endpoints: queue, resume, classify/review, problem,
 pause/resume, history, image. The mask-body helpers are local since only
-operator-side mutations carry a 65536-byte payload."""
+operator-side mutations carry a tile_px²-byte payload."""
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response
 
 from .. import admin_service, auth, project_service, tile_service
-from ..mask_utils import PIXELS
 from ..models import ReportProblemIn, TileOut
 
 router = APIRouter(prefix="/api", tags=["tiles"])
 
 
-async def _read_mask_body(request: Request) -> bytes:
-    """Validate Content-Length + read raw 65536-byte mask body."""
+async def _read_mask_body(request: Request, expected_pixels: int) -> bytes:
+    """Validate Content-Length + read a raw `expected_pixels`-byte mask body."""
     cl = request.headers.get("content-length")
     if cl is not None:
         try:
             cl_int = int(cl)
         except ValueError:
             raise HTTPException(400, "invalid content-length")
-        if cl_int > PIXELS:
+        if cl_int > expected_pixels:
             raise HTTPException(413, "mask body too large")
     raw = await request.body()
-    if len(raw) != PIXELS:
+    if len(raw) != expected_pixels:
         raise HTTPException(
             422,
-            detail={"error": "invalid_mask_size", "expected": PIXELS, "got": len(raw)},
+            detail={"error": "invalid_mask_size",
+                    "expected": expected_pixels, "got": len(raw)},
         )
     return raw
 
 
 async def _read_body_for_kind(request: Request, tile_id: int) -> bytes:
-    """Pick the right body reader by the project's kind. Raster tiles still
-    expect 65536 raw bytes; vector tiles accept any well-formed body and
-    push validation deeper into tile_service."""
+    """Pick the right body reader by the project's kind. Raster tiles expect
+    exactly tile_px**2 raw bytes (the project's configured size); vector tiles
+    accept any well-formed body and push validation deeper into tile_service."""
     proj = tile_service.project_for_tile(tile_id)
     if proj.get("kind") == "vector":
         # Light cap; tile_service._submit_vector enforces the real bound.
@@ -40,7 +40,8 @@ async def _read_body_for_kind(request: Request, tile_id: int) -> bytes:
         if cl and cl.isdigit() and int(cl) > 1_500_000:
             raise HTTPException(413, "vector body too large")
         return await request.body()
-    return await _read_mask_body(request)
+    tile_px = int(proj.get("tile_px", 256))
+    return await _read_mask_body(request, tile_px * tile_px)
 
 
 def _expected_version(request: Request) -> int | None:

@@ -41,7 +41,8 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from backend.database import connect
-from backend.mask_utils import decode_mask, TILE_SIZE
+from backend.mask_utils import decode_mask
+from backend import project_service
 
 
 # TileClass class IDs (1..6) → EDGV training IDs (0..5). 255 (NODATA) and
@@ -62,16 +63,17 @@ STATUS_FILTERS = {
 }
 
 
-def _write_geotiff(out: Path, arr: np.ndarray, bbox: tuple[float, float, float, float]) -> None:
+def _write_geotiff(out: Path, arr: np.ndarray, bbox: tuple[float, float, float, float],
+                   tile_px: int) -> None:
     import rasterio
     from rasterio.transform import from_bounds
 
     west, south, east, north = bbox
-    transform = from_bounds(west, south, east, north, TILE_SIZE, TILE_SIZE)
+    transform = from_bounds(west, south, east, north, tile_px, tile_px)
     with rasterio.open(
         out, "w",
         driver="GTiff",
-        height=TILE_SIZE, width=TILE_SIZE,
+        height=tile_px, width=tile_px,
         count=1, dtype="uint8",
         crs="EPSG:4326",
         transform=transform,
@@ -115,9 +117,9 @@ def _select_rows(statuses: tuple[str, ...], project_id: int | None) -> list:
         conn.close()
 
 
-def _decode_tile(row, raw: bool) -> np.ndarray:
-    raw_bytes = decode_mask(row["data_png"])
-    arr = np.frombuffer(raw_bytes, dtype=np.uint8).reshape(TILE_SIZE, TILE_SIZE).copy()
+def _decode_tile(row, raw: bool, tile_px: int) -> np.ndarray:
+    raw_bytes = decode_mask(row["data_png"], tile_px)
+    arr = np.frombuffer(raw_bytes, dtype=np.uint8).reshape(tile_px, tile_px).copy()
     if not raw:
         arr = EDGV_REMAP_LUT[arr]
     return arr
@@ -188,16 +190,26 @@ def main() -> None:
         conn.close()
 
     rows = _select_rows(statuses, project_id)
+    # tile_px varies per project; cache lookups so we hit the DB once per project.
+    px_by_project: dict[int, int] = {}
+
+    def _px_for(pid: int) -> int:
+        if pid not in px_by_project:
+            proj = project_service.get_project(pid) or {}
+            px_by_project[pid] = int(proj.get("tile_px", 256))
+        return px_by_project[pid]
+
     paths: list[Path] = []
     with manifest_path.open("w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(MANIFEST_HEADER)
         for r in rows:
-            arr = _decode_tile(r, args.raw)
+            tile_px = _px_for(r["project_id"])
+            arr = _decode_tile(r, args.raw, tile_px)
             fname = f"gt_{r['name']}.tif"
             out = out_dir / fname
             _write_geotiff(out, arr, (r["bbox_west"], r["bbox_south"],
-                                      r["bbox_east"], r["bbox_north"]))
+                                      r["bbox_east"], r["bbox_north"]), tile_px)
             paths.append(out)
             w.writerow(_manifest_row(fname, r))
 

@@ -28,18 +28,20 @@ from rasterio.transform import from_bounds
 from rasterio.warp import reproject, Resampling
 
 from backend.database import init_db, connect
-from backend.geo import bbox_from_center, TILE_PX, TILE_METERS
+from backend.geo import bbox_from_center
 from backend.mask_utils import encode_mask, validate_submission
+from backend import project_service
 
 
 def render_seed_from_bdf(
     lat: float, lon: float, bdf_argmax_path: Path,
+    *, tile_px: int, tile_meters: float,
 ) -> tuple[bytes, tuple[float, float, float, float], dict]:
-    """Reamostra o BDF para 256×256 cobrindo a bbox geodésica do tile centrada
-    em (lat, lon). Retorna (raw_bytes, bbox, info)."""
-    west, south, east, north = bbox_from_center(lat, lon)
-    target_transform = from_bounds(west, south, east, north, TILE_PX, TILE_PX)
-    target = np.zeros((TILE_PX, TILE_PX), dtype=np.uint8)
+    """Reamostra o BDF para tile_px×tile_px cobrindo a bbox geodésica do tile
+    centrada em (lat, lon). Retorna (raw_bytes, bbox, info)."""
+    west, south, east, north = bbox_from_center(lat, lon, tile_meters)
+    target_transform = from_bounds(west, south, east, north, tile_px, tile_px)
+    target = np.zeros((tile_px, tile_px), dtype=np.uint8)
 
     with rasterio.open(bdf_argmax_path) as src:
         # usa o CRS do src direto (já é EPSG:4326) — evita lookup do PROJ
@@ -99,6 +101,12 @@ def main():
         conn = None
         project_id = None
 
+    proj = project_service.get_project(project_id) if project_id else {}
+    proj = proj or {}
+    tile_px = int(proj.get("tile_px", 256))
+    tile_meters = float(proj.get("tile_meters", tile_px * float(proj.get("meters_per_pixel", 2.5))))
+    pixels = tile_px * tile_px
+
     inserted = skipped = errors = 0
     try:
         for i, row in enumerate(rows, 1):
@@ -109,10 +117,12 @@ def main():
             if not arg_path.exists():
                 print(f"  [{i}/{len(rows)}] {name}  ERRO: {arg_path.name} não existe")
                 errors += 1; continue
-            raw, bbox, info = render_seed_from_bdf(lat, lon, arg_path)
-            png = encode_mask(raw)
+            raw, bbox, info = render_seed_from_bdf(
+                lat, lon, arg_path, tile_px=tile_px, tile_meters=tile_meters,
+            )
+            png = encode_mask(raw, tile_px)
             ncls = len(info["class_counts"])
-            print(f"  [{i}/{len(rows)}] {name}  cls={ncls}  fill={info['n_filled']:>5}/65536"
+            print(f"  [{i}/{len(rows)}] {name}  cls={ncls}  fill={info['n_filled']:>5}/{pixels}"
                   f"  classes={info['class_counts']}")
             if args.dry_run:
                 continue

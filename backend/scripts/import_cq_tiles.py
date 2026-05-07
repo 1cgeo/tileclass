@@ -39,28 +39,29 @@ from rasterio.warp import reproject, Resampling
 from rasterio.crs import CRS
 
 from backend.database import init_db, connect
-from backend.geo import bbox_from_center, TILE_PX
+from backend.geo import bbox_from_center
 from backend.mask_utils import encode_mask, validate_submission
 from backend.tile_grid import force_crs_3857
+from backend import project_service
 
 NODATA = 255
 DEFAULT_RAW_DIR = Path(r"C:/Users/diniz/OneDrive/Desktop/Desenvolvimento/treinamento_6c/teste/teste_masks")
 
 
-def empty_seed() -> bytes:
-    """65536 bytes de nodata (255) — máscara vazia."""
-    return bytes(bytearray([NODATA]) * (TILE_PX * TILE_PX))
+def empty_seed(tile_px: int) -> bytes:
+    """tile_px**2 bytes de nodata (255) — máscara vazia."""
+    return bytes(bytearray([NODATA]) * (tile_px * tile_px))
 
 
 def render_seed_from_raw_dsg(stem: str, bbox: tuple[float, float, float, float],
-                             raw_dir: Path) -> bytes:
-    """Reamostra o raw DSG (2.39m EPSG:3857) pra 256×256 cobrindo a bbox WGS84."""
+                             raw_dir: Path, tile_px: int) -> bytes:
+    """Reamostra o raw DSG (2.39m EPSG:3857) pra tile_px×tile_px cobrindo a bbox WGS84."""
     raw_path = raw_dir / f"mask_{stem}.tif"
     if not raw_path.exists():
-        return empty_seed()
+        return empty_seed(tile_px)
     west, south, east, north = bbox
-    target_transform = from_bounds(west, south, east, north, TILE_PX, TILE_PX)
-    target = np.full((TILE_PX, TILE_PX), NODATA, dtype=np.uint8)
+    target_transform = from_bounds(west, south, east, north, tile_px, tile_px)
+    target = np.full((tile_px, tile_px), NODATA, dtype=np.uint8)
     with rasterio.open(raw_path) as src:
         reproject(
             source=rasterio.band(src, 1),
@@ -125,6 +126,12 @@ def main():
         conn = None
         project_id = None
 
+    proj = project_service.get_project(project_id) if project_id else {}
+    proj = proj or {}
+    tile_px = int(proj.get("tile_px", 256))
+    tile_meters = float(proj.get("tile_meters", tile_px * float(proj.get("meters_per_pixel", 2.5))))
+    pixels = tile_px * tile_px
+
     inserted = skipped = errors = 0
     try:
         for i, row in enumerate(gdf.itertuples(index=False), 1):
@@ -132,16 +139,16 @@ def main():
             try:
                 centroid = row_d["geometry"].centroid
                 lon, lat = centroid.x, centroid.y
-                bbox = bbox_from_center(lat, lon)
+                bbox = bbox_from_center(lat, lon, tile_meters)
                 name = tile_name(row_d)
                 if args.seed == "empty":
-                    raw = empty_seed()
+                    raw = empty_seed(tile_px)
                 else:
-                    raw = render_seed_from_raw_dsg(row_d["stem"], bbox, args.raw_dir)
-                png = encode_mask(raw)
-                n_filled = (TILE_PX * TILE_PX) - sum(1 for b in raw if b == NODATA)
+                    raw = render_seed_from_raw_dsg(row_d["stem"], bbox, args.raw_dir, tile_px)
+                png = encode_mask(raw, tile_px)
+                n_filled = pixels - sum(1 for b in raw if b == NODATA)
                 if i <= 5 or i % 50 == 0 or i == len(gdf):
-                    print(f"  [{i}/{len(gdf)}] {name[:70]}...  fill={n_filled}/65536")
+                    print(f"  [{i}/{len(gdf)}] {name[:70]}...  fill={n_filled}/{pixels}")
                 if args.dry_run:
                     continue
                 if insert_tile_dedup(conn, project_id, name, bbox, png):

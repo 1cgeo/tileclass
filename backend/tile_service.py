@@ -416,7 +416,11 @@ def get_tile_image(tile_id: int) -> bytes | None:
         conn.close()
     if not row:
         return None
-    return row["data_png"] or empty_mask_png()
+    if row["data_png"]:
+        return row["data_png"]
+    proj = project_service.get_project(row["project_id"]) if row["project_id"] else None
+    tile_px = int((proj or {}).get("tile_px", 256))
+    return empty_mask_png(tile_px)
 
 
 def get_tile_geojson(tile_id: int) -> str | None:
@@ -490,18 +494,21 @@ def _submit_raster(tile_id: int, user_id: int, raw_mask: bytes,
                    proj: dict, expected_version: int | None) -> dict:
     allowed = [c["id"] for c in proj["classes"]]
     require_complete = proj["mask_complete_required"]
+    tile_px = int(proj.get("tile_px", 256))
     try:
         ok, missing = validate_submission(
             raw_mask, allowed_ids=allowed, require_complete=require_complete,
+            tile_px=tile_px,
         )
     except ValueError as e:
         raise HTTPException(400, detail={"error": "invalid_mask", "message": str(e)})
     if not ok:
         raise HTTPException(422, detail={"error": "unfilled_pixels", "missing": missing})
-    png = encode_mask(raw_mask)
-    # Encoded PNG of a 256x256 8-bit mask never exceeds ~100KB; guard against
-    # unexpected blowup so a bug cannot inflate the DB.
-    if len(png) > 200_000:
+    png = encode_mask(raw_mask, tile_px)
+    # Single-band 8-bit PNG: worst-case size scales with tile_px**2. Cap at
+    # 4 bytes/pixel as a safety margin (real masks compress to < 0.5 bpp).
+    max_png = max(200_000, 4 * tile_px * tile_px)
+    if len(png) > max_png:
         raise HTTPException(413, detail={"error": "mask_too_large"})
 
     with transaction("IMMEDIATE") as conn:
@@ -660,6 +667,8 @@ def report_problem(tile_id: int, user_id: int, note: str) -> dict:
     note = (note or "").strip()
     if len(note) > _MAX_PROBLEM_NOTE:
         note = note[:_MAX_PROBLEM_NOTE]
+    proj = project_for_tile(tile_id)
+    tile_px = int(proj.get("tile_px", 256))
     with transaction("IMMEDIATE") as conn:
         row = conn.execute("SELECT status, assigned_to FROM tiles WHERE id=?", (tile_id,)).fetchone()
         if not row:
@@ -672,7 +681,7 @@ def report_problem(tile_id: int, user_id: int, note: str) -> dict:
             """UPDATE tiles SET status='problem', problem_note=?, data_png=?,
                assigned_to=NULL, paused_at=NULL, class_counts=NULL,
                data_geojson=NULL, feature_count=NULL WHERE id=?""",
-            (note, empty_mask_png(), tile_id),
+            (note, empty_mask_png(tile_px), tile_id),
         )
         log_action(conn, user_id, tile_id, "report_problem", note)
     # Tile leaves the visible status set ('problem'), and its mask was wiped.
@@ -695,12 +704,14 @@ def pause_tile(tile_id: int, user_id: int, body: bytes,
 def _pause_raster(tile_id: int, user_id: int, raw_mask: bytes,
                   proj: dict, expected_version: int | None) -> dict:
     allowed = [c["id"] for c in proj["classes"]]
+    tile_px = int(proj.get("tile_px", 256))
     try:
-        validate_partial(raw_mask, allowed_ids=allowed)
+        validate_partial(raw_mask, allowed_ids=allowed, tile_px=tile_px)
     except ValueError as e:
         raise HTTPException(400, detail={"error": "invalid_mask", "message": str(e)})
-    png = encode_mask(raw_mask)
-    if len(png) > 200_000:
+    png = encode_mask(raw_mask, tile_px)
+    max_png = max(200_000, 4 * tile_px * tile_px)
+    if len(png) > max_png:
         raise HTTPException(413, detail={"error": "mask_too_large"})
 
     with transaction("IMMEDIATE") as conn:

@@ -1,9 +1,9 @@
 # TileClass
 
-Aplicação web para classificação pixel-a-pixel de tiles de satélite (256×256 @ **2.5 m/pixel** = **640 m × 640 m** no chão).
+Aplicação web para classificação pixel-a-pixel de tiles de satélite. **Geometria do tile é por projeto** (`projects.tile_px` × `projects.meters_per_pixel`). Default herdado: 256×256 px @ 2.5 m/pixel = 640 m × 640 m no chão.
 Backend FastAPI + SQLite; frontend Vanilla JS com Canvas HTML5. Imagem de fundo via mbtiles XYZ por projeto.
 
-**Projetos:** classes, paleta de cores, mbtiles (imagem primária/secundária/terciária + duas máscaras de referência) e a flag `mask_complete_required` vivem por projeto. Tiles, membership de operador/revisor e o dashboard são todos escopados por `project_id`. O `config.yaml` é seed para o projeto "default" criado no primeiro `init_db()`; depois disso a fonte de verdade são as tabelas `projects/project_classes/project_members`.
+**Projetos:** classes, paleta de cores, mbtiles (imagem primária/secundária/terciária + duas máscaras de referência), a flag `mask_complete_required` e a geometria do tile (`tile_px`, `meters_per_pixel`) vivem por projeto. Tiles, membership de operador/revisor e o dashboard são todos escopados por `project_id`. O `config.yaml` é seed para o projeto "default" criado no primeiro `init_db()`; depois disso a fonte de verdade são as tabelas `projects/project_classes/project_members`.
 
 Spec completa: `docs/requirements.md`. Em caso de dúvida, o requirements manda.
 
@@ -192,11 +192,11 @@ Projetos têm `kind ∈ {raster, vector}` (default raster, **imutável após cri
 
 ## Invariantes do domínio
 
-- **Geometria do tile (backend/geo.py):** `TILE_PX=256`, `METERS_PER_PX=2.5`, `TILE_METERS=640`. Cada tile é definido **pelo centro geodésico**. `bbox_from_center(lat, lon)` usa `pyproj.Geod` (WGS84) para calcular ±320 m em cada direção cardeal — precisão < 1 mm em qualquer latitude. Schema de `tiles` tem apenas `bbox_*`; zoom/tile_x/tile_y/context_tiles foram removidos.
-- **Adjacência sem gap:** `offset_center(lat, lon, dx, dy)` caminha `dx*640m` e `dy*640m` por geodésica, garantindo que tiles vizinhos do `--block NxN` compartilhem arestas exatamente (gap < 1 mm, validado por teste).
-- **Fonte de verdade da máscara:** `Uint8Array(65536)` no cliente. Valores válidos: IDs definidos em `project_classes[project_id]` + `255` (não preenchido). `mask_utils.validate_partial(raw, allowed_ids)` recebe os IDs explicitamente; `validate_submission(raw, allowed_ids, require_complete=...)` usa o `mask_complete_required` do projeto para decidir se rejeita 255. O canvas é apenas visualização.
-- **PNG do backend:** banda única (grayscale "L"), 8 bits, 256×256, sem compressão com perda. Pillow faz a conversão `bytes ↔ PNG`.
-- **Protocolo wire:** frontend envia **raw bytes** (Uint8Array, 65536 bytes) no body do classify/review; nunca PNG. Backend converte.
+- **Geometria do tile (per-projeto):** `projects.tile_px ∈ {64, 128, 256, 512, 1024}` × `projects.meters_per_pixel > 0`; `tile_meters = tile_px × meters_per_pixel`. Default seed = 256 × 2.5 = 640 m. Cada tile é definido **pelo centro geodésico**; `geo.bbox_from_center(lat, lon, tile_meters)` usa `pyproj.Geod` (WGS84) para calcular ±tile_meters/2 em cada direção cardeal. Schema de `tiles` tem apenas `bbox_*`; zoom/tile_x/tile_y/context_tiles foram removidos. **Imutável após o primeiro tile** — `update_project` rejeita mudanças com 409 `tile_geometry_locked`. Backend e scripts (import/export) lêem da row do projeto via `project_service.get_project()`.
+- **Adjacência sem gap:** `offset_center(lat, lon, dx, dy, tile_meters)` caminha `dx*tile_meters` e `dy*tile_meters` por geodésica, garantindo que tiles vizinhos do `--block NxN` compartilhem arestas exatamente (gap < 1 mm, validado por teste).
+- **Fonte de verdade da máscara:** `Uint8Array(tile_px²)` no cliente (re-alocado em `setTileGeometry()` no editor.js). Valores válidos: IDs definidos em `project_classes[project_id]` + `255` (não preenchido). `mask_utils.validate_partial(raw, allowed_ids, tile_px=...)` recebe os IDs e o tamanho explicitamente; `validate_submission(...)` usa o `mask_complete_required` do projeto para decidir se rejeita 255. O canvas é apenas visualização.
+- **PNG do backend:** banda única (grayscale "L"), 8 bits, `tile_px × tile_px`, sem compressão com perda. Pillow faz a conversão `bytes ↔ PNG`. `encode_mask`/`decode_mask` recebem `tile_px` explicitamente.
+- **Protocolo wire:** frontend envia **raw bytes** (Uint8Array, `tile_px²` bytes) no body do classify/review; nunca PNG. Backend resolve `tile_px` via `project_for_tile()` antes de validar tamanho do body.
 - **Submissão:** rejeitar se houver `255` no array. Resposta de erro traz a contagem.
 - **Máquina de estados de tile:** `pending → in_progress → classified → in_review → reviewed`; qualquer estado `→ problem`; `problem → pending` e `reviewed → in_review` são transições de admin. Admin pode também bloquear via `pending|classified|reviewed → blocked` (guardando o status original em `blocked_from`) e desbloquear via `blocked → <blocked_from>`. `in_progress`/`in_review`/`problem` **não podem** ser bloqueados. Tiles bloqueados são naturalmente excluídos das filas porque os SELECTs de `/next` filtram por `status='pending'` ou `'classified'`.
 - **Export GeoTIFF:** `backend/scripts/export_tiles.py` usa `rasterio.transform.from_bounds(west, south, east, north, 256, 256)` com `crs=EPSG:4326`. Combinado com a bbox de `bbox_from_center`, o pixel resultante é exatamente 2.5 m na latitude do centro (validado para 20 pontos mundiais em `test_raster_worldwide.py`). Detalhes do contrato (status filter, remap EDGV, manifest) na seção **GT Extractor** abaixo.

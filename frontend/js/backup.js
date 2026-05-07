@@ -4,6 +4,9 @@
 // server blob when the user has unsynced work (F5, browser crash).
 
 export const LS_BACKUP_KEY = "tileclass_backup";
+// Default tile pixel count (legacy 256×256). Per-project sizes are passed
+// explicitly to loadBackup so the editor can validate against the current
+// project's tile_px instead of this fallback.
 export const PIXELS = 65536;
 
 function uint8ToBase64(arr) {
@@ -23,16 +26,17 @@ export function saveBackup(tileId, mask) {
 }
 
 // Returns the restored Uint8Array if a backup exists for `currentTileId` and
-// decodes to PIXELS bytes; null otherwise (missing, wrong tile, corrupt JSON,
-// wrong size).
-export function loadBackup(currentTileId) {
+// decodes to `expectedPixels` bytes; null otherwise (missing, wrong tile,
+// corrupt JSON, wrong size). Defaults to legacy PIXELS=65536 so existing
+// tests keep working unchanged.
+export function loadBackup(currentTileId, expectedPixels = PIXELS) {
     try {
         const raw = localStorage.getItem(LS_BACKUP_KEY);
         if (!raw) return null;
         const b = JSON.parse(raw);
         if (b.tileId !== currentTileId || !b.mask) return null;
         const restored = Uint8Array.from(atob(b.mask), c => c.charCodeAt(0));
-        if (restored.length !== PIXELS) return null;
+        if (restored.length !== expectedPixels) return null;
         return restored;
     } catch {
         return null;

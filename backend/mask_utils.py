@@ -1,52 +1,71 @@
-"""Encode/decode of 256x256 single-band PNG masks stored in SQLite."""
+"""Encode/decode of single-band PNG masks stored in SQLite. Tile pixel size
+is per-project (projects.tile_px); the historical 256×256 lives on as
+DEFAULT_TILE_SIZE for callers that haven't been threaded with a project."""
 import io
 import numpy as np
 from PIL import Image
 
-TILE_SIZE = 256
-PIXELS = TILE_SIZE * TILE_SIZE  # 65536
+# Default geometry: matches the seed/legacy project. Modules importing
+# TILE_SIZE/PIXELS for that purpose still get sensible values; per-tile work
+# should pass tile_px explicitly via the helpers below.
+DEFAULT_TILE_SIZE = 256
+DEFAULT_PIXELS = DEFAULT_TILE_SIZE * DEFAULT_TILE_SIZE  # 65536
+
+# Backward-compatible aliases. New code should not depend on these — they are
+# constants only at the seed-default level.
+TILE_SIZE = DEFAULT_TILE_SIZE
+PIXELS = DEFAULT_PIXELS
 
 
-def encode_mask(raw: bytes) -> bytes:
-    """Convert raw 65536-byte array to single-band PNG bytes."""
-    if len(raw) != PIXELS:
-        raise ValueError(f"expected {PIXELS} bytes, got {len(raw)}")
-    arr = np.frombuffer(raw, dtype=np.uint8).reshape(TILE_SIZE, TILE_SIZE)
+def pixels_for(tile_px: int) -> int:
+    """Body length expected for a tile of side `tile_px` pixels."""
+    return tile_px * tile_px
+
+
+def encode_mask(raw: bytes, tile_px: int = DEFAULT_TILE_SIZE) -> bytes:
+    """Convert a raw `tile_px**2`-byte array to single-band PNG bytes."""
+    expected = pixels_for(tile_px)
+    if len(raw) != expected:
+        raise ValueError(f"expected {expected} bytes, got {len(raw)}")
+    arr = np.frombuffer(raw, dtype=np.uint8).reshape(tile_px, tile_px)
     img = Image.fromarray(arr, mode="L")
     buf = io.BytesIO()
     img.save(buf, format="PNG", optimize=True)
     return buf.getvalue()
 
 
-def decode_mask(png_bytes: bytes) -> bytes:
-    """Convert PNG blob back to raw 65536-byte array."""
+def decode_mask(png_bytes: bytes, tile_px: int = DEFAULT_TILE_SIZE) -> bytes:
+    """Convert PNG blob back to raw `tile_px**2`-byte array."""
     img = Image.open(io.BytesIO(png_bytes)).convert("L")
-    if img.size != (TILE_SIZE, TILE_SIZE):
-        raise ValueError(f"invalid tile size {img.size}")
+    if img.size != (tile_px, tile_px):
+        raise ValueError(f"invalid tile size {img.size}, expected ({tile_px},{tile_px})")
     arr = np.array(img, dtype=np.uint8)
-    if arr.size != PIXELS:
-        raise ValueError(f"decoded array size {arr.size}, expected {PIXELS}")
+    expected = pixels_for(tile_px)
+    if arr.size != expected:
+        raise ValueError(f"decoded array size {arr.size}, expected {expected}")
     return arr.tobytes()
 
 
-def empty_mask_png() -> bytes:
-    """PNG with all 65536 pixels set to 255 (unfilled)."""
-    arr = np.full((TILE_SIZE, TILE_SIZE), 255, dtype=np.uint8)
+def empty_mask_png(tile_px: int = DEFAULT_TILE_SIZE) -> bytes:
+    """PNG with all `tile_px**2` pixels set to 255 (unfilled)."""
+    arr = np.full((tile_px, tile_px), 255, dtype=np.uint8)
     img = Image.fromarray(arr, mode="L")
     buf = io.BytesIO()
     img.save(buf, format="PNG", optimize=True)
     return buf.getvalue()
 
 
-def validate_partial(raw: bytes, allowed_ids: list[int] | None = None) -> int:
+def validate_partial(raw: bytes, allowed_ids: list[int] | None = None,
+                     *, tile_px: int = DEFAULT_TILE_SIZE) -> int:
     """Validate size and value range only (255 always allowed). Returns
     missing count (pixels with value 255).
 
     `allowed_ids` is the list of class ids the project accepts. When omitted,
     falls back to the legacy default-project lookup so callers that have
     not yet been migrated keep working."""
-    if len(raw) != PIXELS:
-        raise ValueError(f"expected {PIXELS} bytes, got {len(raw)}")
+    expected = pixels_for(tile_px)
+    if len(raw) != expected:
+        raise ValueError(f"expected {expected} bytes, got {len(raw)}")
     arr = np.frombuffer(raw, dtype=np.uint8)
     if allowed_ids is None:
         allowed_ids = _default_project_class_ids()
@@ -62,12 +81,13 @@ def validate_submission(
     allowed_ids: list[int] | None = None,
     *,
     require_complete: bool = True,
+    tile_px: int = DEFAULT_TILE_SIZE,
 ) -> tuple[bool, int]:
     """Validate size and values. Returns (ok, missing_count).
 
     `require_complete=False` accepts any number of 255 pixels (project-level
     `mask_complete_required` flag); `True` rejects any."""
-    missing = validate_partial(raw, allowed_ids=allowed_ids)
+    missing = validate_partial(raw, allowed_ids=allowed_ids, tile_px=tile_px)
     if not require_complete:
         return True, missing
     return missing == 0, missing

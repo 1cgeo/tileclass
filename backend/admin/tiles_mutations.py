@@ -5,7 +5,7 @@ import json
 
 from fastapi import HTTPException
 
-from .. import mask_tile_service
+from .. import mask_tile_service, project_service
 from ..database import connect, transaction, log_action, now_iso
 from ..mask_utils import empty_mask_png
 
@@ -17,18 +17,44 @@ def _clean_reason(reason: str | None) -> str | None:
     return ((reason or "").strip()[:_MAX_REASON_LEN]) or None
 
 
+# Empty-mask cache keyed by tile_px so reset_many doesn't re-encode the same
+# blank PNG once per tile when a batch shares a project.
+_EMPTY_PNG_CACHE: dict[int, bytes] = {}
+
+
+def _empty_for_tile_px(tile_px: int) -> bytes:
+    cached = _EMPTY_PNG_CACHE.get(tile_px)
+    if cached is None:
+        cached = empty_mask_png(tile_px)
+        _EMPTY_PNG_CACHE[tile_px] = cached
+    return cached
+
+
+def _tile_px_for(conn, tile_id: int) -> int:
+    """Project tile_px for a given tile id (256 if the project is gone)."""
+    row = conn.execute(
+        "SELECT project_id FROM tiles WHERE id=?", (tile_id,)
+    ).fetchone()
+    if not row:
+        return 256
+    proj = project_service.get_project(row["project_id"]) if row["project_id"] else None
+    return int((proj or {}).get("tile_px", 256))
+
+
 def reset_many(tile_ids: list[int], admin_id: int, reason: str | None = None) -> int:
     if not tile_ids:
         return 0
-    empty = empty_mask_png()
     detail = _clean_reason(reason)
     with transaction("IMMEDIATE") as conn:
         for tid in tile_ids:
+            empty = _empty_for_tile_px(_tile_px_for(conn, tid))
             # class_counts cleared too, otherwise the dashboard's
             # class-distribution panel keeps reporting pixels from a mask
-            # that has been wiped.
+            # that has been wiped. data_geojson cleared so a vector tile
+            # round-trips back to an empty FeatureCollection.
             conn.execute(
-                """UPDATE tiles SET status='pending', data_png=?, assigned_to=NULL,
+                """UPDATE tiles SET status='pending', data_png=?, data_geojson=NULL,
+                   feature_count=NULL, assigned_to=NULL,
                    classified_by=NULL, reviewed_by=NULL, classified_at=NULL,
                    reviewed_at=NULL, problem_note=NULL, paused_at=NULL,
                    class_counts=NULL, version=version+1 WHERE id=?""",
@@ -56,15 +82,16 @@ def report_problem_many(tile_ids: list[int], admin_id: int, note: str) -> dict:
         raise HTTPException(400, "note is required")
     if len(note) > 2000:
         note = note[:2000]
-    empty = empty_mask_png()
     affected_ids: list[int] = []
     with transaction("IMMEDIATE") as conn:
         for tid in tile_ids:
             row = conn.execute("SELECT id FROM tiles WHERE id=?", (tid,)).fetchone()
             if not row:
                 continue
+            empty = _empty_for_tile_px(_tile_px_for(conn, tid))
             conn.execute(
                 """UPDATE tiles SET status='problem', problem_note=?, data_png=?,
+                   data_geojson=NULL, feature_count=NULL,
                    assigned_to=NULL, paused_at=NULL, blocked_from=NULL,
                    class_counts=NULL, version=version+1 WHERE id=?""",
                 (note, empty, tid),

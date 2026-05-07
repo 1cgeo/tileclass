@@ -1,10 +1,10 @@
 """CLI: importa tiles a partir de pontos centrais (lat,lon).
 
-Cada tile é sempre 256x256 pixels com 2.5 m/pixel = 640 m × 640 m no chão,
-definido apenas pelo centro geodésico — NÃO usa zoom XYZ. A bbox é calculada
-com pyproj.Geod para que o tamanho em metros seja constante em qualquer
-latitude. Tiles adjacentes (--block) ficam exatamente colados (sem gaps nem
-sobreposição).
+Cada tile cobre tile_px×tile_px pixels com meters_per_pixel m/pixel = tile_meters
+de lado no chão, lendo essas configurações do projeto (defaults: 256 px,
+2.5 m/px → 640 m). O centro geodésico define a bbox via pyproj.Geod para que
+o tamanho em metros seja constante em qualquer latitude. Tiles adjacentes
+(--block) ficam exatamente colados (sem gaps nem sobreposição).
 
 Uso:
     # Um ponto isolado
@@ -25,7 +25,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from backend.database import init_db, connect
 from backend.mask_utils import empty_mask_png
-from backend.geo import bbox_from_center, offset_center, TILE_METERS
+from backend.geo import bbox_from_center, offset_center
+from backend import project_service
 from backend.scripts._common import resolve_project_arg, insert_tile_dedup
 
 
@@ -48,8 +49,8 @@ def _read_points(args) -> list[tuple[float, float, str]]:
 
 
 def _insert_at(conn, project_id: int, name: str, lat_c: float, lon_c: float,
-               empty_png: bytes) -> bool:
-    bbox = bbox_from_center(lat_c, lon_c)
+               empty_png: bytes, tile_meters: float) -> bool:
+    bbox = bbox_from_center(lat_c, lon_c, tile_meters)
     return insert_tile_dedup(conn, project_id, name, bbox, empty_png)
 
 
@@ -74,20 +75,28 @@ def main():
         print("nenhum ponto informado"); sys.exit(1)
 
     init_db()
-    empty_png = empty_mask_png()
     radius = args.block // 2
     inserted = skipped = 0
 
     conn = connect()
     try:
         project_id = resolve_project_arg(conn, args.project)
+        proj = project_service.get_project(project_id) or {}
+        tile_px = int(proj.get("tile_px", 256))
+        tile_meters = float(proj.get("tile_meters",
+                                      tile_px * float(proj.get("meters_per_pixel", 2.5))))
+        # Vector projects don't use data_png, but inserting an empty PNG
+        # keeps the column populated so admin queries see a non-null
+        # placeholder. Vector reset clears it back when needed.
+        empty_png = empty_mask_png(tile_px) if proj.get("kind", "raster") == "raster" else None
         conn.execute("BEGIN")
         for lat, lon, name in pts:
             for dy in range(-radius, radius + 1):
                 for dx in range(-radius, radius + 1):
-                    lat_c, lon_c = offset_center(lat, lon, dx, dy)
+                    lat_c, lon_c = offset_center(lat, lon, dx, dy, tile_meters)
                     tname = name if args.block == 1 else f"{name}_{dx:+d}{dy:+d}"
-                    if _insert_at(conn, project_id, tname, lat_c, lon_c, empty_png):
+                    if _insert_at(conn, project_id, tname, lat_c, lon_c,
+                                   empty_png, tile_meters):
                         inserted += 1
                     else:
                         skipped += 1
@@ -98,7 +107,9 @@ def main():
     finally:
         conn.close()
 
-    print(f"inseridos: {inserted} · já existiam: {skipped} · cada tile = {TILE_METERS:.0f}m × {TILE_METERS:.0f}m")
+    print(f"inseridos: {inserted} · já existiam: {skipped} · "
+          f"cada tile = {tile_meters:.0f}m × {tile_meters:.0f}m "
+          f"({tile_px}×{tile_px} px)")
 
 
 if __name__ == "__main__":

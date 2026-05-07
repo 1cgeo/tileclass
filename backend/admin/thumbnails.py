@@ -10,7 +10,7 @@ from PIL import Image
 
 from .. import mbtiles_service, project_service
 from ..database import connect
-from ..mask_utils import decode_mask, TILE_SIZE, PIXELS
+from ..mask_utils import decode_mask
 
 
 def _tile_row(tile_id: int):
@@ -50,27 +50,29 @@ def tile_thumbnail(tile_id: int, size: int = 128) -> bytes:
     if proj and proj.get("kind") == "vector":
         return _vector_thumbnail(row, proj, size)
     primary = mbtiles_service.get_reader(pid, "primary") if pid else None
+    tile_px = int((proj or {}).get("tile_px", 256))
+    pixels = tile_px * tile_px
     # Missing or corrupt blob renders as the empty (all-255) mask — lut[255]
     # is transparent, so the admin grid shows a blank cell instead of a
     # broken image. Fail-open is the right call: a bad thumbnail is UI noise,
     # not a data-integrity signal the admin needs to act on.
     png = row["data_png"]
     if not png:
-        raw = b"\xff" * PIXELS
+        raw = b"\xff" * pixels
     else:
         try:
-            raw = decode_mask(png)
+            raw = decode_mask(png, tile_px)
         except (ValueError, OSError):
-            raw = b"\xff" * PIXELS
-    if raw.count(b"\xff") == PIXELS and primary is not None and primary.is_open():
+            raw = b"\xff" * pixels
+    if raw.count(b"\xff") == pixels and primary is not None and primary.is_open():
         try:
             return _tile_satellite_png(tile_id, size, row=row)
         except HTTPException:
             pass
-    arr = np.frombuffer(raw, dtype=np.uint8).reshape(TILE_SIZE, TILE_SIZE)
+    arr = np.frombuffer(raw, dtype=np.uint8).reshape(tile_px, tile_px)
     rgba = _project_class_lut(pid)[arr]
     img = Image.fromarray(rgba, mode="RGBA")
-    if size != TILE_SIZE:
+    if size != tile_px:
         img = img.resize((size, size), Image.NEAREST)
     buf = io.BytesIO()
     img.save(buf, format="PNG", optimize=True)
