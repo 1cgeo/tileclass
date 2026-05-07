@@ -21,12 +21,16 @@ def _build_tiles_filter(
     status: str | None = None, user_id: int | None = None,
     date_from: str | None = None, date_to: str | None = None,
     paused: bool | None = None, q: str | None = None,
+    project_id: int | None = None,
 ) -> tuple[str, list]:
     """Compose the shared `WHERE ...` clause used by list_tiles + count_tiles.
     Returns ("" or " WHERE ...", positional args). `prefix` is the table alias
     (e.g. 't.' for the joined SELECT, '' for COUNT(*) over the bare tiles table)."""
     where: list[str] = []
     args: list = []
+    if project_id is not None:
+        where.append(f"{prefix}project_id=?")
+        args.append(project_id)
     if status:
         where.append(f"{prefix}status=?")
         args.append(status)
@@ -77,16 +81,18 @@ def list_tiles(status: str | None = None, user_id: int | None = None,
                date_from: str | None = None, date_to: str | None = None,
                paused: bool | None = None, q: str | None = None,
                sort_by: str | None = None, sort_dir: str | None = None,
-               limit: int = 200, offset: int = 0) -> list[dict]:
+               limit: int = 200, offset: int = 0,
+               project_id: int | None = None) -> list[dict]:
     where_sql, args = _build_tiles_filter(
         prefix="t.", status=status, user_id=user_id,
         date_from=date_from, date_to=date_to, paused=paused, q=q,
+        project_id=project_id,
     )
     order_sql = _build_order_by(sort_by, sort_dir)
     conn = connect()
     try:
         rows = conn.execute(
-            "SELECT t.id, t.name, t.status, t.classified_by, t.reviewed_by, "
+            "SELECT t.id, t.project_id, t.name, t.status, t.classified_by, t.reviewed_by, "
             "t.assigned_to, t.classified_at, t.reviewed_at, t.problem_note, "
             "t.paused_at, "
             "uc.username AS classified_by_username, "
@@ -108,10 +114,12 @@ def list_tiles(status: str | None = None, user_id: int | None = None,
 
 def count_tiles(status: str | None = None, user_id: int | None = None,
                 date_from: str | None = None, date_to: str | None = None,
-                paused: bool | None = None, q: str | None = None) -> int:
+                paused: bool | None = None, q: str | None = None,
+                project_id: int | None = None) -> int:
     where_sql, args = _build_tiles_filter(
         status=status, user_id=user_id,
         date_from=date_from, date_to=date_to, paused=paused, q=q,
+        project_id=project_id,
     )
     conn = connect()
     try:
@@ -121,34 +129,56 @@ def count_tiles(status: str | None = None, user_id: int | None = None,
     return int(row["c"])
 
 
-def list_tiles_map() -> list[dict]:
+def list_tiles_map(project_id: int | None = None) -> list[dict]:
     """Compact tile list for the admin map view: id, name, status and bbox.
     No pagination — the map renders the full dataset as polygons."""
     conn = connect()
     try:
-        rows = conn.execute(
-            "SELECT id, name, status, bbox_west, bbox_south, bbox_east, bbox_north, "
-            "paused_at, blocked_from "
-            "FROM tiles ORDER BY id"
-        ).fetchall()
+        if project_id is None:
+            rows = conn.execute(
+                "SELECT id, project_id, name, status, bbox_west, bbox_south, bbox_east, bbox_north, "
+                "paused_at, blocked_from "
+                "FROM tiles ORDER BY id"
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id, project_id, name, status, bbox_west, bbox_south, bbox_east, bbox_north, "
+                "paused_at, blocked_from "
+                "FROM tiles WHERE project_id=? ORDER BY id",
+                (project_id,),
+            ).fetchall()
     finally:
         conn.close()
     return [dict(r) for r in rows]
 
 
-def list_problems() -> list[dict]:
+def list_problems(project_id: int | None = None) -> list[dict]:
     conn = connect()
     try:
-        rows = conn.execute(
-            """SELECT t.id, t.name, t.problem_note,
-                      (SELECT user_id FROM action_log
-                         WHERE tile_id=t.id AND action='report_problem'
-                         ORDER BY id DESC LIMIT 1) reporter_id,
-                      (SELECT created_at FROM action_log
-                         WHERE tile_id=t.id AND action='report_problem'
-                         ORDER BY id DESC LIMIT 1) reported_at
-               FROM tiles t WHERE t.status='problem' ORDER BY t.id"""
-        ).fetchall()
+        if project_id is None:
+            rows = conn.execute(
+                """SELECT t.id, t.project_id, t.name, t.problem_note,
+                          (SELECT user_id FROM action_log
+                             WHERE tile_id=t.id AND action='report_problem'
+                             ORDER BY id DESC LIMIT 1) reporter_id,
+                          (SELECT created_at FROM action_log
+                             WHERE tile_id=t.id AND action='report_problem'
+                             ORDER BY id DESC LIMIT 1) reported_at
+                   FROM tiles t WHERE t.status='problem' ORDER BY t.id"""
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT t.id, t.project_id, t.name, t.problem_note,
+                          (SELECT user_id FROM action_log
+                             WHERE tile_id=t.id AND action='report_problem'
+                             ORDER BY id DESC LIMIT 1) reporter_id,
+                          (SELECT created_at FROM action_log
+                             WHERE tile_id=t.id AND action='report_problem'
+                             ORDER BY id DESC LIMIT 1) reported_at
+                   FROM tiles t WHERE t.status='problem' AND t.project_id=?
+                   ORDER BY t.id""",
+                (project_id,),
+            ).fetchall()
     finally:
         conn.close()
     return [dict(r) for r in rows]

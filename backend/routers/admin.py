@@ -36,8 +36,8 @@ def _parse_iso_date(value: str, field: str) -> str:
 
 
 @router.get("/dashboard", response_model=DashboardOut)
-def admin_dashboard():
-    return admin_service.dashboard()
+def admin_dashboard(project_id: int | None = Query(default=None, ge=1)):
+    return admin_service.dashboard(project_id=project_id)
 
 
 _TILE_SORT_KEYS = {
@@ -56,7 +56,8 @@ def admin_tiles(status: TileStatus | None = None,
                 sort_by: str | None = Query(default=None, max_length=64),
                 sort_dir: str | None = Query(default=None, pattern="^(asc|desc)$"),
                 limit: int = Query(default=200, ge=1, le=1000),
-                offset: int = Query(default=0, ge=0)):
+                offset: int = Query(default=0, ge=0),
+                project_id: int | None = Query(default=None, ge=1)):
     if date_from:
         date_from = _parse_iso_date(date_from, "date_from")
     if date_to:
@@ -68,11 +69,11 @@ def admin_tiles(status: TileStatus | None = None,
     items = admin_service.list_tiles(
         status=status_v, user_id=user_id, date_from=date_from, date_to=date_to,
         paused=paused, q=q_norm, sort_by=sort_by, sort_dir=sort_dir,
-        limit=limit, offset=offset,
+        limit=limit, offset=offset, project_id=project_id,
     )
     total = admin_service.count_tiles(
         status=status_v, user_id=user_id, date_from=date_from, date_to=date_to,
-        paused=paused, q=q_norm,
+        paused=paused, q=q_norm, project_id=project_id,
     )
     # Pagination metadata in headers keeps the JSON body a plain list so
     # existing clients/tests that index into it keep working.
@@ -100,13 +101,13 @@ def admin_tile_satellite_thumbnail(tile_id: int = Path(ge=1),
 
 
 @router.get("/tiles/problems")
-def admin_problems():
-    return admin_service.list_problems()
+def admin_problems(project_id: int | None = Query(default=None, ge=1)):
+    return admin_service.list_problems(project_id=project_id)
 
 
 @router.get("/tiles/map")
-def admin_tiles_map():
-    return admin_service.list_tiles_map()
+def admin_tiles_map(project_id: int | None = Query(default=None, ge=1)):
+    return admin_service.list_tiles_map(project_id=project_id)
 
 
 @router.get("/mask-tiles/{z}/{x}/{y}.png")

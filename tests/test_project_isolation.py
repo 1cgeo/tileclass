@@ -217,3 +217,43 @@ def test_mask_complete_required_true_rejects_partial(client, admin_user, operato
     )
     assert r.status_code == 422
     assert r.json()["detail"]["error"] == "unfilled_pixels"
+
+
+# ---- Admin dashboard scoping ------------------------------------------------
+
+def test_admin_dashboard_scoped_to_project(client, admin_user, operators, two_projects):
+    """Filtering admin/dashboard by project counts only that project's tiles."""
+    _, default_pid, beta_pid = two_projects
+    from backend.database import connect
+    conn = connect()
+    try:
+        _seed_pending(conn, default_pid, 5)
+        _seed_pending(conn, beta_pid, 9)
+    finally:
+        conn.close()
+    adm = token(client, admin_user["username"], admin_user["password"])
+    a = client.get(f"/api/admin/dashboard?project_id={default_pid}", headers=h(adm)).json()
+    b = client.get(f"/api/admin/dashboard?project_id={beta_pid}", headers=h(adm)).json()
+    g = client.get("/api/admin/dashboard", headers=h(adm)).json()
+    assert a["total_tiles"] == 5
+    assert b["total_tiles"] == 9
+    assert g["total_tiles"] == 14  # global view sums both projects
+
+
+def test_admin_tiles_listing_scoped_to_project(client, admin_user, operators, two_projects):
+    """The admin tiles listing accepts project_id and the X-Total-Count header
+    reflects the filtered count, not the global count."""
+    _, default_pid, beta_pid = two_projects
+    from backend.database import connect
+    conn = connect()
+    try:
+        _seed_pending(conn, default_pid, 4)
+        _seed_pending(conn, beta_pid, 6)
+    finally:
+        conn.close()
+    adm = token(client, admin_user["username"], admin_user["password"])
+    r = client.get(f"/api/admin/tiles?project_id={beta_pid}", headers=h(adm))
+    assert r.status_code == 200
+    assert r.headers["x-total-count"] == "6"
+    items = r.json()
+    assert all(t["project_id"] == beta_pid for t in items)
