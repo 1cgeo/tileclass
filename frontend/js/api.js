@@ -155,6 +155,18 @@ export async function apiPatchJson(url, body) {
     });
 }
 
+export async function apiPutJson(url, body) {
+    return apiJson(url, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+    });
+}
+
+export async function apiDelete(url) {
+    return apiJson(url, { method: "DELETE" });
+}
+
 export async function apiPostBytes(url, bytes, extraHeaders = {}) {
     return apiJson(url, {
         method: "POST",

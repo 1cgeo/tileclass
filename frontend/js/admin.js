@@ -8,6 +8,7 @@ import { createLockedMap, disposeMap, tileTransformRequest } from "./maplib.js";
 import { hexToRgb, blobToImage, escapeHtml as escape, fmtDate, fmtBytes } from "./utils.js";
 import { renderDashboard, fmtDuration } from "./admin/dashboard.js";
 import { wireConfirmModal, confirmDestructive, promptAssign } from "./admin/modals.js";
+import { renderProjects } from "./admin/projects.js";
 
 let tileserverUrl = "";
 let tileserverMaxZoom = 22;
@@ -115,6 +116,7 @@ async function selectTab(tab) {
     content.innerHTML = `<div class="loading-text"><span class="loading"></span> Carregando...</div>`;
     try {
         if (tab === "dashboard") await renderDashboard(content);
+        else if (tab === "projects") await renderProjects(content);
         else if (tab === "tiles") await renderTiles(content);
         else if (tab === "map") await renderMap(content);
         else if (tab === "problems") await renderProblems(content);
