@@ -2,6 +2,7 @@
 passthroughs. The XYZ endpoint pulls bytes from the per-project reader pool
 in mbtiles_service so layers stay scoped to a single project."""
 from fastapi import APIRouter, Depends, HTTPException, Response
+from pydantic import BaseModel
 
 from .. import auth, mbtiles_service, project_service
 from ..models import (
@@ -151,6 +152,23 @@ def delete_project(
 ):
     project_service.delete_project(project_id, by_user=admin.id)
     return {"ok": True}
+
+
+class ProjectCloneIn(BaseModel):
+    name: str | None = None
+
+
+@admin_router.post("/{project_id}/clone")
+def clone_project(
+    project_id: int,
+    body: ProjectCloneIn,
+    admin: auth.CurrentUser = Depends(auth.require_admin),
+):
+    """Duplicate the project's config (paths, classes, mask flag) into a
+    new project. Memberships are not copied; admin assigns explicitly."""
+    return project_service.clone_project(
+        project_id, new_name=body.name, by_user=admin.id,
+    )
 
 
 @admin_router.put("/{project_id}/classes")

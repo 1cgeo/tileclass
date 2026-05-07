@@ -275,6 +275,42 @@ def create_project(
     return get_project(pid)
 
 
+def clone_project(source_id: int, *, new_name: str | None, by_user: int) -> dict:
+    """Duplicate a project's config (paths, classes, mask_complete_required)
+    into a new project. Memberships are NOT copied — admins assign explicitly
+    so cloning doesn't silently leak access. The clone starts active=True."""
+    source = get_project(source_id)
+    if not source:
+        raise HTTPException(404, detail={"error": "project_not_found"})
+    name = (new_name or "").strip() or f"{source['name']}_copia"
+    with transaction("IMMEDIATE") as conn:
+        if conn.execute("SELECT 1 FROM projects WHERE name=?", (name,)).fetchone():
+            raise HTTPException(409, detail={"error": "name_taken"})
+        conn.execute(
+            """INSERT INTO projects(name, description, mask_complete_required,
+               primary_mbtiles, secondary_mbtiles, tertiary_mbtiles,
+               ref_mask_primary_mbtiles, ref_mask_secondary_mbtiles,
+               active, created_by, created_at)
+               VALUES(?,?,?,?,?,?,?,?,1,?,?)""",
+            (name, source["description"],
+             1 if source["mask_complete_required"] else 0,
+             source["primary_mbtiles"], source["secondary_mbtiles"],
+             source["tertiary_mbtiles"], source["ref_mask_primary_mbtiles"],
+             source["ref_mask_secondary_mbtiles"],
+             by_user, now_iso()),
+        )
+        new_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        for ord_idx, c in enumerate(source["classes"]):
+            conn.execute(
+                """INSERT INTO project_classes(project_id, class_id, name, color, ordering)
+                   VALUES(?,?,?,?,?)""",
+                (new_id, c["id"], c["name"], c["color"], ord_idx),
+            )
+        log_action(conn, by_user, None, "project_clone", f"{source_id}->{new_id}")
+    _invalidate(new_id)
+    return get_project(new_id)
+
+
 def update_project(project_id: int, *, fields: dict, updated_by: int) -> dict:
     """Patch a subset of fields. Validates layer paths if present."""
     cols_allowed = {

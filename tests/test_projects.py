@@ -404,6 +404,55 @@ def test_xyz_403_for_non_member(client, admin_user, operators, tmp_path):
     assert r.status_code == 403
 
 
+def test_clone_project_copies_config_and_classes(client, admin_user, operators, tmp_path):
+    """Cloning duplicates paths + classes + flags into a new project; the
+    name auto-suffixes when not provided. Memberships are NOT copied."""
+    tok = token(client, admin_user["username"], admin_user["password"])
+    # Add op1 as a member of the source so we can prove the clone doesn't
+    # inherit memberships.
+    client.post(
+        "/api/admin/projects/1/members",
+        json={"user_id": operators[0]["id"], "role": "reviewer"},
+        headers=h(tok),
+    )
+    r = client.post(
+        "/api/admin/projects/1/clone",
+        json={"name": "default_clone"},
+        headers=h(tok),
+    )
+    assert r.status_code == 200, r.text
+    new = r.json()
+    assert new["name"] == "default_clone"
+    assert new["mask_complete_required"] is True
+    # Classes copied byte-for-byte.
+    src = client.get("/api/projects/1", headers=h(tok)).json()
+    assert {(c["id"], c["name"], c["color"]) for c in new["classes"]} \
+        == {(c["id"], c["name"], c["color"]) for c in src["classes"]}
+    # Memberships NOT copied — admin must explicitly add.
+    members = client.get(
+        f"/api/admin/projects/{new['id']}/members", headers=h(tok)
+    ).json()
+    assert all(m["id"] != operators[0]["id"] for m in members)
+
+
+def test_clone_default_name_suffix(client, admin_user):
+    tok = token(client, admin_user["username"], admin_user["password"])
+    r = client.post("/api/admin/projects/1/clone", json={}, headers=h(tok))
+    assert r.status_code == 200
+    assert r.json()["name"] == "default_copia"
+
+
+def test_clone_rejects_duplicate_name(client, admin_user):
+    tok = token(client, admin_user["username"], admin_user["password"])
+    r = client.post(
+        "/api/admin/projects/1/clone",
+        json={"name": "default"},  # already taken
+        headers=h(tok),
+    )
+    assert r.status_code == 409
+    assert r.json()["detail"]["error"] == "name_taken"
+
+
 def test_remote_url_accepted_as_layer(client, admin_user):
     """A Martin / TileServer-GL URL is a valid layer source; no file check."""
     tok = token(client, admin_user["username"], admin_user["password"])

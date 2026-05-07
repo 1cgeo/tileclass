@@ -59,9 +59,17 @@ function renderProjectList(projects) {
             <td>${escapeHtml(p.description || "")}</td>
             <td>${p.active ? "ativo" : "inativo"}</td>
             <td>${p.mask_complete_required ? "sim" : "não"}</td>
-            <td><button class="link" data-pid="${p.id}">Editar</button></td>
+            <td>
+                <button class="link" data-act="edit" data-pid="${p.id}">Editar</button>
+                ·
+                <button class="link" data-act="clone" data-pid="${p.id}">Clonar</button>
+            </td>
         `;
-        tr.querySelector("button").onclick = () => selectProject(p.id);
+        for (const btn of tr.querySelectorAll("button")) {
+            btn.onclick = btn.dataset.act === "clone"
+                ? () => cloneProject(p)
+                : () => selectProject(p.id);
+        }
         tbody.appendChild(tr);
     }
     list.appendChild(tbl);
@@ -323,6 +331,26 @@ async function deleteProject(projectId, projectName) {
         document.getElementById("project-detail").classList.add("hidden");
     } catch (e) {
         showToast(`Falha ao excluir: ${e.message}`, "err", 8000);
+    }
+}
+
+
+async function cloneProject(p) {
+    const suggested = `${p.name}_copia`;
+    const name = (prompt(
+        `Nome do novo projeto (clone de "${p.name}"):`,
+        suggested,
+    ) || "").trim();
+    if (!name) return;
+    try {
+        const created = await apiPostJson(
+            `/api/admin/projects/${p.id}/clone`, { name },
+        );
+        showToast(`Projeto "${created.name}" criado.`, "ok");
+        await refreshProjectList();
+        await selectProject(created.id);
+    } catch (e) {
+        showToast(`Falha ao clonar: ${e.message}`, "err", 6000);
     }
 }
 
