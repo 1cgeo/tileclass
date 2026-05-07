@@ -453,7 +453,34 @@ async function loadTile(t, preloadedMask = null) {
     updateProgress();
     refreshRequestChangesButton(t);
     loadReviewNoteBanner(t.id);
+    startHeartbeat(t.id);
     _tileReady = true;
+}
+
+
+// ---- Heartbeat: keeps the auto-pause sweep aware that the tile is alive.
+// 60s cadence is well below the server's 5min timeout. We deliberately
+// fire-and-forget — a failed ping just means the next /next sweep may
+// reclaim the tile, which is the correct behaviour if the user dropped
+// connectivity.
+let _heartbeatTimer = null;
+
+function startHeartbeat(tileId) {
+    stopHeartbeat();
+    _heartbeatTimer = setInterval(() => {
+        if (!currentTile || currentTile.id !== tileId) {
+            stopHeartbeat();
+            return;
+        }
+        apiPostJson(`/api/tiles/${tileId}/heartbeat`, {}).catch(() => {});
+    }, 60_000);
+}
+
+function stopHeartbeat() {
+    if (_heartbeatTimer) {
+        clearInterval(_heartbeatTimer);
+        _heartbeatTimer = null;
+    }
 }
 
 function refreshRequestChangesButton(t) {
@@ -1279,6 +1306,7 @@ function flashMissing() {
 
 function showIdleScreen(title, message, { previewNext = false } = {}) {
     hidePausedResumeScreen();
+    stopHeartbeat();
     _previewToken++;
     resetPreview("idle-preview", "idle-icon");
     document.getElementById("idle-title").textContent = title;

@@ -227,6 +227,57 @@ def today_classify_count(user_id: int, project_id: int | None = None) -> int:
     return int(row["c"]) if row else 0
 
 
+# Tile is considered abandoned (operator closed laptop / lost connection)
+# after 5 min without a heartbeat. The sweep runs lazily inside /next so
+# zombie tiles are freed exactly when someone needs work.
+_HEARTBEAT_TIMEOUT_SECONDS = 300
+
+
+def heartbeat(tile_id: int, user_id: int) -> dict:
+    """Operator's editor pings while a tile is open. Bumps last_heartbeat_at;
+    no-op when the tile is paused, no longer assigned, or already finished."""
+    with transaction("IMMEDIATE") as conn:
+        row = conn.execute(
+            "SELECT assigned_to, status, paused_at FROM tiles WHERE id=?", (tile_id,)
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "tile not found")
+        if row["assigned_to"] != user_id:
+            raise HTTPException(403, "not assigned to you")
+        if row["status"] not in ("in_progress", "in_review") or row["paused_at"]:
+            return {"ok": False, "reason": "not_active"}
+        conn.execute(
+            "UPDATE tiles SET last_heartbeat_at=? WHERE id=?",
+            (now_iso(), tile_id),
+        )
+    return {"ok": True}
+
+
+def _auto_pause_stale(conn) -> int:
+    """Inside an open transaction, mark every active tile whose last
+    heartbeat is older than the timeout as paused (detail='auto'). Runs
+    lazily on /next so the cleanup cost is paid only when someone is
+    pulling work."""
+    rows = conn.execute(
+        f"""SELECT id, assigned_to FROM tiles
+            WHERE status IN ('in_progress','in_review')
+              AND paused_at IS NULL
+              AND last_heartbeat_at IS NOT NULL
+              AND (julianday('now') - julianday(last_heartbeat_at))*86400
+                  > {_HEARTBEAT_TIMEOUT_SECONDS}"""
+    ).fetchall()
+    if not rows:
+        return 0
+    now = now_iso()
+    for r in rows:
+        conn.execute(
+            "UPDATE tiles SET paused_at=?, version=version+1 WHERE id=?",
+            (now, r["id"]),
+        )
+        log_action(conn, r["assigned_to"], r["id"], "pause", "auto")
+    return len(rows)
+
+
 def _user_can_review_project(conn, user_id: int, project_id: int) -> bool:
     """A user can review tiles in a project iff:
        - they are a global admin, OR
@@ -261,6 +312,9 @@ def get_next_tile(user_id: int, project_id: int) -> dict | None:
     ones remain, the oldest is unpaused (auto-resume + `resume` log entry so
     the dashboard's assign→done pairing subtracts the queue-wait time)."""
     with transaction("IMMEDIATE") as conn:
+        # Lazy zombie-tile cleanup: pulling work is the moment to free
+        # tiles whose operator dropped off without explicitly pausing.
+        _auto_pause_stale(conn)
         # 1) Resume: if user already has a tile assigned in this project,
         # return it. Resume is project-scoped so switching projects doesn't
         # silently dump the operator back into the previous project's tile.
@@ -307,8 +361,9 @@ def get_next_tile(user_id: int, project_id: int) -> dict | None:
             ).fetchone()
         if row:
             conn.execute(
-                "UPDATE tiles SET status='in_review', assigned_to=? WHERE id=?",
-                (user_id, row["id"]),
+                "UPDATE tiles SET status='in_review', assigned_to=?, "
+                "last_heartbeat_at=? WHERE id=?",
+                (user_id, now_iso(), row["id"]),
             )
             log_action(conn, user_id, row["id"], "assign_review")
             row = conn.execute(
@@ -324,8 +379,9 @@ def get_next_tile(user_id: int, project_id: int) -> dict | None:
         ).fetchone()
         if row:
             conn.execute(
-                "UPDATE tiles SET status='in_progress', assigned_to=? WHERE id=?",
-                (user_id, row["id"]),
+                "UPDATE tiles SET status='in_progress', assigned_to=?, "
+                "last_heartbeat_at=? WHERE id=?",
+                (user_id, now_iso(), row["id"]),
             )
             log_action(conn, user_id, row["id"], "assign_classify")
             row = conn.execute(

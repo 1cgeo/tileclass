@@ -221,3 +221,11 @@ async def pause_tile(tile_id: int = Path(ge=1), *, request: Request,
 def resume_tile(tile_id: int = Path(ge=1),
                 user: auth.CurrentUser = Depends(auth.get_current_user)):
     return tile_service.resume_tile(tile_id, user.id)
+
+
+@router.post("/tiles/{tile_id}/heartbeat")
+def heartbeat(tile_id: int = Path(ge=1),
+              user: auth.CurrentUser = Depends(auth.get_current_user)):
+    """Editor pings while a tile is open so the auto-pause sweep can tell
+    apart "operator working" vs "operator dropped off"."""
+    return tile_service.heartbeat(tile_id, user.id)
