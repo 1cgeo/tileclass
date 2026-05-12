@@ -17,7 +17,7 @@ def _tile_row(tile_id: int):
     conn = connect()
     try:
         return conn.execute(
-            "SELECT id, project_id, data_png, data_geojson, "
+            "SELECT id, project_id, data_png, data_geojson, data_class_id, "
             "bbox_west, bbox_south, bbox_east, bbox_north "
             "FROM tiles WHERE id=?",
             (tile_id,),
@@ -47,8 +47,11 @@ def tile_thumbnail(tile_id: int, size: int = 128) -> bytes:
         raise HTTPException(404, "tile not found")
     pid = row["project_id"]
     proj = project_service.get_project(pid) if pid else None
-    if proj and proj.get("kind") == "vector":
+    kind = (proj or {}).get("kind")
+    if kind == "vector":
         return _vector_thumbnail(row, proj, size)
+    if kind == "classification":
+        return _classification_thumbnail(row, proj, size)
     primary = mbtiles_service.get_reader(pid, "primary") if pid else None
     tile_px = int((proj or {}).get("tile_px", 256))
     pixels = tile_px * tile_px
@@ -201,6 +204,57 @@ def _vector_thumbnail(row, proj: dict, size: int) -> bytes:
             if len(pts) >= 2:
                 draw.line(pts, fill=color_for(f.get("properties") or {}),
                           width=max(2, size // 64))
+    composed = Image.alpha_composite(base, overlay)
+    buf = io.BytesIO()
+    composed.convert("RGB").save(buf, format="PNG", optimize=True)
+    return buf.getvalue()
+
+
+def _classification_thumbnail(row, proj: dict, size: int) -> bytes:
+    """Satellite backdrop + colored border + class name centered. When the
+    tile has not been classified yet, the satellite alone is returned so
+    admins can still tell what's there."""
+    from PIL import ImageDraw, ImageFont
+    try:
+        backdrop = _tile_satellite_png(row["id"], size, row=row)
+        from io import BytesIO
+        base = Image.open(BytesIO(backdrop)).convert("RGBA")
+    except Exception:
+        base = Image.new("RGBA", (size, size), (32, 32, 32, 255))
+
+    cid = row["data_class_id"]
+    if cid is None:
+        buf = io.BytesIO()
+        base.save(buf, format="PNG", optimize=True)
+        return buf.getvalue()
+    cls = next((c for c in (proj.get("classes") or []) if c["id"] == cid), None)
+    if cls is None:
+        buf = io.BytesIO()
+        base.save(buf, format="PNG", optimize=True)
+        return buf.getvalue()
+
+    h = cls["color"].lstrip("#")
+    rgb = (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+    overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    # Class-color border so the class is recognisable at a glance.
+    border = max(2, size // 32)
+    draw.rectangle([0, 0, size - 1, size - 1],
+                   outline=(*rgb, 240), width=border)
+    label = cls["name"]
+    try:
+        font = ImageFont.load_default()
+        bbox = draw.textbbox((0, 0), label, font=font)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    except (OSError, AttributeError):
+        font = None
+        tw, th = (len(label) * 6, 11)
+    pad = max(3, size // 40)
+    box = [size // 2 - tw // 2 - pad, size - th - 2 * pad,
+           size // 2 + tw // 2 + pad, size - pad]
+    draw.rectangle(box, fill=(*rgb, 200))
+    draw.text((size // 2 - tw // 2, size - th - pad - 1), label,
+              fill=(255, 255, 255, 255), font=font)
     composed = Image.alpha_composite(base, overlay)
     buf = io.BytesIO()
     composed.convert("RGB").save(buf, format="PNG", optimize=True)

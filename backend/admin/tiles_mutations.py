@@ -57,7 +57,7 @@ def reset_many(tile_ids: list[int], admin_id: int, reason: str | None = None) ->
             # empty FeatureCollection.
             conn.execute(
                 """UPDATE tiles SET status='pending', data_png=?, data_geojson=NULL,
-                   feature_count=NULL, assigned_to=NULL,
+                   feature_count=NULL, data_class_id=NULL, assigned_to=NULL,
                    classified_by=NULL, reviewed_by=NULL, classified_at=NULL,
                    reviewed_at=NULL, problem_note=NULL, paused_at=NULL,
                    class_counts=NULL, version=version+1 WHERE id=?""",
@@ -94,7 +94,7 @@ def report_problem_many(tile_ids: list[int], admin_id: int, note: str) -> dict:
             empty = _empty_png(px_by_id[tid])
             conn.execute(
                 """UPDATE tiles SET status='problem', problem_note=?, data_png=?,
-                   data_geojson=NULL, feature_count=NULL,
+                   data_geojson=NULL, feature_count=NULL, data_class_id=NULL,
                    assigned_to=NULL, paused_at=NULL, blocked_from=NULL,
                    class_counts=NULL, version=version+1 WHERE id=?""",
                 (note, empty, tid),

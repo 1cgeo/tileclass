@@ -30,6 +30,11 @@ import {
     enterVectorTile, exitVectorTile, getCurrentBody as getVectorBody,
     validateForSubmit as validateVector,
 } from "./editor-vector.js";
+import {
+    enterClassificationTile, exitClassificationTile,
+    getCurrentBody as getClassificationBody,
+    validateForSubmit as validateClassification,
+} from "./editor-classification.js";
 
 // Tile geometry is per-project (project.tile_px). These are mutated on
 // project load via setTileGeometry. DISPLAY is the on-screen canvas size
@@ -441,6 +446,10 @@ function isVectorProject() {
     return window.tileclassActiveProject?.kind === "vector";
 }
 
+function isClassificationProject() {
+    return window.tileclassActiveProject?.kind === "classification";
+}
+
 async function loadTile(t, preloadedMask = null) {
     _tileReady = false;
     currentTile = t;
@@ -470,10 +479,16 @@ async function loadTile(t, preloadedMask = null) {
     }
     if (isVectorProject()) {
         // Vector projects swap the canvas-stack for a MapLibre editor.
-        // The chrome above (mode pill, review banner, name) and the footer
-        // (submit/pause/problem/request-changes) keep working — they call
-        // into editor-vector.js for the body bytes.
         await enterVectorTile(t, window.tileclassActiveProject);
+        refreshRequestChangesButton(t);
+        loadReviewNoteBanner(t.id);
+        startHeartbeat(t.id);
+        _tileReady = true;
+        return;
+    }
+    if (isClassificationProject()) {
+        // Classification: MapLibre satellite + class-picker sidebar; no canvas.
+        await enterClassificationTile(t, window.tileclassActiveProject);
         refreshRequestChangesButton(t);
         loadReviewNoteBanner(t.id);
         startHeartbeat(t.id);
@@ -1279,6 +1294,12 @@ async function submit() {
             showToast(`Não foi possível submeter:\n${errs.slice(0, 3).join("\n")}`, "error", 6000);
             return;
         }
+    } else if (isClassificationProject()) {
+        const errs = validateClassification();
+        if (errs.length) {
+            showToast(errs[0], "error");
+            return;
+        }
     } else if (maskCompleteRequired && filledCount < PIXELS) {
         // Loose projects (mask_complete_required=false) accept any mask — the
         // backend mirrors this rule.
@@ -1308,9 +1329,10 @@ async function submit() {
         if (isVectorProject()) {
             await apiPostJson(
                 `/api/tiles/${currentTile.id}/classify`, JSON.parse(getVectorBody()),
-                // apiPostJson set Content-Type:application/json; X-Tile-Version
-                // is added separately via fetch's Headers — but our wrapper
-                // doesn't expose extra headers, so we use a tiny manual fetch.
+            );
+        } else if (isClassificationProject()) {
+            await apiPostJson(
+                `/api/tiles/${currentTile.id}/classify`, JSON.parse(getClassificationBody()),
             );
         } else {
             await apiPostBytes(
@@ -1325,6 +1347,7 @@ async function submit() {
         // operator shouldn't see the previous tile's painted mask lingering
         // while they decide whether to pull the next one.
         if (isVectorProject()) exitVectorTile();
+        if (isClassificationProject()) exitClassificationTile();
         flashSuccess();
         showIdleScreen("Tile enviado ✓", "Verificando próximo tile...", { previewNext: true });
     } catch (e) {
@@ -1575,6 +1598,10 @@ async function pauseTile() {
         showToast("Nenhum tile aberto para pausar.", "warn");
         return;
     }
+    if (isClassificationProject()) {
+        showToast("Projetos de classification não suportam pause.", "warn");
+        return;
+    }
     const ok = await confirmAction({
         title: "Pausar tile?",
         message: "Seu progresso será salvo no servidor e o tempo será congelado. Você poderá retomar mais tarde.",
@@ -1596,6 +1623,7 @@ async function pauseTile() {
         }
         clearBackup();
         if (isVectorProject()) exitVectorTile();
+        if (isClassificationProject()) exitClassificationTile();
         showToast("Tile pausado. Suas alterações foram salvas no servidor.", "success");
         showIdleScreen("Tile pausado ⏸", "Faça login depois para continuar de onde parou.");
     } catch (e) {

@@ -56,10 +56,11 @@ CREATE TABLE IF NOT EXISTS projects (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT UNIQUE NOT NULL,
     description TEXT,
-    -- 'raster' (current pixel-mask flow) or 'vector' (GeoJSON FeatureCollection
-    -- per tile with line annotations, e.g. drainage networks, road graphs).
-    -- Immutable after creation: changing kind would orphan every tile body.
-    kind TEXT NOT NULL DEFAULT 'raster' CHECK (kind IN ('raster','vector')),
+    -- 'raster' (pixel-mask flow), 'vector' (GeoJSON FeatureCollection),
+    -- or 'classification' (single class_id per tile). Immutable after
+    -- creation: changing kind would orphan every tile body.
+    kind TEXT NOT NULL DEFAULT 'raster'
+        CHECK (kind IN ('raster','vector','classification')),
     -- Vector projects only: when 1, submits run validate_topology
     -- (each LineString has direction; endpoints snap; no cycles).
     topology_required INTEGER NOT NULL DEFAULT 0,
@@ -139,7 +140,10 @@ CREATE TABLE IF NOT EXISTS tiles (
     -- decides which body is populated.
     data_geojson TEXT,
     -- Cached number of features in data_geojson; null when never submitted.
-    feature_count INTEGER
+    feature_count INTEGER,
+    -- Classification tiles only: the single class id assigned to the tile.
+    -- Null on raster/vector tiles and on never-classified rows.
+    data_class_id INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_tiles_status ON tiles(status);
@@ -260,18 +264,19 @@ def _rebuild_tiles_with_project_not_null(conn: sqlite3.Connection) -> None:
             class_counts TEXT,
             last_heartbeat_at TEXT,
             data_geojson TEXT,
-            feature_count INTEGER
+            feature_count INTEGER,
+            data_class_id INTEGER
         )"""
     )
     conn.execute(
         """INSERT INTO tiles_new (id, project_id, name, bbox_west, bbox_south, bbox_east, bbox_north,
            status, assigned_to, classified_by, reviewed_by, classified_at, reviewed_at,
            data_png, problem_note, version, paused_at, blocked_from,
-           class_counts, last_heartbeat_at, data_geojson, feature_count)
+           class_counts, last_heartbeat_at, data_geojson, feature_count, data_class_id)
            SELECT id, project_id, name, bbox_west, bbox_south, bbox_east, bbox_north,
                   status, assigned_to, classified_by, reviewed_by, classified_at, reviewed_at,
                   data_png, problem_note, version, paused_at, blocked_from,
-                  class_counts, last_heartbeat_at, data_geojson, feature_count
+                  class_counts, last_heartbeat_at, data_geojson, feature_count, data_class_id
            FROM tiles"""
     )
     conn.execute("DROP TABLE tiles")
@@ -314,6 +319,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE tiles ADD COLUMN data_geojson TEXT")
     if "feature_count" not in cols:
         conn.execute("ALTER TABLE tiles ADD COLUMN feature_count INTEGER")
+    if "data_class_id" not in cols:
+        # Classification tiles: single class id per tile.
+        conn.execute("ALTER TABLE tiles ADD COLUMN data_class_id INTEGER")
     # projects.kind / topology_required for the vector flow. Defaults
     # preserve existing rows as raster.
     proj_cols = {r[1] for r in conn.execute("PRAGMA table_info(projects)").fetchall()}

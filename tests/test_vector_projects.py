@@ -75,7 +75,7 @@ def test_create_raster_with_attributes_rejected(client, admin_user, tmp_path):
         headers=h(tok),
     )
     assert r.status_code == 400
-    assert r.json()["detail"]["error"] == "attributes_on_raster"
+    assert r.json()["detail"]["error"] == "attributes_not_supported"
 
 
 def test_create_vector_with_classes_rejected(client, admin_user, tmp_path):
@@ -380,7 +380,7 @@ def test_image_endpoint_415_on_vector_tile(client, admin_user, operators, tmp_pa
     op_tok = token(client, op["username"], op["password"])
     r = client.get(f"/api/tiles/{tile_id}/image", headers=h(op_tok))
     assert r.status_code == 415
-    assert r.json()["detail"]["error"] == "vector_tile"
+    assert r.json()["detail"]["error"] == "wrong_kind"
 
 
 def test_features_endpoint_415_on_raster_tile(client, admin_user, operators, tiles):
@@ -388,7 +388,7 @@ def test_features_endpoint_415_on_raster_tile(client, admin_user, operators, til
     nxt = client.get("/api/tiles/next?project_id=1", headers=h(tok)).json()
     r = client.get(f"/api/tiles/{nxt['id']}/features", headers=h(tok))
     assert r.status_code == 415
-    assert r.json()["detail"]["error"] == "raster_tile"
+    assert r.json()["detail"]["error"] == "wrong_kind"
 
 
 def test_features_endpoint_returns_canonical_empty_for_unsubmitted(client, admin_user, operators, tmp_path):

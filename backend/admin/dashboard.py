@@ -193,6 +193,44 @@ def feature_distribution(project_id: int | None = None) -> list[dict]:
     return out
 
 
+def tile_class_distribution(project_id: int | None = None) -> list[dict]:
+    """Classification counterpart to class_distribution: counts tiles per
+    assigned class_id, joined with project_classes for name + color.
+
+    Returned shape mirrors class_distribution but uses `count` (tiles)
+    instead of `pixels`."""
+    proj_clause, proj_args = _scope(project_id, prefix="t.")
+    where = "WHERE t.data_class_id IS NOT NULL AND p.kind='classification'" + proj_clause
+    conn = connect()
+    try:
+        rows = conn.execute(
+            f"""SELECT t.project_id, t.data_class_id AS class_id,
+                       pc.name, pc.color, COUNT(*) AS c
+                FROM tiles t
+                JOIN projects p ON p.id=t.project_id
+                LEFT JOIN project_classes pc
+                  ON pc.project_id=t.project_id AND pc.class_id=t.data_class_id
+                {where}
+                GROUP BY t.project_id, t.data_class_id, pc.name, pc.color
+                ORDER BY c DESC""",
+            proj_args,
+        ).fetchall()
+    finally:
+        conn.close()
+    grand = sum(r["c"] for r in rows) or 1
+    return [
+        {
+            "project_id": r["project_id"],
+            "class_id": r["class_id"],
+            "name": r["name"] or f"#{r['class_id']}",
+            "color": r["color"] or "#888888",
+            "count": r["c"],
+            "pct": round(100.0 * r["c"] / grand, 2),
+        }
+        for r in rows
+    ]
+
+
 def dashboard(project_id: int | None = None) -> dict:
     proj_clause, proj_args = _scope(project_id)
     where_proj = ("WHERE 1=1" + proj_clause) if proj_clause else ""

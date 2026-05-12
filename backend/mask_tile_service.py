@@ -205,10 +205,13 @@ def _transparent_png() -> bytes:
 
 def _render_tile(project_id: int, z: int, x: int, y: int) -> bytes | None:
     """Dispatch by project kind: raster reprojects PNG masks, vector
-    rasterizes LineStrings."""
+    rasterizes LineStrings, classification draws a class-name label per tile."""
     proj = project_service.get_project(project_id)
-    if proj and proj.get("kind") == "vector":
+    kind = (proj or {}).get("kind")
+    if kind == "vector":
         return _render_vector_tile(project_id, z, x, y, proj)
+    if kind == "classification":
+        return _render_classification_tile(project_id, z, x, y, proj)
     return _render_raster_tile(project_id, z, x, y)
 
 
@@ -400,6 +403,92 @@ def _vector_color_resolver(proj: dict):
         key = enum["key"]
         return lambda p: mapping.get(p.get(key), _FALLBACK_COLOR)
     return lambda p: _FALLBACK_COLOR
+
+
+def _render_classification_tile(project_id: int, z: int, x: int, y: int,
+                                proj: dict) -> bytes | None:
+    """Render the project's classification tiles into a 256×256 RGBA PNG.
+
+    Each project tile shows up as a low-alpha class-color rectangle with the
+    class name centered as text in the same color. Tiles too small at the
+    current zoom (< ~24 px) skip the text label since it would be unreadable."""
+    from PIL import ImageDraw, ImageFont
+
+    west, south, east, north = wm_tile_bounds_4326(z, x, y)
+    placeholders = ",".join("?" * len(_VISIBLE_STATUSES))
+    conn = connect_main()
+    try:
+        rows = conn.execute(
+            f"""SELECT bbox_west, bbox_south, bbox_east, bbox_north, data_class_id
+                FROM tiles
+                WHERE project_id=?
+                  AND status IN ({placeholders})
+                  AND data_class_id IS NOT NULL
+                  AND bbox_west < ? AND bbox_east > ?
+                  AND bbox_south < ? AND bbox_north > ?""",
+            (project_id, *_VISIBLE_STATUSES, east, west, north, south),
+        ).fetchall()
+    finally:
+        conn.close()
+    if not rows:
+        return None
+
+    img = Image.new("RGBA", (XYZ_TILE_PX, XYZ_TILE_PX), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    classes_by_id = {c["id"]: c for c in (proj.get("classes") or [])}
+    try:
+        font = ImageFont.load_default()
+    except OSError:
+        font = None
+
+    left_3857, bottom_3857, right_3857, top_3857 = wm_tile_bounds_3857(z, x, y)
+    span_x = right_3857 - left_3857
+    span_y = top_3857 - bottom_3857
+    if span_x <= 0 or span_y <= 0:
+        return None
+
+    def lonlat_to_pixel(lon, lat):
+        rad_lat = math.radians(max(min(lat, 85.05112878), -85.05112878))
+        mx = lon * _WM_HALF / 180.0
+        my = math.log(math.tan((90 + math.degrees(rad_lat)) * math.pi / 360)) / math.pi * _WM_HALF
+        px = (mx - left_3857) / span_x * XYZ_TILE_PX
+        py = (top_3857 - my) / span_y * XYZ_TILE_PX
+        return px, py
+
+    has_any = False
+    for r in rows:
+        cls = classes_by_id.get(r["data_class_id"])
+        if not cls:
+            continue
+        h = cls["color"].lstrip("#")
+        rgb = (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+        x0, y0 = lonlat_to_pixel(r["bbox_west"], r["bbox_north"])
+        x1, y1 = lonlat_to_pixel(r["bbox_east"], r["bbox_south"])
+        w = x1 - x0
+        hpx = y1 - y0
+        # Translucent fill so admins still see area coverage by class.
+        draw.rectangle([x0, y0, x1, y1], fill=(*rgb, 60), outline=(*rgb, 200))
+        has_any = True
+        # Skip the label when the tile is tiny — text would just be noise.
+        if w >= 24 and hpx >= 24 and font is not None:
+            label = cls["name"]
+            try:
+                bbox = draw.textbbox((0, 0), label, font=font)
+                tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            except (AttributeError, OSError):
+                tw, th = (len(label) * 6, 11)
+            tx = x0 + (w - tw) / 2
+            ty = y0 + (hpx - th) / 2
+            # Halo around the text so it stays legible on busy backgrounds.
+            for dx_, dy_ in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                draw.text((tx + dx_, ty + dy_), label, fill=(255, 255, 255, 200), font=font)
+            draw.text((tx, ty), label, fill=(*rgb, 255), font=font)
+
+    if not has_any:
+        return None
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    return buf.getvalue()
 
 
 # ---- Public API ----

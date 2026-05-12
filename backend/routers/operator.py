@@ -32,15 +32,20 @@ async def _read_mask_body(request: Request, expected_pixels: int) -> bytes:
 async def _read_body_for_kind(request: Request, tile_id: int) -> tuple[bytes, dict]:
     """Pick the right body reader by the project's kind and return both the
     body and the resolved project dict so callers can hand `proj` to
-    tile_service without a second project_for_tile lookup. Raster tiles
-    expect exactly tile_px**2 raw bytes; vector tiles accept any well-formed
-    body and push validation deeper into tile_service."""
+    tile_service without a second project_for_tile lookup. Raster expects
+    tile_px**2 raw bytes; vector accepts up to ~1.5 MB JSON; classification
+    accepts a small JSON envelope (`{"class_id": int}`)."""
     proj = tile_service.project_for_tile(tile_id)
-    if proj.get("kind") == "vector":
-        # Light cap; tile_service._submit_vector enforces the real bound.
+    kind = proj.get("kind")
+    if kind == "vector":
         cl = request.headers.get("content-length")
         if cl and cl.isdigit() and int(cl) > 1_500_000:
             raise HTTPException(413, "vector body too large")
+        return await request.body(), proj
+    if kind == "classification":
+        cl = request.headers.get("content-length")
+        if cl and cl.isdigit() and int(cl) > 1024:
+            raise HTTPException(413, "classification body too large")
         return await request.body(), proj
     tile_px = int(proj.get("tile_px", 256))
     return await _read_mask_body(request, tile_px * tile_px), proj
@@ -186,13 +191,14 @@ def get_tile(tile_id: int = Path(ge=1),
 @router.get("/tiles/{tile_id}/image")
 def get_tile_image(tile_id: int = Path(ge=1),
                    user: auth.CurrentUser = Depends(auth.get_current_user)):
-    """Raster body. Vector tiles use /features instead — calling /image
-    on a vector tile returns 415 so the editor knows to switch fetchers."""
+    """Raster body only. Vector/classification tiles use /features and
+    /classification respectively; calling /image on them returns 415."""
     proj = tile_service.project_for_tile(tile_id)
-    if proj.get("kind") == "vector":
+    if proj.get("kind") != "raster":
         raise HTTPException(415, detail={
-            "error": "vector_tile",
-            "message": "Use /features para tiles vetoriais.",
+            "error": "wrong_kind",
+            "kind": proj.get("kind"),
+            "message": "Endpoint /image só está disponível para tiles raster.",
         })
     img = tile_service.get_tile_image(tile_id)
     if img is None:
@@ -208,13 +214,32 @@ def get_tile_features(tile_id: int = Path(ge=1),
     proj = tile_service.project_for_tile(tile_id)
     if proj.get("kind") != "vector":
         raise HTTPException(415, detail={
-            "error": "raster_tile",
-            "message": "Use /image para tiles raster.",
+            "error": "wrong_kind",
+            "kind": proj.get("kind"),
+            "message": "Endpoint /features só está disponível para tiles vetoriais.",
         })
     text = tile_service.get_tile_geojson(tile_id)
     if text is None:
         raise HTTPException(404, "tile not found")
     return Response(content=text, media_type="application/json")
+
+
+@router.get("/tiles/{tile_id}/classification")
+def get_tile_classification(tile_id: int = Path(ge=1),
+                            user: auth.CurrentUser = Depends(auth.get_current_user)):
+    """Classification body — returns `{"class_id": int}`, or 204 when the tile
+    has not been classified yet."""
+    proj = tile_service.project_for_tile(tile_id)
+    if proj.get("kind") != "classification":
+        raise HTTPException(415, detail={
+            "error": "wrong_kind",
+            "kind": proj.get("kind"),
+            "message": "Endpoint /classification só está disponível para tiles classification.",
+        })
+    cid = tile_service.get_tile_class_id(tile_id)
+    if cid is None:
+        return Response(status_code=204)
+    return {"class_id": cid}
 
 
 @router.get("/tiles/{tile_id}/satellite-thumbnail")

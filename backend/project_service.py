@@ -315,16 +315,17 @@ def create_project(
     name = (name or "").strip()
     if not name:
         raise HTTPException(400, detail={"error": "invalid_name"})
-    if kind not in ("raster", "vector"):
+    if kind not in ("raster", "vector", "classification"):
         raise HTTPException(400, detail={"error": "invalid_kind"})
     _validate_tile_geometry(tile_px, meters_per_pixel)
-    # Mutual exclusion: raster expects classes, vector expects attributes.
-    # Mixing is rejected so a payload with both never silently picks one.
-    if kind == "raster":
+    # Mutual exclusion: raster/classification expect `classes`; vector
+    # expects `attributes`. Mixing is rejected so a payload with both
+    # never silently picks one.
+    if kind in ("raster", "classification"):
         if attributes:
             raise HTTPException(400, detail={
-                "error": "attributes_on_raster",
-                "message": "Projeto raster não aceita attributes; use classes.",
+                "error": "attributes_not_supported",
+                "message": f"Projeto {kind} não aceita attributes; use classes.",
             })
         if not classes:
             raise HTTPException(400, detail={"error": "no_classes"})
@@ -364,7 +365,7 @@ def create_project(
              created_by, now_iso()),
         )
         pid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        if kind == "raster":
+        if kind in ("raster", "classification"):
             for ord_idx, c in enumerate(classes):
                 conn.execute(
                     """INSERT INTO project_classes(project_id, class_id, name, color, ordering)

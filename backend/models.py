@@ -130,7 +130,7 @@ class ProjectAttributeIn(BaseModel):
 class ProjectCreateIn(BaseModel):
     name: str = Field(min_length=1, max_length=64)
     description: str = ""
-    kind: Literal["raster", "vector"] = "raster"
+    kind: Literal["raster", "vector", "classification"] = "raster"
     topology_required: bool = False
     mask_complete_required: bool = True
     # Tile geometry (defaults match the historical 256×256 @ 2.5 m/px = 640 m

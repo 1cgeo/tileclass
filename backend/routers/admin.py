@@ -56,6 +56,12 @@ def admin_feature_distribution(project_id: int | None = Query(default=None, ge=1
     return admin_service.feature_distribution(project_id=project_id)
 
 
+@router.get("/tile-class-distribution")
+def admin_tile_class_distribution(project_id: int | None = Query(default=None, ge=1)):
+    """Classification counterpart: tile counts per assigned class id."""
+    return admin_service.tile_class_distribution(project_id=project_id)
+
+
 _TILE_SORT_KEYS = {
     "id", "name", "status",
     "classified_by_username", "reviewed_by_username",

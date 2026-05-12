@@ -4,7 +4,7 @@ import json
 from fastapi import HTTPException
 from .database import connect, transaction, log_action, now_iso
 from .mask_utils import encode_mask, decode_mask, empty_mask_png, validate_submission, validate_partial, class_counts
-from . import vector_utils
+from . import vector_utils, classify_utils
 from . import mask_tile_service, project_service
 
 
@@ -421,6 +421,21 @@ def get_tile_image(tile_id: int) -> bytes | None:
     return empty_mask_png(int(project_for_tile(tile_id).get("tile_px", 256)))
 
 
+def get_tile_class_id(tile_id: int) -> int | None:
+    """Classification body. Returns the assigned class_id or None when the
+    tile has never been submitted / does not exist."""
+    conn = connect()
+    try:
+        row = conn.execute(
+            "SELECT data_class_id FROM tiles WHERE id=?", (tile_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    return row["data_class_id"]
+
+
 def get_tile_geojson(tile_id: int) -> str | None:
     """Vector body. None when the tile has never been submitted; the empty
     FeatureCollection serves as the editor's starting point in that case."""
@@ -489,8 +504,11 @@ def submit_classification(tile_id: int, user_id: int, body: bytes,
     project_for_tile lookup on every submit."""
     if proj is None:
         proj = project_for_tile(tile_id)
-    if proj.get("kind") == "vector":
+    kind = proj.get("kind")
+    if kind == "vector":
         return _submit_vector(tile_id, user_id, body, proj, expected_version)
+    if kind == "classification":
+        return _submit_classification(tile_id, user_id, body, proj, expected_version)
     return _submit_raster(tile_id, user_id, body, proj, expected_version)
 
 
@@ -597,6 +615,50 @@ def _submit_vector(tile_id: int, user_id: int, body: bytes,
     return {"ok": True}
 
 
+# Classification body is a single int; cap the JSON envelope at 1 KB so a
+# malformed payload can't blow up the worker.
+_MAX_CLASSIFICATION_BODY_BYTES = 1024
+
+
+def _submit_classification(tile_id: int, user_id: int, body: bytes,
+                           proj: dict, expected_version: int | None) -> dict:
+    if len(body) > _MAX_CLASSIFICATION_BODY_BYTES:
+        raise HTTPException(413, detail={"error": "body_too_large"})
+    try:
+        text = body.decode("utf-8")
+    except UnicodeDecodeError:
+        raise HTTPException(400, detail={"error": "invalid_utf8"})
+    allowed = [c["id"] for c in proj["classes"]]
+    try:
+        class_id = classify_utils.parse_class_id(text, allowed)
+    except ValueError as e:
+        raise HTTPException(422, detail={"error": "invalid_class", "message": str(e)})
+
+    with transaction("IMMEDIATE") as conn:
+        row = _lock_tile_for_user(conn, tile_id, user_id, expected_version)
+        status = row["status"]
+        if status == "in_progress":
+            conn.execute(
+                """UPDATE tiles SET status='classified', data_class_id=?,
+                   classified_by=?, classified_at=?, assigned_to=NULL,
+                   paused_at=NULL, version=version+1 WHERE id=?""",
+                (class_id, user_id, now_iso(), tile_id),
+            )
+            log_action(conn, user_id, tile_id, "classify")
+        elif status == "in_review":
+            conn.execute(
+                """UPDATE tiles SET status='reviewed', data_class_id=?,
+                   reviewed_by=?, reviewed_at=?, assigned_to=NULL,
+                   paused_at=NULL, version=version+1 WHERE id=?""",
+                (class_id, user_id, now_iso(), tile_id),
+            )
+            log_action(conn, user_id, tile_id, "review")
+        else:
+            raise HTTPException(409, f"invalid state for submit: {status}")
+    mask_tile_service.safe_invalidate_tile(tile_id)
+    return {"ok": True, "class_id": class_id}
+
+
 _MAX_PROBLEM_NOTE = 2000
 
 
@@ -685,7 +747,8 @@ def report_problem(tile_id: int, user_id: int, note: str) -> dict:
         conn.execute(
             """UPDATE tiles SET status='problem', problem_note=?, data_png=?,
                assigned_to=NULL, paused_at=NULL, class_counts=NULL,
-               data_geojson=NULL, feature_count=NULL WHERE id=?""",
+               data_geojson=NULL, feature_count=NULL,
+               data_class_id=NULL WHERE id=?""",
             (note, empty_mask_png(tile_px), tile_id),
         )
         log_action(conn, user_id, tile_id, "report_problem", note)
@@ -704,7 +767,15 @@ def pause_tile(tile_id: int, user_id: int, body: bytes,
     `proj` may be passed pre-resolved by the router to skip a duplicate lookup."""
     if proj is None:
         proj = project_for_tile(tile_id)
-    if proj.get("kind") == "vector":
+    kind = proj.get("kind")
+    if kind == "classification":
+        # Classification is a single-click submit — partial state has no
+        # meaning, so pause is not supported.
+        raise HTTPException(409, detail={
+            "error": "pause_not_supported",
+            "message": "Projetos de classification não suportam pause.",
+        })
+    if kind == "vector":
         return _pause_vector(tile_id, user_id, body, proj, expected_version)
     return _pause_raster(tile_id, user_id, body, proj, expected_version)
 

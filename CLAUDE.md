@@ -32,6 +32,7 @@ python -m backend.scripts.import_cq_tiles --geoparquet cq_selection.geoparquet [
 python -m backend.scripts.import_qc_tiles --csv qc_tiles.csv --bdf-dir <dir> [--project <id|name>]
 python -m backend.scripts.export_tiles <out_dir> [--status reviewed|reviewed+classified] [--raw] [--mosaic] [--manifest <path>] [--project <id|name>]      # raster (GeoTIFF)
 python -m backend.scripts.export_features <out_dir> [--status ...] [--mosaic] [--manifest <path>] [--project <id|name>]                                  # vector (GeoJSON)
+python -m backend.scripts.export_classifications <out_dir> [--status ...] [--manifest <path>] [--project <id|name>]                                      # classification (CSV)
 python -m backend.scripts.build_mbtiles <raster_in> <out.mbtiles>           # raster grande → tiles XYZ
 python -m backend.scripts.build_xyz_pyramid <raster_in> <out_dir>            # alternativa em disco
 python -m backend.scripts.merge_db <other.db>                                # funde tileclass.db de outra equipe
@@ -154,7 +155,7 @@ Cada campo aceita dois formatos:
 
 ## Projetos vetoriais (kind=vector)
 
-Projetos têm `kind ∈ {raster, vector}` (default raster, **imutável após criação**). Vector é para anotações de linhas com atributos — drenagem (com direção/conectividade), rodovias (com pavimento/faixas), etc. O dataset é consumido por modelos de IA via export GeoJSON.
+Projetos têm `kind ∈ {raster, vector, classification}` (default raster, **imutável após criação**). Vector é para anotações de linhas com atributos — drenagem (com direção/conectividade), rodovias (com pavimento/faixas), etc. O dataset é consumido por modelos de IA via export GeoJSON.
 
 **Onde diverge de raster:**
 
@@ -182,13 +183,36 @@ Projetos têm `kind ∈ {raster, vector}` (default raster, **imutável após cri
 
 **Pause vs submit:** pause persiste o body do jeito que está (qualquer GeoJSON parsável, mesmo com required ausente ou ciclos), submit valida tudo. Operador pode pausar parcial sem perder trabalho.
 
-**Mutual exclusion no payload:** `POST /api/admin/projects` rejeita `attributes` em projeto raster (400 `attributes_on_raster`) e `classes` em projeto vector (400 `classes_on_vector`). Tentar mudar `kind` via PATCH é silenciosamente ignorado (campo fora do allow-list — invariante de imutabilidade).
+**Mutual exclusion no payload:** `POST /api/admin/projects` rejeita `attributes` em projeto raster ou classification (400 `attributes_not_supported`) e `classes` em projeto vector (400 `classes_on_vector`). Tentar mudar `kind` via PATCH é silenciosamente ignorado (campo fora do allow-list — invariante de imutabilidade).
 
 **Invariantes críticos do dispatch:**
-- `tile_service._project_for_tile()` resolve a kind antes de cada submit/pause; `_submit_raster`/`_submit_vector` (e `_pause_*`) ficam isolados.
-- `routers/operator._read_body_for_kind` lê o body certo (raster: 65536 bytes exatos; vector: até 1MB JSON).
-- `report_problem` limpa **ambos** `data_png` e `data_geojson` para que mudanças futuras não vazem corpo de tipo errado.
+- `tile_service.project_for_tile()` resolve a kind antes de cada submit/pause; `_submit_raster`/`_submit_vector`/`_submit_classification` (e `_pause_*`) ficam isolados.
+- `routers/operator._read_body_for_kind` lê o body certo (raster: tile_px² bytes exatos; vector: até 1.5MB JSON; classification: até 1KB JSON).
+- `report_problem` limpa `data_png`, `data_geojson` **e** `data_class_id` para que mudanças futuras não vazem corpo de tipo errado.
 - `mask_tile_service.get_tile()` despacha por kind. Cache mbtiles é per-projeto (`<base>_p<id>.mbtiles`); kinds diferentes em projetos diferentes não compartilham linhas.
+
+## Projetos de classificação (kind=classification)
+
+Operador escolhe **uma classe** do projeto pra todo o tile — sem pintura, sem desenho. Caso de uso: rotular tiles inteiros (ex.: cobertura predominante).
+
+**Onde diverge de raster:**
+
+| Camada | Raster | Classification |
+|---|---|---|
+| Body do tile | `tiles.data_png` (PNG tile_px² bytes) | `tiles.data_class_id` (INTEGER) |
+| Schema de domínio | `project_classes` (id, name, color) | mesma tabela, mesmas regras |
+| Validação no submit | máscara completa + IDs em `{1..N, 255}` | `class_id ∈ project_classes` |
+| Submit body | `Content-Type: application/octet-stream` (tile_px² bytes) | `Content-Type: application/json` (`{"class_id": int}`) |
+| Endpoint de leitura | `GET /api/tiles/{id}/image` (PNG) | `GET /api/tiles/{id}/classification` (`{class_id}` ou 204) |
+| Editor | `editor.js` canvas paint | `editor-classification.js` MapLibre + botões de classe |
+| Pause | salva máscara parcial | **409 `pause_not_supported`** — fluxo single-click |
+| Overlay admin | colore pixel a pixel | retângulo translúcido + nome da classe centrado |
+| Distribuição no dashboard | `class_distribution` (pixel counts) | `tile_class_distribution` (1 tile = 1 contagem) |
+| Export CLI | `export_tiles.py` (GeoTIFF) | `export_classifications.py` (CSV único) |
+
+**Editor:** sidebar mostra um botão por classe (cor + nome). Operador clica → highlight; rodapé Submit habilitado → modal confirm → POST. Sem undo/redo (escolha é atômica). Heartbeat e state machine iguais aos outros.
+
+**Tile_px em classification:** afeta só thumbnail/overlay rasterizado (não há body de pixels). `tile_meters = tile_px × meters_per_pixel` continua definindo a bbox.
 
 ## Invariantes do domínio
 
