@@ -306,6 +306,225 @@ def test_reset_clears_data_class_id(client, admin_user, operators, tmp_path):
     assert row["data_class_id"] is None
 
 
+def test_report_problem_clears_data_class_id(client, admin_user, operators, tmp_path):
+    """report_problem must clear data_class_id alongside the other body
+    columns; otherwise a re-classification could leak the previous answer."""
+    tok = token(client, admin_user["username"], admin_user["password"])
+    proj = _create_classification_project(client, tok, tmp_path, name="prob")
+    op = operators[0]
+    _assign_operator(client, tok, proj["id"], op["id"])
+    tile_id = _seed_pending_tile(proj["id"])
+    op_tok = token(client, op["username"], op["password"])
+    client.get(f"/api/tiles/next?project_id={proj['id']}", headers=h(op_tok))
+    client.post(
+        f"/api/tiles/{tile_id}/classify",
+        headers={**h(op_tok), "Content-Type": "application/json"},
+        content=json.dumps({"class_id": 2}),
+    )
+    # Admin moves it to problem (bulk endpoint covers both paths).
+    r = client.post(
+        "/api/admin/tiles/bulk/report-problem",
+        json={"ids": [tile_id], "note": "borda manchada"},
+        headers=h(tok),
+    )
+    assert r.status_code in (200, 204), r.text
+    from backend.database import connect
+    conn = connect()
+    try:
+        row = conn.execute(
+            "SELECT status, data_class_id, problem_note FROM tiles WHERE id=?",
+            (tile_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row["status"] == "problem"
+    assert row["data_class_id"] is None
+    assert row["problem_note"] == "borda manchada"
+
+
+# ---- Review flow (in_review → reviewed) -----------------------------------
+
+def test_classification_review_cycle(client, admin_user, operators, tmp_path):
+    """Full classify → review cycle. The reviewer may change the class id
+    (e.g. correcting a misclassification); the second branch of
+    _submit_classification persists it and moves the tile to 'reviewed'."""
+    tok = token(client, admin_user["username"], admin_user["password"])
+    proj = _create_classification_project(client, tok, tmp_path, name="review")
+    # Two operators, both able to review the project.
+    for op in operators[:2]:
+        client.post(
+            f"/api/admin/projects/{proj['id']}/members",
+            json={"user_id": op["id"], "role": "reviewer"},
+            headers=h(tok),
+        )
+    tile_id = _seed_pending_tile(proj["id"])
+
+    op1_tok = token(client, operators[0]["username"], operators[0]["password"])
+    nxt = client.get(f"/api/tiles/next?project_id={proj['id']}", headers=h(op1_tok)).json()
+    assert nxt["id"] == tile_id
+    r = client.post(
+        f"/api/tiles/{tile_id}/classify",
+        headers={**h(op1_tok), "Content-Type": "application/json"},
+        content=json.dumps({"class_id": 1}),
+    )
+    assert r.status_code == 200
+
+    op2_tok = token(client, operators[1]["username"], operators[1]["password"])
+    review = client.get(
+        f"/api/tiles/next?project_id={proj['id']}", headers=h(op2_tok),
+    ).json()
+    assert review["id"] == tile_id and review["status"] == "in_review"
+    # Reviewer overrides class 1 → class 3.
+    r2 = client.post(
+        f"/api/tiles/{tile_id}/review",
+        headers={**h(op2_tok), "Content-Type": "application/json"},
+        content=json.dumps({"class_id": 3}),
+    )
+    assert r2.status_code == 200, r2.text
+
+    from backend.database import connect
+    conn = connect()
+    try:
+        row = conn.execute(
+            "SELECT status, data_class_id, classified_by, reviewed_by "
+            "FROM tiles WHERE id=?", (tile_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row["status"] == "reviewed"
+    assert row["data_class_id"] == 3
+    assert row["classified_by"] == operators[0]["id"]
+    assert row["reviewed_by"] == operators[1]["id"]
+
+
+# ---- Class-removal invariant ----------------------------------------------
+
+def test_cannot_remove_class_used_by_classification_tile(
+        client, admin_user, operators, tmp_path):
+    """The "Regra inegociável" applies to classification too: once a project
+    has any tile, classes can't be removed (data_class_id values would
+    otherwise dangle). Renames/recolors stay allowed."""
+    tok = token(client, admin_user["username"], admin_user["password"])
+    proj = _create_classification_project(client, tok, tmp_path, name="remove")
+    op = operators[0]
+    _assign_operator(client, tok, proj["id"], op["id"])
+    tile_id = _seed_pending_tile(proj["id"])
+    op_tok = token(client, op["username"], op["password"])
+    client.get(f"/api/tiles/next?project_id={proj['id']}", headers=h(op_tok))
+    client.post(
+        f"/api/tiles/{tile_id}/classify",
+        headers={**h(op_tok), "Content-Type": "application/json"},
+        content=json.dumps({"class_id": 2}),
+    )
+
+    # Try to drop class 3 (unused) — still rejected because any tile exists.
+    r = client.put(
+        f"/api/admin/projects/{proj['id']}/classes",
+        json={"classes": [
+            {"id": 1, "name": "agua", "color": "#1f77b4"},
+            {"id": 2, "name": "vegetacao", "color": "#2ca02c"},
+        ]},
+        headers=h(tok),
+    )
+    assert r.status_code == 409
+    assert r.json()["detail"]["error"] == "class_in_use"
+
+    # Rename + recolor only is allowed.
+    r2 = client.put(
+        f"/api/admin/projects/{proj['id']}/classes",
+        json={"classes": [
+            {"id": 1, "name": "água", "color": "#1f77b4"},
+            {"id": 2, "name": "vegetação", "color": "#33aa33"},
+            {"id": 3, "name": "edificação", "color": "#d62728"},
+        ]},
+        headers=h(tok),
+    )
+    assert r2.status_code == 200
+    classes = {c["id"]: c for c in r2.json()["classes"]}
+    assert classes[1]["name"] == "água"
+    assert classes[2]["color"] == "#33aa33"
+
+
+# ---- Kind immutability ----------------------------------------------------
+
+def test_classification_kind_is_immutable(client, admin_user, tmp_path):
+    """ProjectUpdateIn has no `kind` field — PATCH silently drops it. Same
+    invariant as vector; ensures a future allow-list edit doesn't accidentally
+    let classification flip to raster (which would orphan data_class_id)."""
+    tok = token(client, admin_user["username"], admin_user["password"])
+    proj = _create_classification_project(client, tok, tmp_path, name="lock")
+    r = client.patch(
+        f"/api/admin/projects/{proj['id']}",
+        json={"kind": "raster"},
+        headers=h(tok),
+    )
+    assert r.status_code == 200
+    assert r.json()["kind"] == "classification"
+
+
+# ---- Overlay rendering ----------------------------------------------------
+
+def test_render_classification_tile_paints_class_color(
+        client, admin_user, operators, tmp_path):
+    """End-to-end overlay: classify a tile, render the XYZ tile that
+    contains it, assert the returned PNG carries a pixel matching the
+    chosen class color. Locks the rasterization pipeline (bbox→pixel
+    math + class lookup + Pillow encode)."""
+    from PIL import Image
+    from io import BytesIO
+    from backend import mask_tile_service
+
+    tok = token(client, admin_user["username"], admin_user["password"])
+    proj = _create_classification_project(
+        client, tok, tmp_path, name="overlay",
+        # Bright, unambiguous color so the assertion can't false-positive
+        # on background or anti-aliased neighbors.
+        classes=[
+            {"id": 1, "name": "alvo", "color": "#ff00ff"},
+            {"id": 2, "name": "outro", "color": "#000000"},
+        ],
+    )
+    op = operators[0]
+    _assign_operator(client, tok, proj["id"], op["id"])
+    tile_id = _seed_pending_tile(proj["id"], name="ovl")
+    op_tok = token(client, op["username"], op["password"])
+    client.get(f"/api/tiles/next?project_id={proj['id']}", headers=h(op_tok))
+    r = client.post(
+        f"/api/tiles/{tile_id}/classify",
+        headers={**h(op_tok), "Content-Type": "application/json"},
+        content=json.dumps({"class_id": 1}),
+    )
+    assert r.status_code == 200, r.text
+
+    # Pick a zoom where the project tile (~0.1° × 0.1°) covers a chunk of
+    # the XYZ tile (so the colored rectangle is several pixels wide).
+    z = 10
+    x_min, y_min, x_max, y_max = mask_tile_service.wm_tiles_for_bbox(
+        z, 0.0, 0.0, 0.1, 0.1,
+    )
+    proj_dict = {
+        "id": proj["id"],
+        "classes": proj["classes"],
+        "kind": "classification",
+    }
+    png = mask_tile_service._render_classification_tile(
+        proj["id"], z, x_min, y_min, proj_dict,
+    )
+    assert png is not None, "overlay should not be empty when a tile is classified"
+    img = Image.open(BytesIO(png)).convert("RGBA")
+    # Scan for the class-color pixel (alpha-blended at 60/255 fill, ~200/255
+    # outline). The magenta channels (255, 0, 255) survive blending in
+    # multiple ways, but the easiest invariant is "some pixel has high R
+    # and high B with low G" — meaning class 1's hue made it through.
+    px = img.load()
+    matched = any(
+        px[x_, y_][0] > 200 and px[x_, y_][1] < 80
+        and px[x_, y_][2] > 200 and px[x_, y_][3] > 0
+        for x_ in range(img.width) for y_ in range(img.height)
+    )
+    assert matched, "expected magenta-ish pixels from the classified tile's class color"
+
+
 # ---- Export script --------------------------------------------------------
 
 def _run_export(args: list[str]) -> int:
