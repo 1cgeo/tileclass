@@ -212,32 +212,26 @@ def _vector_thumbnail(row, proj: dict, size: int) -> bytes:
 
 def _classification_thumbnail(row, proj: dict, size: int) -> bytes:
     """Satellite backdrop + colored border + class name centered. When the
-    tile has not been classified yet, the satellite alone is returned so
+    tile has not been classified yet, just the satellite is returned so
     admins can still tell what's there."""
     from PIL import ImageDraw, ImageFont
+    from io import BytesIO
+    from ..mask_tile_service import _hex_to_rgb
     try:
-        backdrop = _tile_satellite_png(row["id"], size, row=row)
-        from io import BytesIO
-        base = Image.open(BytesIO(backdrop)).convert("RGBA")
+        base = Image.open(BytesIO(_tile_satellite_png(row["id"], size, row=row))).convert("RGBA")
     except Exception:
         base = Image.new("RGBA", (size, size), (32, 32, 32, 255))
 
     cid = row["data_class_id"]
-    if cid is None:
-        buf = io.BytesIO()
-        base.save(buf, format="PNG", optimize=True)
-        return buf.getvalue()
-    cls = next((c for c in (proj.get("classes") or []) if c["id"] == cid), None)
+    cls = next((c for c in (proj.get("classes") or []) if c["id"] == cid), None) if cid is not None else None
     if cls is None:
         buf = io.BytesIO()
         base.save(buf, format="PNG", optimize=True)
         return buf.getvalue()
 
-    h = cls["color"].lstrip("#")
-    rgb = (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+    rgb = _hex_to_rgb(cls["color"])
     overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
-    # Class-color border so the class is recognisable at a glance.
     border = max(2, size // 32)
     draw.rectangle([0, 0, size - 1, size - 1],
                    outline=(*rgb, 240), width=border)

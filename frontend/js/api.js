@@ -10,6 +10,11 @@ export function getTokens() {
     catch { return null; }
 }
 
+export function authHeader() {
+    const tok = getTokens()?.access_token;
+    return tok ? { Authorization: `Bearer ${tok}` } : {};
+}
+
 export function setTokens(t) {
     if (t) localStorage.setItem(TOKENS_KEY, JSON.stringify(t));
     else localStorage.removeItem(TOKENS_KEY);

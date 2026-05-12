@@ -8,7 +8,7 @@
 //
 // The footer (submit/pause/problem/request-changes) lives in editor.js;
 // this module only manages the canvas area + a sidebar attribute panel.
-import { apiGet, getTokens } from "./api.js";
+import { apiGet, authHeader } from "./api.js";
 import { showToast } from "./toast.js";
 import { tileTransformRequest, makeRasterStyle } from "./maplib.js";
 import {
@@ -50,7 +50,7 @@ export async function enterVectorTile(tile, project) {
     let text = "";
     try {
         const r = await fetch(`/api/tiles/${tile.id}/features`, {
-            headers: _authHeaders(),
+            headers: authHeader(),
         });
         if (r.status === 200) text = await r.text();
         else if (r.status === 204) text = JSON.stringify(emptyFC());
@@ -456,9 +456,3 @@ function _attrFieldHTML(a, value) {
     `;
 }
 
-// -------- Auth header passthrough ----------------------------------------
-
-function _authHeaders() {
-    const tok = getTokens()?.access_token;
-    return tok ? { Authorization: `Bearer ${tok}` } : {};
-}

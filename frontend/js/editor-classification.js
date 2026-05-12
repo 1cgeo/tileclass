@@ -5,7 +5,7 @@
 //   getCurrentBody() -> string         // JSON {class_id} for submit
 //   validateForSubmit() -> string[]    // empty when ok (class selected)
 //   exitClassificationTile()           // dispose MapLibre + DOM
-import { getTokens } from "./api.js";
+import { authHeader } from "./api.js";
 import { showToast } from "./toast.js";
 import { tileTransformRequest, makeRasterStyle } from "./maplib.js";
 import { escapeHtml } from "./utils.js";
@@ -23,19 +23,23 @@ export async function enterClassificationTile(tile, project) {
     _setupContainer();
     _renderClassPanel();
 
-    // Pre-fill with any previously submitted class (e.g. revisão).
-    try {
-        const r = await fetch(`/api/tiles/${tile.id}/classification`, {
-            headers: _authHeaders(),
-        });
-        if (r.status === 200) {
-            const body = await r.json();
-            if (typeof body?.class_id === "number") {
-                _selectClass(body.class_id);
+    // Pending tiles have no body — skip the GET to save a round-trip on
+    // first open. Re-opened tiles (in_progress / in_review / classified)
+    // need it to restore the previously chosen class.
+    if (tile.status !== "pending") {
+        try {
+            const r = await fetch(`/api/tiles/${tile.id}/classification`, {
+                headers: authHeader(),
+            });
+            if (r.status === 200) {
+                const body = await r.json();
+                if (typeof body?.class_id === "number") {
+                    _selectClass(body.class_id);
+                }
             }
+        } catch (e) {
+            showToast(`Falha ao carregar classe atual: ${e.message}`, "err");
         }
-    } catch (e) {
-        showToast(`Falha ao carregar classe atual: ${e.message}`, "err");
     }
 
     const [w, s, e, n] = [tile.bbox_west, tile.bbox_south, tile.bbox_east, tile.bbox_north];
@@ -77,8 +81,6 @@ export function validateForSubmit() {
     return [];
 }
 
-
-// -------- DOM ---------------------------------------------------------------
 
 function _setupContainer() {
     const stack = document.getElementById("canvas-stack");
@@ -135,10 +137,4 @@ function _selectClass(cid) {
     if (status) {
         status.textContent = cls ? `Selecionado: ${cls.name}` : "Nenhuma classe selecionada.";
     }
-}
-
-
-function _authHeaders() {
-    const tok = getTokens()?.access_token;
-    return tok ? { Authorization: `Bearer ${tok}` } : {};
 }

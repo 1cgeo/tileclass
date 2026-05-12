@@ -252,8 +252,8 @@ def test_tile_class_distribution(client, admin_user, operators, tmp_path):
     op_tok = token(client, op["username"], op["password"])
 
     # Submit 3 tiles: 2× class_id=1, 1× class_id=2.
-    for cid in (1, 1, 2):
-        tile_id = _seed_pending_tile(proj["id"], name=f"t_{cid}_{tile_id_counter()}")
+    for i, cid in enumerate((1, 1, 2)):
+        tile_id = _seed_pending_tile(proj["id"], name=f"t_{cid}_{i}")
         client.get(f"/api/tiles/next?project_id={proj['id']}", headers=h(op_tok))
         r = client.post(
             f"/api/tiles/{tile_id}/classify",
@@ -270,14 +270,6 @@ def test_tile_class_distribution(client, admin_user, operators, tmp_path):
     assert by_id[1]["count"] == 2
     assert by_id[2]["count"] == 1
     assert by_id[1]["name"] == "agua"
-
-
-# Helper for unique tile names inside one test (avoid the dedup bbox check).
-_counter = 0
-def tile_id_counter():
-    global _counter
-    _counter += 1
-    return _counter
 
 
 # ---- Reset / problem clears data_class_id ---------------------------------
@@ -317,20 +309,16 @@ def test_reset_clears_data_class_id(client, admin_user, operators, tmp_path):
 # ---- Export script --------------------------------------------------------
 
 def _run_export(args: list[str]) -> int:
-    import importlib
-    if "backend.scripts.export_classifications" in sys.modules:
-        del sys.modules["backend.scripts.export_classifications"]
+    from backend.scripts import export_classifications
     old_argv = sys.argv
     sys.argv = ["export_classifications", *args]
     try:
-        mod = importlib.import_module("backend.scripts.export_classifications")
-        try:
-            mod.main()
-        except SystemExit as e:
-            return int(e.code or 0)
+        export_classifications.main()
+        return 0
+    except SystemExit as e:
+        return int(e.code or 0)
     finally:
         sys.argv = old_argv
-    return 0
 
 
 def test_export_csv(client, admin_user, operators, tmp_path):

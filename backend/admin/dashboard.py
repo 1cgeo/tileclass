@@ -198,19 +198,18 @@ def tile_class_distribution(project_id: int | None = None) -> list[dict]:
     assigned class_id, joined with project_classes for name + color.
 
     Returned shape mirrors class_distribution but uses `count` (tiles)
-    instead of `pixels`."""
+    instead of `pixels`. `data_class_id IS NOT NULL` is enough to scope the
+    aggregate — only `_submit_classification` writes that column."""
     proj_clause, proj_args = _scope(project_id, prefix="t.")
-    where = "WHERE t.data_class_id IS NOT NULL AND p.kind='classification'" + proj_clause
     conn = connect()
     try:
         rows = conn.execute(
             f"""SELECT t.project_id, t.data_class_id AS class_id,
                        pc.name, pc.color, COUNT(*) AS c
                 FROM tiles t
-                JOIN projects p ON p.id=t.project_id
                 LEFT JOIN project_classes pc
                   ON pc.project_id=t.project_id AND pc.class_id=t.data_class_id
-                {where}
+                WHERE t.data_class_id IS NOT NULL{proj_clause}
                 GROUP BY t.project_id, t.data_class_id, pc.name, pc.color
                 ORDER BY c DESC""",
             proj_args,

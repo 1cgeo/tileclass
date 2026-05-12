@@ -292,6 +292,32 @@ def _render_raster_tile(project_id: int, z: int, x: int, y: int) -> bytes | None
     return buf.getvalue()
 
 
+def _make_lonlat_to_pixel(z: int, x: int, y: int):
+    """Build a lon/lat → XYZ-tile pixel projector for a given WM tile.
+    Returns (project_fn, span_ok). Reused by vector + classification overlays
+    so the spherical-Mercator math lives in one place."""
+    left_3857, bottom_3857, right_3857, top_3857 = wm_tile_bounds_3857(z, x, y)
+    span_x = right_3857 - left_3857
+    span_y = top_3857 - bottom_3857
+    span_ok = span_x > 0 and span_y > 0
+
+    def project(lon, lat):
+        rad_lat = math.radians(max(min(lat, 85.05112878), -85.05112878))
+        mx = lon * _WM_HALF / 180.0
+        my = math.log(math.tan((90 + math.degrees(rad_lat)) * math.pi / 360)) / math.pi * _WM_HALF
+        px = (mx - left_3857) / span_x * XYZ_TILE_PX
+        py = (top_3857 - my) / span_y * XYZ_TILE_PX
+        return px, py
+    return project, span_ok
+
+
+def _hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
+    """`#rrggbb` (or `rrggbb`) → (r, g, b). Inputs are project class colors,
+    already validated at write time."""
+    h = hex_color.lstrip("#")
+    return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+
+
 def _render_vector_tile(project_id: int, z: int, x: int, y: int,
                         proj: dict) -> bytes | None:
     """Rasterize the project's tile features into a 256x256 RGBA PNG.
@@ -335,20 +361,9 @@ def _render_vector_tile(project_id: int, z: int, x: int, y: int,
 
     # Use Web Mercator pixel coordinates so straight lines look straight on
     # the map (lat/lon → linear pixel would skew at high latitudes).
-    left_3857, bottom_3857, right_3857, top_3857 = wm_tile_bounds_3857(z, x, y)
-    span_x = right_3857 - left_3857
-    span_y = top_3857 - bottom_3857
-    if span_x <= 0 or span_y <= 0:
+    lonlat_to_pixel, span_ok = _make_lonlat_to_pixel(z, x, y)
+    if not span_ok:
         return None
-
-    def lonlat_to_pixel(lon, lat):
-        # Spherical Mercator (EPSG:3857) forward.
-        rad_lat = math.radians(max(min(lat, 85.05112878), -85.05112878))
-        mx = lon * _WM_HALF / 180.0
-        my = math.log(math.tan((90 + math.degrees(rad_lat)) * math.pi / 360)) / math.pi * _WM_HALF
-        px = (mx - left_3857) / span_x * XYZ_TILE_PX
-        py = (top_3857 - my) / span_y * XYZ_TILE_PX
-        return px, py
 
     for r in rows:
         try:
@@ -433,6 +448,10 @@ def _render_classification_tile(project_id: int, z: int, x: int, y: int,
     if not rows:
         return None
 
+    lonlat_to_pixel, span_ok = _make_lonlat_to_pixel(z, x, y)
+    if not span_ok:
+        return None
+
     img = Image.new("RGBA", (XYZ_TILE_PX, XYZ_TILE_PX), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     classes_by_id = {c["id"]: c for c in (proj.get("classes") or [])}
@@ -441,27 +460,12 @@ def _render_classification_tile(project_id: int, z: int, x: int, y: int,
     except OSError:
         font = None
 
-    left_3857, bottom_3857, right_3857, top_3857 = wm_tile_bounds_3857(z, x, y)
-    span_x = right_3857 - left_3857
-    span_y = top_3857 - bottom_3857
-    if span_x <= 0 or span_y <= 0:
-        return None
-
-    def lonlat_to_pixel(lon, lat):
-        rad_lat = math.radians(max(min(lat, 85.05112878), -85.05112878))
-        mx = lon * _WM_HALF / 180.0
-        my = math.log(math.tan((90 + math.degrees(rad_lat)) * math.pi / 360)) / math.pi * _WM_HALF
-        px = (mx - left_3857) / span_x * XYZ_TILE_PX
-        py = (top_3857 - my) / span_y * XYZ_TILE_PX
-        return px, py
-
     has_any = False
     for r in rows:
         cls = classes_by_id.get(r["data_class_id"])
         if not cls:
             continue
-        h = cls["color"].lstrip("#")
-        rgb = (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+        rgb = _hex_to_rgb(cls["color"])
         x0, y0 = lonlat_to_pixel(r["bbox_west"], r["bbox_north"])
         x1, y1 = lonlat_to_pixel(r["bbox_east"], r["bbox_south"])
         w = x1 - x0
