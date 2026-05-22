@@ -58,14 +58,16 @@ tileclass/
 │   ├── routers/                # FastAPI APIRouters (registrados no main.py)
 │   │   ├── auth.py             # /api/auth/{login,refresh,me,logout}
 │   │   ├── projects.py         # /api/projects + /api/projects/{id} + /api/projects/{id}/xyz/{layer}/{z}/{x}/{y}.{ext}
-│   │   │                        # + admin /api/admin/projects[...] CRUD/classes/members
+│   │   │                        # + admin /api/admin/projects[...] CRUD/classes/atributos/membros/export(ZIP sync + export-jobs assíncronos)/tiles (ingestão de pontos)
 │   │   ├── operator.py         # /api/tiles/* + /api/me/stats-today + helpers de body de máscara
-│   │   └── admin.py            # /api/admin/* (dashboard, tiles, users, mask overlay) — todos com ?project_id= opcional
+│   │   └── admin.py            # /api/admin/* (dashboard, distribuições, tiles, mapa, problemas, users, mask overlay, manutenção, bulk reset/assign/block/re-review/problem, export-jobs poll/download) — todos com ?project_id= opcional
 │   ├── auth.py                 # JWT, bcrypt, rate limit, blacklist, role middleware
 │   ├── models.py               # Schemas Pydantic
 │   ├── database.py             # Conexão SQLite (WAL), schema, transaction(), log_action
 │   ├── config.py               # Carrega config.yaml (singleton cache)
 │   ├── project_service.py      # CRUD de projetos + classes + membros, cache + path validation, require_membership
+│   ├── tile_ingest.py          # add_points(): centros (lat,lon) → tiles pending (bbox geodésica, bloco NxN, dedup) — compartilhado pelo endpoint admin e pelo CLI import_points
+│   ├── export_service.py       # export sync (export_zip) + jobs assíncronos (create_job/get_job/job_artifact) — zip em disco, worker em thread
 │   ├── tile_service.py         # Fila, atribuição atômica, submit, problema, pause/resume, histórico — escopados por project_id
 │   ├── admin_service.py        # Fachada — re-exporta de backend/admin/
 │   ├── admin/                  # Submódulos do admin (split de admin_service.py)
@@ -93,9 +95,9 @@ tileclass/
 │       ├── editor.js           # Canvas, ferramentas, undo/redo, submit
 │       ├── mask-core.js        # Lógica PURA (paint, Bresenham, flood, undo, screenToLogical) — testável sem DOM
 │       ├── backup.js           # localStorage backup (round-trip Uint8Array ↔ base64) — testável sem DOM
-│       ├── admin.js            # Orquestrador admin (tiles, users, viewer)
-│       ├── admin/               # Submódulos: dashboard.js, modals.js, projects.js (CRUD/classes/members)
-│       ├── minimap.js          # MapLibre 3×3 com highlight do tile atual
+│       ├── admin.js            # Orquestrador admin: 7 abas (dashboard, projetos, tiles, mapa, problemas, usuários, manutenção) + viewer + bulk + seleção no mapa
+│       ├── admin/               # Submódulos: dashboard.js (métricas/distribuições), modals.js (confirm/assign), projects.js (CRUD/classes/atributos/membros/export)
+│       ├── minimap.js          # MapLibre 3×3 com highlight do tile (legado — não importado pelo editor atual)
 │       ├── maplib.js           # Helpers MapLibre (createLockedMap, setMapBbox)
 │       ├── utils.js            # hexToRgb, blobToImage, escapeHtml
 │       └── toast.js            # Notificações
@@ -181,7 +183,7 @@ Projetos têm `kind ∈ {raster, vector, classification, detection}` (default ra
 
 **Editor vetorial:**
 - **Pen (P):** clique adiciona vértice; duplo-clique encerra; ESC cancela. Snap automático no primeiro/último vértice se estiver perto de um endpoint existente.
-- **Select (V):** clique numa feature → painel de atributos à direita; Del/Backspace remove.
+- **Select (V):** clique numa feature → painel de atributos à direita. **Edição de vértices**: arraste um handle p/ mover, clique no ponto-médio (amarelo) p/ inserir, Del remove o vértice destacado (ou a feature inteira se nenhum vértice estiver selecionado; recusa abaixo de 2). Lógica pura em `vector-core.js` (`moveVertex`/`insertVertex`/`removeVertex`).
 - **Undo/redo:** Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z. 50 frames.
 - O painel de atributos é schema-driven; campo extra "direção" aparece quando `topology_required`. Required marcado com `*`; submit bloqueia se faltar.
 
@@ -307,6 +309,10 @@ A LUT (`EDGV_REMAP_LUT`) é constante de módulo no topo do script — único po
 **Os 4 exportadores são a interface para agentes** — um por kind, todos com a mesma assinatura `run(out_dir, *, status, project_id, **opts)` (o `main()`/CLI é wrapper fino sobre ela): `export_tiles` (raster→GeoTIFF), `export_features` (vector→GeoJSON), `export_classifications` (classification→CSV), `export_detections` (detection→GeoJSON bboxes). Cobrem todos os kinds e os três filtros de status.
 
 **Export pela UI (admin):** `GET /api/admin/projects/{id}/export?status=reviewed|classified|reviewed_classified` (admin-only) despacha pelo `kind` do projeto, gera num tempdir, **zipa** e faz stream como download (`Content-Disposition`, header `X-Tile-Count`). `backend/export_service.py` é o ponto único que mapeia o status da API (`reviewed_classified` com underscore) para a chave dos scripts (`reviewed+classified`) e chama o `run()` certo. Painel "Exportar dados" no detalhe do projeto (aba Projetos).
+
+**Export assíncrono (muitos dados):** `POST /api/admin/projects/{id}/export-jobs?status=...` cria um job (tabela `export_jobs`), constrói o ZIP **em disco** num worker em thread (baixa memória, sem segurar a requisição), e o admin faz poll em `GET /api/admin/export-jobs/{job_id}` (`state` pending|running|done|error) e baixa via `.../download` (`FileResponse`). A UI usa esse fluxo (gerar → poll → baixar). Limitação: o worker é uma thread no processo que criou o job — em multi-worker o download deve ir ao mesmo worker (ok para deploy single-process/intranet).
+
+**Ingestão de tiles pela UI (admin):** `POST /api/admin/projects/{id}/tiles` com `{points:[{lat,lon,name?}], block}` cria tiles `pending` a partir de centros geodésicos (geometria do projeto, bloco NxN, dedup por bbox). `backend/tile_ingest.add_points` é o ponto único, **compartilhado com o CLI `import_points`**. Painel "Adicionar tiles" (ponto + bloco + CSV parseado client-side) no detalhe do projeto. Geoparquet/raster-seed seguem CLI-only (`import_cq/qc`).
 
 **Manifest (`<out_dir>/manifest.csv`):** uma linha por tile exportado com `filename, tile_id, project_id, name, status, classified_by, reviewed_by, classified_at, reviewed_at, bbox_*`. É o ponto de entrada pra outros agentes saberem o que receberam (status, autoria, projeto, geometria) sem precisar abrir o GeoTIFF.
 
