@@ -20,8 +20,10 @@ Spec completa: `docs/requirements.md`. Em caso de dúvida, o requirements manda.
 # Setup
 python -m venv .venv && .venv\Scripts\activate   # Windows
 pip install -r requirements.txt
+cp backend/config.example.yaml backend/config.yaml   # config.yaml é gitignored
+# troque auth.jwt_secret (o app recusa subir login com o placeholder)
 
-# Dev server
+# Dev server (init_db roda no lifespan → schema vazio; crie admin + 1º projeto via UI)
 uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
 
 # Scripts CLI (rodar como módulo para imports relativos funcionarem)

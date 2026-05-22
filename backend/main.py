@@ -1,5 +1,5 @@
 """FastAPI app: lifespan + middleware + exception handler + static SPA.
-Endpoints live under backend/routers/{auth,operator,admin,config}.py."""
+Endpoints live under backend/routers/{auth,projects,operator,admin}.py."""
 from contextlib import asynccontextmanager
 from pathlib import Path as FsPath
 

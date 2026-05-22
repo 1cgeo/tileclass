@@ -1,0 +1,25 @@
+# Template do config.yaml. Copie para backend/config.yaml e ajuste:
+#     cp backend/config.example.yaml backend/config.yaml
+# O config.yaml real é gitignored (contém o segredo). Aqui ficam APENAS
+# coisas de nível de aplicação/infra — NÃO há dado de domínio (projetos,
+# classes, layers, geometria, membros vivem no banco e são configurados pela
+# UI admin). Uma instalação nova começa vazia: o admin cria o 1º projeto.
+
+# Cache MBTiles do overlay de classificações no mapa admin (infra). O endpoint
+# /api/admin/mask-tiles/{project_id}/{z}/{x}/{y}.png rasteriza as máscaras
+# on-the-fly e grava aqui. O diretório é criado automaticamente.
+mask_overlay:
+  cache_path: "data/mask_overlay_cache.mbtiles"
+  min_zoom: 8
+  max_zoom: 18
+
+auth:
+  # OBRIGATÓRIO trocar: o app recusa subir com este placeholder (fail-closed).
+  # Gere um forte, ex.: python -c "import secrets; print(secrets.token_urlsafe(48))"
+  # Pode também vir da env TILECLASS_JWT_SECRET.
+  jwt_secret: "trocar-em-producao-por-secret-forte"
+  access_token_expiry_hours: 8
+  refresh_token_expiry_hours: 24
+
+database:
+  path: "tileclass.db"   # relativo a backend/

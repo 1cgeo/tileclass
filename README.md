@@ -1,7 +1,6 @@
 # TileClass
 
-Aplicação web para classificação pixel-a-pixel de tiles de satélite (256×256, 6 classes — config.yaml).
-FastAPI + SQLite (sem ORM) + Vanilla JS.
+Aplicação web para classificação de tiles de satélite — máscara pixel-a-pixel (raster), anotação vetorial (linhas) ou rótulo único por tile (classification). **Tudo é por projeto** e configurado pela UI admin. FastAPI + SQLite (sem ORM) + Vanilla JS.
 
 ## Setup
 
@@ -14,33 +13,53 @@ source .venv/bin/activate
 
 pip install -r requirements.txt
 npm install   # opcional, só pros testes frontend
+
+# Crie seu config.yaml a partir do template e gere um segredo forte:
+cp backend/config.example.yaml backend/config.yaml
+python -c "import secrets; print(secrets.token_urlsafe(48))"   # cole em auth.jwt_secret
 ```
 
-`backend/config.yaml` controla:
-- `tileserver` / `tileserver_secondary` / `tileserver_tertiary` — fontes de imagem
-- `dsg` / `mapbiomas` — overlays mbtiles opcionais
-- `mask_overlay` — cache do overlay admin
-- `auth.jwt_secret` — troque em produção (ou via env `TILECLASS_JWT_SECRET`)
-- `classes` — IDs/nomes/cores
+`backend/config.yaml` (gitignored) carrega **apenas configuração de nível de aplicação/infra** — não há dado de domínio:
+- `auth.jwt_secret` — **obrigatório trocar** o placeholder; o app recusa autenticar com o valor padrão (ou defina via env `TILECLASS_JWT_SECRET`). `access_token_expiry_hours` / `refresh_token_expiry_hours`.
+- `mask_overlay` — cache do overlay admin (`cache_path`, `min_zoom`, `max_zoom`); o diretório é criado automaticamente.
+- `database.path` — caminho do SQLite (relativo a `backend/`).
 
-**Onde colocar os `.mbtiles` grandes:** convenção do repo é `data_external/` na raiz (gitignored). Caminhos no `config.yaml` são `../data_external/<arquivo>.mbtiles` — resolvidos relativos a `backend/`. Mantém o pacote `backend/` enxuto sem GBs de raster.
+**Projetos, classes, layers (imagens/máscaras), geometria de tile e membros NÃO ficam no config.yaml** — vivem no banco e são criados/editados pela UI admin. Cada layer de um projeto aceita: path `.mbtiles` local, URL de tile-server (`http(s)://…/{z}/{x}/{y}`), ou `bingmaps://{z}/{x}/{y}`.
 
-## Inicialização
+**`.mbtiles` grandes:** convenção do repo é `data_external/` na raiz (gitignored); aponte os layers do projeto com `../data_external/<arquivo>.mbtiles` (resolvido relativo a `backend/`).
+
+**Tile-servers remotos e CSP:** o `Content-Security-Policy` em `backend/main.py` libera por padrão `server.arcgisonline.com` e `*.virtualearth.net` (Bing). Se você configurar um layer remoto em outro host, adicione-o a `img-src`/`connect-src` na CSP.
+
+## Inicialização (do zero)
+
+Uma instalação nova começa **vazia** — sem projeto, sem classes. O fluxo:
 
 ```bash
-# 1) Cria admin inicial (interativo)
+# 1) Cria o admin global inicial (interativo). Roda init_db() — schema vazio.
 python -m backend.scripts.create_admin
 
-# 2) Importa tiles a partir de pontos centrais (lat,lon).
-#    Tile = 256×256 @ 2.5m/pixel = 640m × 640m no chão (geodésico).
-python -m backend.scripts.import_points --point -23.550 -46.633 centro_sp
-python -m backend.scripts.import_points --csv pontos.csv          # CSV: lat,lon,name
-python -m backend.scripts.import_points --csv pontos.csv --block 3 # NxN ao redor
+# 2) Suba o app (ver "Executar") e faça login como admin.
+
+# 3) Na aba "Projetos" da UI admin, crie o 1º projeto e configure tudo:
+#    nome, kind (raster/vector/classification), classes (cores), os layers
+#    (path .mbtiles / URL / bingmaps://), geometria do tile (tile_px ×
+#    meters_per_pixel) e os membros. (Equivalente: POST /api/admin/projects.)
+
+# 4) Crie os usuários operadores/revisores na aba "Usuários" e adicione-os
+#    como membros do projeto.
+
+# 5) Importe tiles para o projeto (--project é id ou nome; obrigatório quando
+#    há mais de um projeto). Geometria vem do projeto (default 256 @ 2.5m = 640m).
+python -m backend.scripts.import_points --point -23.550 -46.633 centro_sp --project meu-projeto
+python -m backend.scripts.import_points --csv pontos.csv --project meu-projeto           # CSV: lat,lon,name
+python -m backend.scripts.import_points --csv pontos.csv --block 3 --project meu-projeto  # NxN ao redor
 ```
 
 Outros importadores (uso especializado, ver docstring do arquivo):
 - `import_cq_tiles.py` — tiles de CQ vindos de `cq_selection.geoparquet`
 - `import_qc_tiles.py` — tiles do BDF com seed mask do argmax
+
+> Não há projeto "default" pré-criado. Os scripts de import recusam rodar sem um projeto — crie-o primeiro pela UI.
 
 ## Executar
 
@@ -96,20 +115,21 @@ GeoTIFF single-band uint8 256×256, EPSG:4326, NODATA=255, deflate. Cada export 
 
 ```
 backend/
-  main.py              FastAPI app + rotas + static
+  main.py              FastAPI app + lifespan (init_db) + middleware + static
+  routers/             auth, projects (+admin CRUD/classes/members), operator, admin
   auth.py              JWT (HS256) + bcrypt + rate limit + blacklist
   models.py            Pydantic schemas
-  database.py          SQLite WAL, schema, transaction(), log_action
-  config.py            Loader de config.yaml (singleton)
-  geo.py               TILE_PX/METERS_PER_PX/TILE_METERS, bbox_from_center (pyproj.Geod)
-  tile_grid.py         Helpers Web Mercator (build_mbtiles e import_cq)
-  tile_service.py      Fila /next, submit, problem, pause, resume, history
-  admin_service.py     Dashboard, listagem, bulk actions, users, thumbnails
+  database.py          SQLite WAL, schema, migração, transaction(), log_action
+  config.py            Loader de config.yaml (singleton; só infra/segredos)
+  project_service.py   CRUD de projetos/classes/membros, cache, layer_path
+  geo.py               bbox_from_center (pyproj.Geod); geometria é por projeto
+  tile_service.py      Fila /next, submit (raster/vector/classification), pause, resume
+  admin_service.py     Fachada → admin/ (dashboard, tiles_query/mutations, users, thumbnails)
   mask_utils.py        encode/decode PNG ↔ Uint8Array, validação
-  mask_tile_service.py Cache mbtiles do overlay admin (rasteriza máscaras → XYZ)
-  mbtiles_service.py   Reader read-only (singletons primary/dsg/mb)
-  config.yaml
-  scripts/             create_admin, import_*, export_tiles, build_*, merge_db
+  mask_tile_service.py Cache mbtiles do overlay admin (per-projeto)
+  mbtiles_service.py   Pool LRU de readers por (project_id, layer)
+  config.example.yaml  Template (copie para config.yaml, gitignored)
+  scripts/             create_admin, import_*, export_*, build_*, merge_db, verify_db, backup_db
 
 frontend/
   index.html           SPA (login / editor / admin)
@@ -144,7 +164,7 @@ tests/
 | C | Pular para próximo pixel faltante |
 | F | Highlight pixels faltantes (toggle) |
 | D / R | Imagem secundária / terciária (segurar) |
-| T / Y | Overlay DSG / MapBiomas (segurar) |
+| T / Y | Máscara de referência 1ª / 2ª (segurar) |
 | Espaço (segurar) | Esconder máscara |
 | Ctrl+Z | Desfazer |
 | Ctrl+Y / Ctrl+Shift+Z | Refazer |
