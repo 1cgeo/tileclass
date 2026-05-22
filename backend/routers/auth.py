@@ -53,7 +53,8 @@ def me(user: auth.CurrentUser = Depends(auth.get_current_user)):
 
 @router.post("/logout")
 def logout(request: Request, user: auth.CurrentUser = Depends(auth.get_current_user)):
-    """Revoke access (and optionally refresh) tokens by jti."""
+    """Revoke the presented access token by blacklisting its jti. The refresh
+    token (held only by the client) is not revoked here — it expires by TTL."""
     creds = request.headers.get("authorization", "")
     token = creds.split(" ", 1)[1] if creds.startswith("Bearer ") else None
     if token:

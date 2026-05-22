@@ -284,6 +284,52 @@ def test_add_remove_member(client, admin_user, operators):
     assert not any(m["id"] == op["id"] for m in listed)
 
 
+def test_add_member_rejects_invalid_role_and_unknown_targets(client, admin_user, operators, tmp_path):
+    tok = token(client, admin_user["username"], admin_user["password"])
+    op = operators[0]["id"]
+    # Invalid role → 422 (Pydantic Literal) before reaching the service.
+    assert client.post("/api/admin/projects/1/members",
+                       json={"user_id": op, "role": "boss"}, headers=h(tok)).status_code == 422
+    # Unknown user → 404 user_not_found.
+    r = client.post("/api/admin/projects/1/members",
+                    json={"user_id": 99999, "role": "operator"}, headers=h(tok))
+    assert r.status_code == 404 and r.json()["detail"]["error"] == "user_not_found"
+    # Unknown project → 404 project_not_found.
+    r = client.post("/api/admin/projects/99999/members",
+                    json={"user_id": op, "role": "operator"}, headers=h(tok))
+    assert r.status_code == 404 and r.json()["detail"]["error"] == "project_not_found"
+
+
+def test_create_rejects_unknown_kind(client, admin_user, tmp_path):
+    """An out-of-enum kind is rejected (422 by the Pydantic Literal)."""
+    tok = token(client, admin_user["username"], admin_user["password"])
+    r = client.post("/api/admin/projects",
+                    json={"name": "weird", "kind": "segmentation",
+                          "primary_mbtiles": _stub_mbtiles(tmp_path),
+                          "classes": [{"id": 1, "name": "x", "color": "#112233"}]},
+                    headers=h(tok))
+    assert r.status_code == 422
+
+
+def test_require_membership_insufficient_role(app_env, admin_user, operators, default_project):
+    """An operator-tier member is rejected (403 insufficient_project_role) where
+    a higher min_role is demanded (e.g. reviewer-only operations)."""
+    import pytest
+    from fastapi import HTTPException
+    from backend import project_service, auth
+    # op1 is a member of project 1 with role 'operator' (conftest adds reviewer;
+    # set explicitly to operator for this check).
+    project_service.add_member(default_project, operators[0]["id"], "operator", by_user=admin_user["id"])
+    user = auth.CurrentUser(operators[0]["id"], operators[0]["username"], "operator")
+    # operator tier satisfies min_role='operator' …
+    assert project_service.require_membership(default_project, user, min_role="operator") == "operator"
+    # … but not min_role='reviewer'.
+    with pytest.raises(HTTPException) as exc:
+        project_service.require_membership(default_project, user, min_role="reviewer")
+    assert exc.value.status_code == 403
+    assert exc.value.detail["error"] == "insufficient_project_role"
+
+
 def test_member_endpoints_require_admin(client, admin_user, operators):
     op_tok = token(client, operators[0]["username"], operators[0]["password"])
     r = client.post(

@@ -2,10 +2,9 @@
 import os
 import time
 import secrets
-from datetime import datetime, timezone
 import bcrypt
 import jwt
-from fastapi import Depends, HTTPException, Request, status
+from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from .config import get_config
 from .database import connect, transaction

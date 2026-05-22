@@ -115,3 +115,25 @@ def test_operator_cannot_escalate_via_malformed_role_claim(client, operators):
     assert r.status_code == 403, (
         "Backend trusted JWT role claim instead of DB role — privilege escalation risk"
     )
+
+
+def test_secret_fail_closed_rejects_placeholder(monkeypatch):
+    """`_secret()` must refuse a placeholder jwt_secret in production (when
+    TILECLASS_ALLOW_DEFAULT_SECRET is unset) — a security invariant otherwise
+    only assumed."""
+    import pytest
+    from backend import auth as authmod
+    monkeypatch.delenv("TILECLASS_ALLOW_DEFAULT_SECRET", raising=False)
+    monkeypatch.setattr(authmod, "get_config",
+                        lambda: {"auth": {"jwt_secret": "trocar-em-producao-por-secret-forte"}})
+    with pytest.raises(RuntimeError):
+        authmod._secret()
+    # Empty / common placeholders also rejected.
+    for placeholder in ("", "changeme", "secret"):
+        monkeypatch.setattr(authmod, "get_config", lambda p=placeholder: {"auth": {"jwt_secret": p}})
+        with pytest.raises(RuntimeError):
+            authmod._secret()
+    # A strong, unique secret is accepted.
+    monkeypatch.setattr(authmod, "get_config",
+                        lambda: {"auth": {"jwt_secret": "x9Q2-strong-unique-secret-not-default"}})
+    assert authmod._secret() == "x9Q2-strong-unique-secret-not-default"

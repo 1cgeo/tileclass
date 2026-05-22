@@ -13,6 +13,7 @@ import { showToast } from "./toast.js";
 import { tileTransformRequest, makeRasterStyle } from "./maplib.js";
 import {
     addFeature, removeFeature, updateFeatureProps, snapToEndpoint,
+    moveVertex, insertVertex, removeVertex,
     makeHistory, push, undo, redo,
     validateBeforeSubmit, emptyFC, SNAP_TOLERANCE_DEG, ALLOWED_DIRECTIONS,
 } from "./vector-core.js";
@@ -25,12 +26,15 @@ let _history = makeHistory();
 let _tool = "pen";       // 'pen' | 'select'
 let _draftCoords = null;  // [[lng, lat], ...] in-progress feature
 let _selectedIdx = -1;
+let _selectedVertex = -1; // index of the highlighted vertex on the selected feature
+let _drag = null;         // { vi } while dragging a vertex
 let _kbHandler = null;
 
 const VECTOR_LAYERS = {
     committed: "vec-committed",
     selected: "vec-selected",
     draft: "vec-draft",
+    midpoints: "vec-midpoints",
     handles: "vec-handles",
 };
 
@@ -41,6 +45,8 @@ export async function enterVectorTile(tile, project) {
     _tile = tile;
     _history = makeHistory();
     _selectedIdx = -1;
+    _selectedVertex = -1;
+    _drag = null;
     _draftCoords = null;
     _setupContainer();
     _ensureSidebarPanel();
@@ -101,8 +107,14 @@ export function exitVectorTile() {
     }
     document.getElementById("map-vector")?.classList.add("hidden");
     document.getElementById("vector-attr-panel")?.classList.add("hidden");
+    // Restore the raster canvas-stack (hidden by _setupContainer) so switching
+    // to a raster project doesn't leave a blank editor.
+    const stack = document.getElementById("canvas-stack");
+    if (stack) stack.style.display = "";
     _draftCoords = null;
     _selectedIdx = -1;
+    _selectedVertex = -1;
+    _drag = null;
 }
 
 export function getCurrentBody() {
@@ -170,13 +182,14 @@ function _setTool(t) {
     }
     _draftCoords = null;
     _selectedIdx = -1;
+    _selectedVertex = -1;
     _refreshAttrForm();
     _refreshLayers();
     const hint = document.getElementById("vector-hint");
     if (hint) {
         hint.textContent = t === "pen"
             ? "Pen: clique adiciona vértice; duplo-clique encerra; ESC cancela."
-            : "Selecionar: clique numa linha → editar atributos; Del remove.";
+            : "Selecionar: clique numa linha → editar atributos. Arraste um vértice p/ mover; clique no ponto amarelo p/ inserir; Del remove o vértice (ou a feature).";
     }
 }
 
@@ -192,9 +205,17 @@ function _bindKeyboard() {
             _refreshLayers();
         } else if ((ev.key === "Delete" || ev.key === "Backspace")
                    && _tool === "select" && _selectedIdx >= 0) {
-            _commit(removeFeature(_fc, _selectedIdx));
-            _selectedIdx = -1;
-            _refreshAttrForm();
+            if (_selectedVertex >= 0) {
+                // A vertex is highlighted → remove just that vertex (refuses
+                // below 2; fall back to nothing if it would).
+                _commit(removeVertex(_fc, _selectedIdx, _selectedVertex));
+                _selectedVertex = -1;
+                _refreshLayers();
+            } else {
+                _commit(removeFeature(_fc, _selectedIdx));
+                _selectedIdx = -1;
+                _refreshAttrForm();
+            }
         } else if ((ev.ctrlKey || ev.metaKey) && ev.key === "z") {
             const r = undo(_history, _fc);
             _history = r.history;
@@ -251,6 +272,22 @@ function _addFeatureLayers() {
             "line-dasharray": [2, 2],
         },
     });
+    // Segment midpoints (select mode) — click to insert a vertex.
+    _map.addSource(VECTOR_LAYERS.midpoints, {
+        type: "geojson", data: emptyFC(),
+    });
+    _map.addLayer({
+        id: VECTOR_LAYERS.midpoints,
+        type: "circle",
+        source: VECTOR_LAYERS.midpoints,
+        paint: {
+            "circle-radius": 3,
+            "circle-color": "#ffb300",
+            "circle-opacity": 0.7,
+            "circle-stroke-color": "#7a5200",
+            "circle-stroke-width": 1,
+        },
+    });
     _map.addSource(VECTOR_LAYERS.handles, {
         type: "geojson", data: emptyFC(),
     });
@@ -259,9 +296,10 @@ function _addFeatureLayers() {
         type: "circle",
         source: VECTOR_LAYERS.handles,
         paint: {
-            "circle-radius": 4,
+            // Selected vertex is drawn larger.
+            "circle-radius": ["case", ["==", ["get", "sel"], 1], 6, 4],
             "circle-color": "#ffffff",
-            "circle-stroke-color": "#e41a1c",
+            "circle-stroke-color": ["case", ["==", ["get", "sel"], 1], "#ff7f00", "#e41a1c"],
             "circle-stroke-width": 2,
         },
     });
@@ -269,8 +307,13 @@ function _addFeatureLayers() {
 
 function _wireMapEvents() {
     _map.on("click", (e) => {
-        if (_tool === "pen") _onPenClick(e.lngLat);
-        else if (_tool === "select") _onSelectClick(e);
+        if (_tool === "pen") { _onPenClick(e.lngLat); return; }
+        if (_tool === "select") {
+            // A click that landed on a handle/midpoint is handled by their own
+            // listeners; don't also run feature-select.
+            if (_hitHandleOrMidpoint(e.point)) return;
+            _onSelectClick(e);
+        }
     });
     _map.on("dblclick", (e) => {
         if (_tool === "pen" && _draftCoords && _draftCoords.length >= 2) {
@@ -278,6 +321,59 @@ function _wireMapEvents() {
             _finishDraft();
         }
     });
+
+    // --- Vertex editing (select mode) ---
+    // Click a midpoint → insert a vertex there.
+    _map.on("click", VECTOR_LAYERS.midpoints, (e) => {
+        if (_tool !== "select" || _selectedIdx < 0) return;
+        const seg = e.features?.[0]?.properties?.seg;
+        if (seg == null) return;
+        const ll = e.lngLat;
+        _commit(insertVertex(_fc, _selectedIdx, seg, ll.lng, ll.lat));
+        _selectedVertex = seg + 1;  // the new vertex
+        _refreshLayers();
+    });
+    // Press a vertex handle → select it; drag → move it.
+    _map.on("mousedown", VECTOR_LAYERS.handles, (e) => {
+        if (_tool !== "select" || _selectedIdx < 0) return;
+        const vi = e.features?.[0]?.properties?.vi;
+        if (vi == null) return;
+        e.preventDefault();                 // stop the map from panning
+        _selectedVertex = vi;
+        _drag = { vi, moved: false };
+        _history = push(_history, _fc);     // one undo frame per drag
+        _map.getCanvas().style.cursor = "grabbing";
+    });
+    _map.on("mousemove", (e) => {
+        if (!_drag) return;
+        _drag.moved = true;
+        // Live update without pushing extra history frames.
+        _fc = moveVertex(_fc, _selectedIdx, _drag.vi, e.lngLat.lng, e.lngLat.lat);
+        _refreshLayers();
+    });
+    _map.on("mouseup", () => {
+        if (!_drag) return;
+        if (!_drag.moved) {
+            // A click (no movement) just selects the vertex — discard the
+            // pre-emptive history frame we pushed on mousedown.
+            const r = undo(_history, _fc);
+            _history = r.history; _fc = r.snapshot;
+        }
+        _drag = null;
+        _map.getCanvas().style.cursor = "";
+        _refreshLayers();
+        _refreshMeta();
+    });
+}
+
+// True if the screen point is on a vertex handle or a midpoint (so a generic
+// select click should be suppressed).
+function _hitHandleOrMidpoint(point) {
+    if (_selectedIdx < 0) return false;
+    const hits = _map.queryRenderedFeatures(point, {
+        layers: [VECTOR_LAYERS.handles, VECTOR_LAYERS.midpoints],
+    });
+    return hits.length > 0;
 }
 
 function _onPenClick(lngLat) {
@@ -313,6 +409,7 @@ function _onSelectClick(e) {
     });
     if (!features.length) {
         _selectedIdx = -1;
+        _selectedVertex = -1;
         _refreshAttrForm();
         _refreshLayers();
         return;
@@ -325,6 +422,7 @@ function _onSelectClick(e) {
     );
     if (idx >= 0) {
         _selectedIdx = idx;
+        _selectedVertex = -1;
         _refreshAttrForm();
         _refreshLayers();
     }
@@ -348,15 +446,44 @@ function _refreshLayers() {
         }],
     } : emptyFC();
     _map.getSource(VECTOR_LAYERS.draft).setData(draft);
-    const handles = _draftCoords ? {
-        type: "FeatureCollection",
-        features: _draftCoords.map(c => ({
-            type: "Feature",
-            geometry: { type: "Point", coordinates: c },
-            properties: {},
-        })),
-    } : emptyFC();
+
+    // Handles: draft vertices while drawing; otherwise the selected feature's
+    // editable vertices (+ segment midpoints for insertion) in select mode.
+    let handles = emptyFC();
+    let midpoints = emptyFC();
+    if (_draftCoords) {
+        handles = {
+            type: "FeatureCollection",
+            features: _draftCoords.map(c => ({
+                type: "Feature",
+                geometry: { type: "Point", coordinates: c },
+                properties: {},
+            })),
+        };
+    } else if (_tool === "select" && _selectedIdx >= 0 && _fc.features[_selectedIdx]) {
+        const coords = _fc.features[_selectedIdx].geometry.coordinates;
+        handles = {
+            type: "FeatureCollection",
+            features: coords.map((c, i) => ({
+                type: "Feature",
+                geometry: { type: "Point", coordinates: c },
+                properties: { vi: i, sel: i === _selectedVertex ? 1 : 0 },
+            })),
+        };
+        midpoints = {
+            type: "FeatureCollection",
+            features: coords.slice(0, -1).map((c, i) => ({
+                type: "Feature",
+                geometry: {
+                    type: "Point",
+                    coordinates: [(c[0] + coords[i + 1][0]) / 2, (c[1] + coords[i + 1][1]) / 2],
+                },
+                properties: { seg: i },
+            })),
+        };
+    }
     _map.getSource(VECTOR_LAYERS.handles).setData(handles);
+    _map.getSource(VECTOR_LAYERS.midpoints).setData(midpoints);
 }
 
 function _refreshMeta() {

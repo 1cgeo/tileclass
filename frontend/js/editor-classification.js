@@ -67,6 +67,9 @@ export function exitClassificationTile() {
     }
     document.getElementById("map-classification")?.classList.add("hidden");
     document.getElementById("classification-panel")?.classList.add("hidden");
+    // Restore the raster canvas-stack hidden by _setupContainer.
+    const stack = document.getElementById("canvas-stack");
+    if (stack) stack.style.display = "";
     _selectedClassId = null;
 }
 

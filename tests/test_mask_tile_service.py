@@ -282,3 +282,42 @@ def test_endpoint_rejects_xy_out_of_range(client, admin_user):
     t = token(client, admin_user["username"], admin_user["password"])
     r = client.get(f"/api/admin/mask-tiles/{_PID}/8/9999/0.png", headers=h(t))
     assert r.status_code == 404
+
+
+def test_cache_is_isolated_per_project(app_env):
+    """Each project caches into its own <base>_p<id>.mbtiles, so two projects
+    covering the same XYZ tile with DIFFERENT palettes never share rows / leak
+    each other's colors."""
+    from tests.conftest import _seed_test_project
+    conn = connect()
+    try:
+        _seed_test_project(conn)  # project 1: class 1 = #377eb8 (blue)
+        # Project 2: class 1 = magenta, so a shared row would be visibly wrong.
+        conn.execute("INSERT INTO projects(id,name,kind,tile_px,meters_per_pixel,"
+                     "mask_complete_required,primary_mbtiles,active,created_at) "
+                     "VALUES (2,'p2','raster',256,2.5,1,'',1,'2026-01-01T00:00:00+00:00')")
+        conn.execute("INSERT INTO project_classes(project_id,class_id,name,color,ordering) "
+                     "VALUES (2,1,'alvo','#ff00ff',0)")
+        png = encode_mask(bytes([1]) * (TILE_SIZE * TILE_SIZE))
+        now = datetime.now(timezone.utc).isoformat()
+        for pid in (1, 2):
+            conn.execute(
+                "INSERT INTO tiles(project_id,name,bbox_west,bbox_south,bbox_east,bbox_north,"
+                "status,classified_at,data_png) VALUES (?,?,?,?,?,?, 'classified',?,?)",
+                (pid, f"iso{pid}", *_BBOX, now, png),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    z, x, y = _wm_tile_for(_BBOX, 14)
+    a1 = _png_array(mts.get_tile(1, z, x, y))
+    a2 = _png_array(mts.get_tile(2, z, x, y))
+    op1 = a1[a1[..., 3] > 0]
+    op2 = a2[a2[..., 3] > 0]
+    assert len(op1) and len(op2)
+    # Project 1 → blue-ish (R<G<B); project 2 → magenta (high R and B, low G).
+    assert (op1[:, 2] > op1[:, 0]).any()                      # blue present in p1
+    assert ((op2[:, 0] > 200) & (op2[:, 1] < 80) & (op2[:, 2] > 200)).any()  # magenta in p2
+    # The two cache files are distinct.
+    assert mts.cache_path(1) != mts.cache_path(2)

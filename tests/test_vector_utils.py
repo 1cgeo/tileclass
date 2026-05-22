@@ -162,6 +162,31 @@ def test_topology_detects_simple_cycle():
     assert any("ciclo" in e.lower() for e in errs)
 
 
+def test_topology_detects_reverse_edge_cycle():
+    """All-`reverse` edges (oriented b→a) still form a directed cycle. Mirrors
+    the JS vector-core test — the Python validator is a separate copy that could
+    regress without this."""
+    feats = [
+        _line([[0, 0], [1, 0]], direction="reverse"),
+        _line([[1, 0], [1, 1]], direction="reverse"),
+        _line([[1, 1], [0, 0]], direction="reverse"),
+    ]
+    errs = validate_topology(feats)
+    assert any("ciclo" in e.lower() for e in errs)
+
+
+def test_topology_no_false_positive_on_converging_dag():
+    """A diamond (a→b, a→c, b→d, c→d) has two paths converging but NO cycle —
+    must not be flagged."""
+    feats = [
+        _line([[0, 0], [1, 1]], direction="forward"),
+        _line([[0, 0], [1, -1]], direction="forward"),
+        _line([[1, 1], [2, 0]], direction="forward"),
+        _line([[1, -1], [2, 0]], direction="forward"),
+    ]
+    assert validate_topology(feats) == []
+
+
 def test_topology_snaps_endpoints_within_tolerance():
     """Two segments with endpoints within tolerance share a node, so the
     chain is recognized (not flagged as disconnected)."""

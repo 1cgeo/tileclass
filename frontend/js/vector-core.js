@@ -51,6 +51,47 @@ export function updateFeatureGeometry(fc, idx, coords) {
     };
 }
 
+// ---- Vertex editing (move / insert / remove) -------------------------------
+//
+// Operate on one feature's LineString immutably (properties preserved via
+// updateFeatureGeometry). Out-of-range indices are no-ops returning the same
+// FC, so the caller never has to guard.
+
+export function moveVertex(fc, featureIdx, vertexIdx, lng, lat) {
+    const f = fc.features[featureIdx];
+    if (!f) return fc;
+    const c = f.geometry?.coordinates || [];
+    if (vertexIdx < 0 || vertexIdx >= c.length) return fc;
+    const coords = c.map((p, i) => (i === vertexIdx ? [lng, lat] : [p[0], p[1]]));
+    return updateFeatureGeometry(fc, featureIdx, coords);
+}
+
+// Insert a vertex into the segment between vertices segmentIdx and segmentIdx+1.
+export function insertVertex(fc, featureIdx, segmentIdx, lng, lat) {
+    const f = fc.features[featureIdx];
+    if (!f) return fc;
+    const c = f.geometry?.coordinates || [];
+    if (segmentIdx < 0 || segmentIdx >= c.length - 1) return fc;
+    const coords = [];
+    for (let i = 0; i < c.length; i++) {
+        coords.push([c[i][0], c[i][1]]);
+        if (i === segmentIdx) coords.push([lng, lat]);
+    }
+    return updateFeatureGeometry(fc, featureIdx, coords);
+}
+
+// Remove a vertex. Refuses (returns the same FC) if it would drop the line
+// below the 2 vertices a LineString requires.
+export function removeVertex(fc, featureIdx, vertexIdx) {
+    const f = fc.features[featureIdx];
+    if (!f) return fc;
+    const c = f.geometry?.coordinates || [];
+    if (vertexIdx < 0 || vertexIdx >= c.length) return fc;
+    if (c.length <= 2) return fc;
+    const coords = c.filter((_, i) => i !== vertexIdx).map(p => [p[0], p[1]]);
+    return updateFeatureGeometry(fc, featureIdx, coords);
+}
+
 // ---- Snap-to-vertex --------------------------------------------------------
 
 // Returns the existing vertex closest to `point` within `tolerance` degrees,

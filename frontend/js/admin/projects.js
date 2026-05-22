@@ -273,6 +273,22 @@ function renderProjectDetail(proj, members) {
         </section>
 
         <section class="project-section">
+            <h4>Adicionar tiles</h4>
+            <p class="muted">Cria tiles a partir de centros (lat, lon). A geometria vem do projeto (${Math.round(proj.tile_meters)}m no chão por tile). Bloco NxN (ímpar) cria vizinhos colados ao redor de cada ponto.</p>
+            <div class="filter-bar">
+                <input id="ing-lat" type="number" step="any" placeholder="lat" style="width:8em">
+                <input id="ing-lon" type="number" step="any" placeholder="lon" style="width:8em">
+                <input id="ing-name" type="text" placeholder="nome (opcional)" style="width:10em">
+                <input id="ing-block" type="number" min="1" step="2" value="1" title="bloco NxN ímpar (1, 3, 5...)" style="width:6em">
+                <button class="primary" id="btn-add-tile">Adicionar ponto</button>
+            </div>
+            <div class="filter-bar">
+                <label class="muted">CSV (colunas lat,lon,name): <input id="ing-csv" type="file" accept=".csv,text/csv"></label>
+                <button id="btn-add-csv">Importar CSV</button>
+            </div>
+        </section>
+
+        <section class="project-section">
             <h4>Exportar dados</h4>
             <p class="muted">Baixa os dados prontos do projeto em ZIP. Formato: <strong>${exportFormatLabel(proj.kind)}</strong>. Inclui um manifest com status/autoria/bbox por tile.</p>
             <div class="filter-bar">
@@ -281,10 +297,66 @@ function renderProjectDetail(proj, members) {
                     <option value="classified">Somente classificados</option>
                     <option value="reviewed_classified">Revisados + classificados</option>
                 </select>
-                <button class="primary" id="btn-export">Baixar export (ZIP)</button>
+                <button class="primary" id="btn-export">Gerar export (ZIP)</button>
             </div>
+            <p class="muted" id="export-status-line"></p>
         </section>
     `;
+}
+
+async function _postTiles(projectId, points, block) {
+    if (!points.length) { showToast("Nenhum ponto válido.", "error"); return; }
+    try {
+        const res = await apiPostJson(`/api/admin/projects/${projectId}/tiles`, { points, block });
+        showToast(`Tiles: ${res.inserted} criado(s), ${res.skipped} já existia(m).`, "ok");
+    } catch (e) {
+        showToast(`Falha ao adicionar tiles: ${e.message}`, "error", 6000);
+    }
+}
+
+function _blockValue() {
+    return parseInt(document.getElementById("ing-block").value, 10) || 1;
+}
+
+function addTileFromForm(projectId) {
+    const lat = parseFloat(document.getElementById("ing-lat").value);
+    const lon = parseFloat(document.getElementById("ing-lon").value);
+    const name = document.getElementById("ing-name").value.trim();
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+        showToast("Informe lat e lon válidos.", "error");
+        return;
+    }
+    _postTiles(projectId, [{ lat, lon, name: name || null }], _blockValue());
+}
+
+function parseCsvPoints(text) {
+    const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    if (!lines.length) return [];
+    let start = 0;
+    let cols = { lat: 0, lon: 1, name: 2 };
+    if (lines[0].toLowerCase().includes("lat")) {
+        const parts = lines[0].split(",").map(s => s.trim().toLowerCase());
+        cols = { lat: parts.indexOf("lat"), lon: parts.indexOf("lon"), name: parts.indexOf("name") };
+        start = 1;
+    }
+    const pts = [];
+    for (let i = start; i < lines.length; i++) {
+        const f = lines[i].split(",");
+        const lat = parseFloat(f[cols.lat]);
+        const lon = parseFloat(f[cols.lon]);
+        if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+        const name = cols.name >= 0 && f[cols.name] ? f[cols.name].trim() : null;
+        pts.push({ lat, lon, name });
+    }
+    return pts;
+}
+
+async function addTilesFromCsv(projectId) {
+    const file = document.getElementById("ing-csv").files?.[0];
+    if (!file) { showToast("Selecione um arquivo CSV.", "error"); return; }
+    const pts = parseCsvPoints(await file.text());
+    if (!pts.length) { showToast("CSV sem pontos válidos (esperado lat,lon,name).", "error"); return; }
+    _postTiles(projectId, pts, _blockValue());
 }
 
 function exportFormatLabel(kind) {
@@ -294,40 +366,65 @@ function exportFormatLabel(kind) {
     return "GeoTIFF (.tif, EDGV) + manifest.csv";
 }
 
-async function downloadExport(projectId) {
+// Asynchronous export: create a background job, poll until it's done, then
+// download the artifact. Keeps the UI responsive for large datasets that would
+// otherwise time out a synchronous request.
+async function runExportJob(projectId) {
     const btn = document.getElementById("btn-export");
+    const line = document.getElementById("export-status-line");
     const status = document.getElementById("export-status").value;
     const prev = btn.textContent;
     btn.disabled = true;
     btn.textContent = "Gerando...";
+    const setLine = (t) => { if (line) line.textContent = t; };
     try {
-        const res = await fetch(`/api/admin/projects/${projectId}/export?status=${status}`,
-                                { headers: authHeader() });
-        if (!res.ok) {
-            let msg = res.statusText;
-            try { const b = await res.json(); msg = b?.detail?.message || b?.detail?.error || msg; } catch {}
-            throw new Error(msg);
-        }
-        const count = res.headers.get("X-Tile-Count");
-        const cd = res.headers.get("Content-Disposition") || "";
-        const m = cd.match(/filename="([^"]+)"/);
-        const fname = m ? m[1] : `export_${projectId}.zip`;
-        const blob = await res.blob();
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = fname;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        URL.revokeObjectURL(url);
-        showToast(`Export gerado: ${count ?? "?"} tile(s) em ${fname}.`, "ok");
+        const job = await apiPostJson(`/api/admin/projects/${projectId}/export-jobs?status=${status}`, {});
+        setLine("Export em andamento...");
+        const done = await _pollExportJob(job.id, setLine);
+        if (done.state === "error") throw new Error(done.error || "falha no processamento");
+        await _downloadJobArtifact(done.id);
+        setLine(`Pronto: ${done.tile_count ?? "?"} tile(s).`);
+        showToast(`Export gerado: ${done.tile_count ?? "?"} tile(s).`, "ok");
     } catch (e) {
+        setLine("");
         showToast(`Falha no export: ${e.message}`, "error", 6000);
     } finally {
         btn.disabled = false;
         btn.textContent = prev;
     }
+}
+
+function _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+async function _pollExportJob(jobId, setLine) {
+    for (let i = 0; i < 600; i++) {  // up to ~15 min at 1.5s
+        const job = await apiGet(`/api/admin/export-jobs/${jobId}`);
+        if (job.state === "done" || job.state === "error") return job;
+        setLine(job.state === "running" ? "Processando..." : "Na fila...");
+        await _sleep(1500);
+    }
+    throw new Error("tempo esgotado aguardando o export");
+}
+
+async function _downloadJobArtifact(jobId) {
+    const res = await fetch(`/api/admin/export-jobs/${jobId}/download`, { headers: authHeader() });
+    if (!res.ok) {
+        let msg = res.statusText;
+        try { const b = await res.json(); msg = b?.detail?.error || msg; } catch {}
+        throw new Error(msg);
+    }
+    const cd = res.headers.get("Content-Disposition") || "";
+    const m = cd.match(/filename="?([^"]+)"?/);
+    const fname = m ? m[1] : `export_job_${jobId}.zip`;
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = fname;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
 }
 
 function wireProjectDetail(proj, members) {
@@ -342,7 +439,11 @@ function wireProjectDetail(proj, members) {
     const btnAddMem = document.getElementById("btn-add-member");
     if (btnAddMem) btnAddMem.onclick = () => addMember(proj.id);
     const btnExport = document.getElementById("btn-export");
-    if (btnExport) btnExport.onclick = () => downloadExport(proj.id);
+    if (btnExport) btnExport.onclick = () => runExportJob(proj.id);
+    const btnAddTile = document.getElementById("btn-add-tile");
+    if (btnAddTile) btnAddTile.onclick = () => addTileFromForm(proj.id);
+    const btnAddCsv = document.getElementById("btn-add-csv");
+    if (btnAddCsv) btnAddCsv.onclick = () => addTilesFromCsv(proj.id);
     document.querySelectorAll("[data-rm-mem]").forEach(b => {
         b.onclick = () => removeMember(proj.id, parseInt(b.dataset.rmMem, 10));
     });

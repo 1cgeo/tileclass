@@ -4,7 +4,7 @@ in mbtiles_service so layers stay scoped to a single project."""
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel
 
-from .. import auth, export_service, mbtiles_service, project_service
+from .. import auth, export_service, mbtiles_service, project_service, tile_ingest
 from ..models import (
     ProjectCreateIn, ProjectUpdateIn, ProjectClassesIn, ProjectAttributesIn,
     ProjectMemberIn,
@@ -195,6 +195,23 @@ def export_project(
     )
 
 
+@admin_router.post("/{project_id}/export-jobs")
+def create_export_job(
+    project_id: int,
+    status: str = Query("reviewed", pattern="^(reviewed|classified|reviewed_classified)$"),
+    admin: auth.CurrentUser = Depends(auth.require_admin),
+):
+    """Start an asynchronous export. The ZIP is built off the request thread and
+    written to disk; poll GET /api/admin/export-jobs/{id} and download when
+    state='done'. For large datasets that would time out a synchronous request."""
+    try:
+        return export_service.create_job(project_id, status, by_user=admin.id)
+    except ValueError:
+        raise HTTPException(400, detail={"error": "invalid_status"})
+    except LookupError:
+        raise HTTPException(404, detail={"error": "project_not_found"})
+
+
 class ProjectCloneIn(BaseModel):
     name: str | None = None
 
@@ -210,6 +227,36 @@ def clone_project(
     return project_service.clone_project(
         project_id, new_name=body.name, by_user=admin.id,
     )
+
+
+class TilePointIn(BaseModel):
+    lat: float
+    lon: float
+    name: str | None = None
+
+
+class TileIngestIn(BaseModel):
+    points: list[TilePointIn]
+    block: int = 1
+
+
+@admin_router.post("/{project_id}/tiles")
+def add_project_tiles(
+    project_id: int,
+    body: TileIngestIn,
+    admin: auth.CurrentUser = Depends(auth.require_admin),
+):
+    """Create pending tiles from (lat, lon) centers, optionally as an NxN
+    adjacent block. Geometry comes from the project (tile_px × meters_per_pixel);
+    bbox is geodesic; dedup is per (project, bbox). Returns {inserted, skipped,
+    tile_px, tile_meters}. Shared with the import_points CLI via tile_ingest."""
+    pts = [(p.lat, p.lon, p.name) for p in body.points]
+    try:
+        return tile_ingest.add_points(project_id, pts, block=body.block)
+    except ValueError as e:
+        raise HTTPException(400, detail={"error": str(e)})
+    except LookupError:
+        raise HTTPException(404, detail={"error": "project_not_found"})
 
 
 @admin_router.put("/{project_id}/classes")

@@ -10,6 +10,97 @@ def headers(t): return {"Authorization": f"Bearer {t}"}
 # de verdade (atua antes de checar).
 
 
+def _insert_tile(project_id, name, *, status="pending", **cols):
+    from backend.database import connect
+    base = {"project_id": project_id, "name": name, "bbox_west": 0.0, "bbox_south": 0.0,
+            "bbox_east": 0.1, "bbox_north": 0.1, "status": status}
+    base.update(cols)
+    keys = ",".join(base)
+    conn = connect()
+    try:
+        conn.execute(f"INSERT INTO tiles({keys}) VALUES ({','.join('?'*len(base))})", tuple(base.values()))
+        conn.commit()
+        return conn.execute("SELECT id FROM tiles WHERE project_id=? AND name=?", (project_id, name)).fetchone()["id"]
+    finally:
+        conn.close()
+
+
+def test_admin_tiles_filter_by_search_name_and_id(client, admin_user, tiles):
+    adm = token(client, "admin", "admin123")
+    aid = _insert_tile(1, "alpha_tile")
+    _insert_tile(1, "beta_tile")
+    by_name = client.get("/api/admin/tiles?q=alpha", headers=headers(adm)).json()
+    assert [t["id"] for t in by_name] == [aid]
+    by_id = client.get(f"/api/admin/tiles?q={aid}", headers=headers(adm)).json()
+    assert any(t["id"] == aid for t in by_id)
+
+
+def test_admin_tiles_search_escapes_like_wildcards(client, admin_user, tiles):
+    """`_` in the query is a literal, not a SQL LIKE wildcard."""
+    adm = token(client, "admin", "admin123")
+    underscore = _insert_tile(1, "a_b")
+    _insert_tile(1, "aXb")  # would match if `_` were treated as a wildcard
+    res = client.get("/api/admin/tiles?q=a_b", headers=headers(adm)).json()
+    assert [t["id"] for t in res] == [underscore]
+
+
+def test_admin_tiles_filter_by_user_and_paused(client, admin_user, operators, tiles):
+    adm = token(client, "admin", "admin123")
+    op = token(client, "op1", "secret123")
+    tile = client.get("/api/tiles/next", headers=headers(op)).json()
+    # Pause it (in_progress + paused), then filter.
+    client.post(f"/api/tiles/{tile['id']}/pause",
+                headers={**headers(op), "Content-Type": "application/octet-stream",
+                         "X-Tile-Version": str(tile["version"])},
+                content=np.full(65536, 255, dtype=np.uint8).tobytes())
+    paused = client.get("/api/admin/tiles?paused=true", headers=headers(adm)).json()
+    assert any(t["id"] == tile["id"] for t in paused)
+    not_paused = client.get("/api/admin/tiles?paused=false", headers=headers(adm)).json()
+    assert all(t["id"] != tile["id"] for t in not_paused)
+    # Now classify another tile and filter by the classifier.
+    client.post(f"/api/tiles/{tile['id']}/resume", headers=headers(op))
+    raw = np.full(65536, 1, dtype=np.uint8).tobytes()
+    client.post(f"/api/tiles/{tile['id']}/classify",
+                headers={**headers(op), "Content-Type": "application/octet-stream"}, content=raw)
+    by_user = client.get(f"/api/admin/tiles?user_id={operators[0]['id']}", headers=headers(adm)).json()
+    assert any(t["id"] == tile["id"] for t in by_user)
+
+
+def test_admin_tiles_total_count_matches_filter(client, admin_user, tiles):
+    adm = token(client, "admin", "admin123")
+    _insert_tile(1, "filt_uniquename")
+    r = client.get("/api/admin/tiles?q=filt_uniquename", headers=headers(adm))
+    assert r.headers["x-total-count"] == "1"
+    assert len(r.json()) == 1
+
+
+def test_bulk_report_problem_requires_note_and_clears_body(client, admin_user, operators, tiles):
+    """Bulk report-problem: note required, status→problem, mask wiped to 255."""
+    from backend.database import connect
+    from backend.mask_utils import decode_mask
+    adm = token(client, "admin", "admin123")
+    op = token(client, "op1", "secret123")
+    tile = client.get("/api/tiles/next", headers=headers(op)).json()
+    client.post(f"/api/tiles/{tile['id']}/classify",
+                headers={**headers(op), "Content-Type": "application/octet-stream"},
+                content=np.full(65536, 1, dtype=np.uint8).tobytes())
+    # Empty note rejected.
+    bad = client.post("/api/admin/tiles/bulk/report-problem", headers=headers(adm),
+                      json={"ids": [tile["id"]], "note": "  "})
+    assert bad.status_code in (400, 422)
+    # Valid note: status→problem, note stored, body wiped.
+    ok = client.post("/api/admin/tiles/bulk/report-problem", headers=headers(adm),
+                     json={"ids": [tile["id"]], "note": "nuvens"})
+    assert ok.status_code == 200 and ok.json()["affected"] == 1
+    conn = connect()
+    try:
+        row = conn.execute("SELECT status, problem_note, data_png FROM tiles WHERE id=?", (tile["id"],)).fetchone()
+    finally:
+        conn.close()
+    assert row["status"] == "problem" and row["problem_note"] == "nuvens"
+    assert decode_mask(row["data_png"]) == bytes([255]) * 65536  # wiped
+
+
 def test_bulk_reset(client, admin_user, operators, tiles):
     # op1 classifies tile 1
     tok = token(client, "op1", "secret123")
@@ -411,6 +502,24 @@ def test_cannot_demote_last_active_admin(client, admin_user, operators):
     r = _set_role(client, adm, me["id"], "operator")
     assert r.status_code == 409
     assert "last active admin" in r.json()["detail"].lower()
+
+
+def test_cannot_deactivate_last_active_admin(client, admin_user, operators):
+    """Deactivating the last active admin would lock everyone out — same guard
+    as the role-demotion path."""
+    adm = token(client, "admin", "admin123")
+    me = client.get("/api/auth/me", headers=headers(adm)).json()
+    r = client.patch(f"/api/admin/users/{me['id']}/active",
+                     headers=headers(adm), json={"active": False})
+    assert r.status_code == 409
+    assert "last active admin" in r.json()["detail"].lower()
+    # Still active afterwards.
+    from backend.database import connect
+    conn = connect()
+    try:
+        assert conn.execute("SELECT active FROM users WHERE id=?", (me["id"],)).fetchone()["active"] == 1
+    finally:
+        conn.close()
 
 
 def test_set_role_rejects_invalid_value(client, admin_user, operators):

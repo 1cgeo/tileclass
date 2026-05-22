@@ -36,6 +36,10 @@ def _validate_box(f: Any, idx: int) -> None:
     rings = geom.get("coordinates")
     if not isinstance(rings, list) or not rings:
         raise ValueError(f"feature[{idx}]: Polygon.coordinates vazio")
+    # A bounding box is a single ring — reject polygons with holes/extra rings
+    # so a malformed multi-ring body can't slip through as a "box".
+    if len(rings) != 1:
+        raise ValueError(f"feature[{idx}]: caixa deve ter exatamente 1 anel (sem furos)")
     ring = rings[0]
     if not isinstance(ring, list) or len(ring) < 4:
         raise ValueError(f"feature[{idx}]: anel precisa de ≥4 vértices")

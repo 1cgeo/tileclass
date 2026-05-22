@@ -25,6 +25,37 @@ def _classify(client, op_tok, class_id: int) -> int:
     return nxt["id"]
 
 
+def test_class_distribution_pct_is_per_project(client, admin_user, tiles):
+    """Percentages use a PER-PROJECT denominator — a class's pct is its share of
+    its own project, not of the global pixel total across all projects."""
+    from backend.database import connect
+    from backend.admin.dashboard import class_distribution
+    conn = connect()
+    try:
+        # Project 1 (default): one fully-class-1 tile.
+        conn.execute("UPDATE tiles SET status='reviewed', class_counts=? WHERE id=1",
+                     (json.dumps({"1": 65536}),))
+        # Project 2 (raster) with two classes; tiles split 30000/10000 px.
+        conn.execute("INSERT INTO projects(id,name,kind,tile_px,meters_per_pixel,"
+                     "mask_complete_required,primary_mbtiles,active,created_at) "
+                     "VALUES (2,'p2','raster',256,2.5,1,'',1,'2026-01-01T00:00:00+00:00')")
+        for cid, color in ((2, "#111111"), (3, "#222222")):
+            conn.execute("INSERT INTO project_classes(project_id,class_id,name,color,ordering) "
+                         "VALUES (2,?,?,?,?)", (cid, f"c{cid}", color, cid))
+        for nm, cc in (("p2a", {"2": 30000}), ("p2b", {"3": 10000})):
+            conn.execute("INSERT INTO tiles(project_id,name,bbox_west,bbox_south,bbox_east,bbox_north,"
+                         "status,class_counts) VALUES (2,?,0,0,0.1,0.1,'reviewed',?)",
+                         (nm, json.dumps(cc)))
+        conn.commit()
+    finally:
+        conn.close()
+    dist = class_distribution()
+    by = {(d["project_id"], d["class_id"]): d["pct"] for d in dist}
+    assert by[(1, 1)] == 100.0          # project 1: class 1 is 100% of its 65536
+    assert by[(2, 2)] == 75.0           # project 2 total 40000 → 30000/40000
+    assert by[(2, 3)] == 25.0           # 10000/40000 (NOT diluted by project 1)
+
+
 def test_mixed_class_counts_split_correctly(client, admin_user, operators, tiles):
     """A non-uniform mask must record per-class pixel counts that sum to the
     tile area — guards against a transpose/aggregation bug that a uniform-fill

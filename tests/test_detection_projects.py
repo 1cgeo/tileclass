@@ -373,11 +373,29 @@ def test_report_problem_clears_geojson(client, admin_user, tmp_path):
     assert r.status_code == 200, r.text
     conn = connect()
     try:
-        row = conn.execute("SELECT status, data_geojson FROM tiles WHERE id=?", (tid,)).fetchone()
+        row = conn.execute(
+            "SELECT status, data_geojson, feature_count, class_counts FROM tiles WHERE id=?",
+            (tid,)).fetchone()
     finally:
         conn.close()
     assert row["status"] == "problem"
+    # All body caches wiped — not just data_geojson (CLAUDE.md invariant).
     assert row["data_geojson"] is None
+    assert row["feature_count"] is None
+    assert row["class_counts"] is None
+
+
+def test_submit_rejects_multi_ring_polygon(client, admin_user, tmp_path):
+    """A box is a single ring — a Polygon with a hole/extra ring is rejected."""
+    tok = token(client, admin_user["username"], admin_user["password"])
+    proj = _create(client, tok, tmp_path)
+    tid = _seed_tile(proj["id"], assigned_to=admin_user["id"])
+    outer = [[-50.0, -25.0], [-49.99, -25.0], [-49.99, -24.99], [-50.0, -24.99], [-50.0, -25.0]]
+    hole = [[-49.999, -24.999], [-49.991, -24.999], [-49.991, -24.991], [-49.999, -24.991], [-49.999, -24.999]]
+    multi = {"type": "Feature", "properties": {"class_id": 1},
+             "geometry": {"type": "Polygon", "coordinates": [outer, hole]}}
+    r = _classify(client, tok, tid, _fc(multi))
+    assert r.status_code == 422 and r.json()["detail"]["error"] == "invalid_boxes"
 
 
 def test_box_required_accepts_nonempty(client, admin_user, tmp_path):

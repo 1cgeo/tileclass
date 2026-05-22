@@ -99,6 +99,36 @@ def test_vector_overlay_color_picks_direction_when_attribute_present(client, adm
     assert blue.any(), "expected forward-direction blue pixels"
 
 
+def test_vector_overlay_colors_reverse_and_both(client, admin_user, tmp_path):
+    """The other two direction colors must also render: reverse=red (228,26,28),
+    both=gray (160,160,160). Guards the _DIR_COLORS branches beyond forward."""
+    tok = token(client, admin_user["username"], admin_user["password"])
+    proj = _create_vector_project(
+        client, tok, tmp_path, name="dir2",
+        attrs=[{"key": "direction", "type": "enum", "label": "Dir",
+                "required": True, "options": ["forward", "reverse", "both"]}],
+        topology=True,
+    )
+    bbox = (-50.0, -20.005760, -49.994240, -20.0)
+    _seed_classified_vector(
+        proj["id"], name="t1", bbox=bbox,
+        features=[
+            _line([[-49.999, -20.001], [-49.997, -20.004]], direction="reverse"),
+            _line([[-49.9955, -20.001], [-49.9945, -20.004]], direction="both"),
+        ],
+    )
+    from backend import mask_tile_service as mts
+    z, x_min, y_min, _, _ = (14, *mts.wm_tiles_for_bbox(14, *bbox))
+    arr = np.array(Image.open(io.BytesIO(mts.get_tile(proj["id"], z, x_min, y_min))).convert("RGBA"))
+    opaque = arr[..., 3] > 0
+    red = ((arr[..., 0] >= 223) & (arr[..., 0] <= 233) & (arr[..., 1] >= 21) & (arr[..., 1] <= 31)
+           & (arr[..., 2] >= 23) & (arr[..., 2] <= 33) & opaque)
+    gray = ((arr[..., 0] >= 155) & (arr[..., 0] <= 165) & (arr[..., 1] >= 155) & (arr[..., 1] <= 165)
+            & (arr[..., 2] >= 155) & (arr[..., 2] <= 165) & opaque)
+    assert red.any(), "expected reverse-direction red pixels"
+    assert gray.any(), "expected both-direction gray pixels"
+
+
 # ---- feature_distribution --------------------------------------------------
 
 def test_feature_distribution_aggregates_enum_values(client, admin_user, tmp_path):

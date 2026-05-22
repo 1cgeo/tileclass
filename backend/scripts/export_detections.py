@@ -107,7 +107,8 @@ def run(out_dir, *, status: str = "reviewed", project_id=None,
             except (TypeError, ValueError):
                 continue
             feats = doc.get("features") or []
-            fname = f"gt_{r['name']}.geojson"
+            prefix = "" if project_id is not None else f"p{r['project_id']}_"
+            fname = f"gt_{prefix}{r['name']}.geojson"
             _write_feature_collection(out_dir / fname, {
                 "type": "FeatureCollection", "features": feats,
             })

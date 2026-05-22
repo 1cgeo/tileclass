@@ -33,6 +33,16 @@ BBOX_EPS = 1e-6
 RESUMABLE_STATUSES = {"in_progress", "in_review"}
 
 
+def _table_cols(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+    ).fetchone() is not None
+
+
 def bbox_key(w: float, s: float, e: float, n: float) -> tuple[int, int, int, int]:
     """Hashable bucket that groups bboxes within BBOX_EPS."""
     return (
@@ -83,31 +93,31 @@ def build_project_map(pri: sqlite3.Connection, sec: sqlite3.Connection,
     project_map: dict[int, int] = {}
     reused = inserted = 0
     sec.row_factory = sqlite3.Row
+    # Copy every project column present in BOTH schemas (kind, geometry, flags,
+    # layers — not just a hand-picked subset that silently dropped kind/tile_px
+    # and turned vector/classification/detection projects into raster 256).
+    # `id` is autoincrement and `created_by` is remapped, so exclude both.
+    common_cols = [c for c in (_table_cols(pri, "projects") & _table_cols(sec, "projects"))
+                   if c not in ("id", "created_by")]
     sec_projects = sec.execute("SELECT * FROM projects").fetchall()
+    sec_has_attrs = _table_exists(sec, "project_attributes")
     for sp in sec_projects:
         sid = sp["id"]
         if sp["name"] in pri_by_name:
             project_map[sid] = pri_by_name[sp["name"]]
             reused += 1
             continue
-        # Insert new project; created_by may be a secondary user id we just
-        # mapped, otherwise NULL.
         created_by = user_map.get(sp["created_by"]) if sp["created_by"] else None
+        col_list = common_cols + ["created_by"]
+        placeholders = ", ".join("?" for _ in col_list)
         cur = pri.execute(
-            """INSERT INTO projects(name, description, mask_complete_required,
-               primary_mbtiles, secondary_mbtiles, tertiary_mbtiles,
-               ref_mask_primary_mbtiles, ref_mask_secondary_mbtiles,
-               active, created_by, created_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
-            (sp["name"], sp["description"], sp["mask_complete_required"],
-             sp["primary_mbtiles"], sp["secondary_mbtiles"], sp["tertiary_mbtiles"],
-             sp["ref_mask_primary_mbtiles"], sp["ref_mask_secondary_mbtiles"],
-             sp["active"], created_by, sp["created_at"]),
+            f"INSERT INTO projects({', '.join(col_list)}) VALUES ({placeholders})",
+            [sp[c] for c in common_cols] + [created_by],
         )
         new_pid = cur.lastrowid
         project_map[sid] = new_pid
         pri_by_name[sp["name"]] = new_pid
-        # Copy classes verbatim.
+        # Copy classes verbatim (raster/classification/detection).
         for cl in sec.execute(
             "SELECT class_id, name, color, ordering FROM project_classes WHERE project_id=?",
             (sid,),
@@ -117,6 +127,18 @@ def build_project_map(pri: sqlite3.Connection, sec: sqlite3.Connection,
                    VALUES(?,?,?,?,?)""",
                 (new_pid, cl["class_id"], cl["name"], cl["color"], cl["ordering"]),
             )
+        # Copy vector attribute schema (older secondaries may lack the table).
+        if sec_has_attrs:
+            for a in sec.execute(
+                "SELECT key, label, type, required, options_json, ordering "
+                "FROM project_attributes WHERE project_id=?", (sid,),
+            ):
+                pri.execute(
+                    """INSERT INTO project_attributes(project_id, key, label, type,
+                       required, options_json, ordering) VALUES(?,?,?,?,?,?,?)""",
+                    (new_pid, a["key"], a["label"], a["type"], a["required"],
+                     a["options_json"], a["ordering"]),
+                )
         # Copy memberships through user_map.
         for m in sec.execute(
             "SELECT user_id, role FROM project_members WHERE project_id=?", (sid,)
@@ -144,10 +166,17 @@ def build_tile_map(pri: sqlite3.Connection, sec: sqlite3.Connection,
     ):
         pri_bboxes[(row[1], bbox_key(row[2], row[3], row[4], row[5]))] = row[0]
 
-    cols = ("project_id", "name", "bbox_west", "bbox_south", "bbox_east", "bbox_north",
-            "status", "assigned_to", "classified_by", "reviewed_by",
-            "classified_at", "reviewed_at", "data_png", "problem_note",
-            "version", "paused_at")
+    # Copy every body/meta column present in BOTH schemas — including the
+    # non-raster bodies (data_geojson/data_class_id/feature_count/class_counts)
+    # and blocked_from/last_heartbeat_at — instead of a raster-only subset that
+    # silently dropped vector/classification/detection tile contents.
+    _desired = ("project_id", "name", "bbox_west", "bbox_south", "bbox_east", "bbox_north",
+                "status", "assigned_to", "classified_by", "reviewed_by",
+                "classified_at", "reviewed_at", "data_png", "problem_note",
+                "version", "paused_at", "blocked_from", "class_counts",
+                "last_heartbeat_at", "data_geojson", "feature_count", "data_class_id")
+    available = _table_cols(pri, "tiles") & _table_cols(sec, "tiles")
+    cols = tuple(c for c in _desired if c in available)
     placeholders = ", ".join("?" for _ in cols)
     insert_sql = f"INSERT INTO tiles({', '.join(cols)}) VALUES ({placeholders})"
 

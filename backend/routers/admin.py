@@ -3,9 +3,9 @@ from datetime import datetime
 from enum import Enum
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 
-from .. import auth, admin_service, mask_tile_service, mbtiles_service, project_service
+from .. import auth, admin_service, export_service, mask_tile_service, mbtiles_service, project_service
 from ..models import (
     AssignTileIn, BulkAssignIn, BulkReportProblemIn, BulkTileIdsIn,
     CreateUserIn, DashboardOut, ResetReasonIn, SetActiveIn, SetCanReviewIn,
@@ -361,3 +361,28 @@ def admin_clear_overlay_cache(u: auth.CurrentUser = Depends(auth.require_admin))
     needed (use after a bulk import or palette change)."""
     deleted = mask_tile_service.clear_cache()
     return {"deleted": deleted}
+
+
+@router.get("/export-jobs/{job_id}")
+def admin_get_export_job(job_id: int = Path(ge=1),
+                         u: auth.CurrentUser = Depends(auth.require_admin)):
+    """Poll an async export job: state pending|running|done|error (+ filename,
+    tile_count, error when applicable)."""
+    job = export_service.get_job(job_id)
+    if not job:
+        raise HTTPException(404, detail={"error": "job_not_found"})
+    return job
+
+
+@router.get("/export-jobs/{job_id}/download")
+def admin_download_export_job(job_id: int = Path(ge=1),
+                              u: auth.CurrentUser = Depends(auth.require_admin)):
+    """Download a finished job's ZIP. 409 if it isn't done yet."""
+    try:
+        path, fname = export_service.job_artifact(job_id)
+    except ValueError:
+        raise HTTPException(409, detail={"error": "not_ready"})
+    except LookupError as e:
+        raise HTTPException(404, detail={"error": str(e)})
+    return FileResponse(path, media_type="application/zip", filename=fname,
+                        headers={"Access-Control-Expose-Headers": "Content-Disposition"})

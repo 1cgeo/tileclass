@@ -99,7 +99,12 @@ def class_distribution(project_id: int | None = None) -> list[dict]:
                 names[(pid, c["class_id"])] = (c["name"], c["color"])
     finally:
         conn.close()
-    grand = sum(totals.values()) or 1
+    # Percentages are PER PROJECT — different projects have unrelated palettes
+    # and pixel scales, so a global denominator would make the pct meaningless
+    # when the dashboard isn't project-scoped.
+    project_totals: dict[int, int] = {}
+    for (pid, _cid), pixels in totals.items():
+        project_totals[pid] = project_totals.get(pid, 0) + pixels
     out = []
     for (pid, cid), pixels in sorted(totals.items(), key=lambda kv: (-kv[1],)):
         name, color = names.get((pid, cid), (f"#{cid}", "#888888"))
@@ -109,7 +114,7 @@ def class_distribution(project_id: int | None = None) -> list[dict]:
             "name": name,
             "color": color,
             "pixels": pixels,
-            "pct": round(100.0 * pixels / grand, 2),
+            "pct": round(100.0 * pixels / (project_totals[pid] or 1), 2),
         })
     return out
 
@@ -216,7 +221,11 @@ def tile_class_distribution(project_id: int | None = None) -> list[dict]:
         ).fetchall()
     finally:
         conn.close()
-    grand = sum(r["c"] for r in rows) or 1
+    # Per-project percentages (see class_distribution — global denominator
+    # mixes unrelated projects).
+    project_totals: dict[int, int] = {}
+    for r in rows:
+        project_totals[r["project_id"]] = project_totals.get(r["project_id"], 0) + r["c"]
     return [
         {
             "project_id": r["project_id"],
@@ -224,7 +233,7 @@ def tile_class_distribution(project_id: int | None = None) -> list[dict]:
             "name": r["name"] or f"#{r['class_id']}",
             "color": r["color"] or "#888888",
             "count": r["c"],
-            "pct": round(100.0 * r["c"] / grand, 2),
+            "pct": round(100.0 * r["c"] / (project_totals[r["project_id"]] or 1), 2),
         }
         for r in rows
     ]

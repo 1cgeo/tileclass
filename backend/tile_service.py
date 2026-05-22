@@ -71,7 +71,11 @@ def _row_to_tile_dict(row) -> dict:
         png = None
     if png:
         try:
-            raw = decode_mask(png)
+            # tile_px is per-project; decoding with the wrong size raises and
+            # would silently report 0 filled pixels (breaks resume/progress on
+            # projects whose geometry isn't the 256 default).
+            proj = project_service.get_project(row["project_id"]) or {}
+            raw = decode_mask(png, int(proj.get("tile_px", 256)))
             d["filled_pixels"] = len(raw) - raw.count(b"\xff")
         except Exception:
             d["filled_pixels"] = 0
@@ -474,21 +478,25 @@ def _lock_tile_for_user(conn, tile_id: int, user_id: int,
                         *, version_message: str | None = None):
     """Inside an open `BEGIN IMMEDIATE` transaction, fetch the tile row and
     enforce the three preconditions every submit/pause path shares: row
-    exists, the version matches the optimistic-lock token the editor sent,
-    and the caller is the assignee. Returns the (status, assigned_to,
-    version) row so the caller can switch on status."""
+    exists, the caller is the assignee, and the version matches the
+    optimistic-lock token the editor sent. Returns the (status, assigned_to,
+    version) row so the caller can switch on status.
+
+    Authorization is checked BEFORE the version: a non-assignee must get 403,
+    never a 409 that would leak the tile's current version / a 'your progress
+    was saved' message for a tile they never held."""
     row = conn.execute(
         "SELECT status, assigned_to, version FROM tiles WHERE id=?", (tile_id,)
     ).fetchone()
     if not row:
         raise HTTPException(404, "tile not found")
+    if row["assigned_to"] != user_id:
+        raise HTTPException(403, "not assigned to you")
     if expected_version is not None and row["version"] != expected_version:
         detail = {"error": "tile_modified", "current_version": row["version"]}
         if version_message:
             detail["message"] = version_message
         raise HTTPException(409, detail=detail)
-    if row["assigned_to"] != user_id:
-        raise HTTPException(403, "not assigned to you")
     return row
 
 

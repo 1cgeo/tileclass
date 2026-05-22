@@ -83,6 +83,15 @@ def set_user_active(user_id: int, active: bool, admin_id: int) -> dict:
         row = conn.execute("SELECT id, username, role FROM users WHERE id=?", (user_id,)).fetchone()
         if not row:
             raise HTTPException(404, "user not found")
+        # Deactivating the last active admin locks everyone out of the panel —
+        # same guard as the role demotion path (set_user_role).
+        if not active and row["role"] == "admin":
+            other = conn.execute(
+                "SELECT COUNT(*) AS c FROM users WHERE role='admin' AND active=1 AND id != ?",
+                (user_id,),
+            ).fetchone()["c"]
+            if other == 0:
+                raise HTTPException(409, "cannot deactivate the last active admin")
         conn.execute("UPDATE users SET active=? WHERE id=?", (1 if active else 0, user_id))
         log_action(conn, admin_id, None, "set_user_active", json.dumps({"user_id": user_id, "active": active}))
     return {"id": user_id, "active": active}

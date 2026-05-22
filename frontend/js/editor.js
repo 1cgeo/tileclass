@@ -238,6 +238,9 @@ function renderProjectPicker(projects) {
             activeProjectId = newId;
             try { localStorage.setItem(LS_ACTIVE_PROJECT, String(newId)); } catch {}
             currentTile = null;
+            // Tear down the previous project's per-kind editor before swapping
+            // config (avoids a leaked MapLibre map / hidden raster canvas).
+            exitActiveKindEditor();
             await loadProjectConfig(newId);
             buildClassPanel();
             buildColorLut();
@@ -459,8 +462,20 @@ function isDetectionProject() {
     return window.tileclassActiveProject?.kind === "detection";
 }
 
+// Tear down any active per-kind editor (MapLibre map + listeners) and restore
+// the raster canvas-stack. Each exit*() is idempotent (guards on its own
+// state), so calling all three is safe regardless of the previous kind. Called
+// before loading a tile and before switching projects, so a project/kind
+// change never leaks a WebGL context or leaves the canvas hidden.
+function exitActiveKindEditor() {
+    exitVectorTile();
+    exitClassificationTile();
+    exitDetectionTile();
+}
+
 async function loadTile(t, preloadedMask = null) {
     _tileReady = false;
+    exitActiveKindEditor();
     currentTile = t;
     undoStack.length = 0; redoStack.length = 0;
     updateUndoRedoButtons();
@@ -1225,6 +1240,11 @@ function onKeyDown(ev) {
         }
         return;
     }
+    // Raster shortcuts (1–6, Q/W/E/A/S, Z/X, Space, Ctrl+Z/Y…) only apply to the
+    // canvas editor. Vector/classification/detection editors register their own
+    // keyboard handlers — running these too would fire against a hidden canvas
+    // and double-handle Ctrl+Z/Y.
+    if (isVectorProject() || isClassificationProject() || isDetectionProject()) return;
     const k = ev.key;
     if (ev.ctrlKey && (k === "z" || k === "Z")) {
         ev.preventDefault();
@@ -1332,6 +1352,9 @@ async function submit() {
         flashMissing();
         return;
     }
+    // Claim the guard BEFORE the (async) confirm modal — otherwise a double
+    // click opens two modals and confirming both fires two POSTs.
+    _submitting = true;
     const isReview = currentTile.status === "in_review";
     const ok = await confirmAction({
         title: isReview ? "Aprovar revisão?" : "Submeter classificação?",
@@ -1340,8 +1363,7 @@ async function submit() {
             : "A classificação será enviada e o tile passará para a fila de revisão.",
         okLabel: isReview ? "Aprovar" : "Submeter",
     });
-    if (!ok) return;
-    _submitting = true;
+    if (!ok) { _submitting = false; return; }
     const btn = document.getElementById("btn-submit");
     const label = document.getElementById("submit-label");
     const prevLabel = label?.textContent;

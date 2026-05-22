@@ -21,7 +21,8 @@ def _adm(client, admin_user):
     return token(client, admin_user["username"], admin_user["password"])
 
 
-def _seed_raster(pid, name, mask_bytes, tile_px=256, status="reviewed"):
+def _seed_raster(pid, name, mask_bytes, tile_px=256, status="reviewed",
+                 bbox=(-50.0, -25.0, -49.99, -24.99)):
     from backend.database import connect
     from backend.mask_utils import encode_mask
     png = encode_mask(mask_bytes, tile_px)
@@ -31,7 +32,7 @@ def _seed_raster(pid, name, mask_bytes, tile_px=256, status="reviewed"):
             """INSERT INTO tiles(project_id,name,bbox_west,bbox_south,bbox_east,bbox_north,
                                  status,data_png,reviewed_at)
                VALUES (?,?,?,?,?,?,?,?,datetime('now'))""",
-            (pid, name, -50.0, -25.0, -49.99, -24.99, status, png),
+            (pid, name, *bbox, status, png),
         )
         conn.commit()
     finally:
@@ -94,11 +95,21 @@ def test_raster_export_raw_keeps_native_ids(client, admin_user, tiles, tmp_path)
 
 
 def test_raster_export_mosaic(client, admin_user, tiles, tmp_path):
+    """The mosaic must actually merge the tiles' content (EDGV-remapped), not
+    just be an empty file at the right path."""
+    import rasterio
     from backend.scripts import export_tiles
-    _seed_raster(1, "m1", np.full(65536, 1, dtype=np.uint8).tobytes())
-    _seed_raster(1, "m2", np.full(65536, 2, dtype=np.uint8).tobytes())
+    # Two adjacent tiles, classes 1 (água) and 2 (edif) → EDGV 0 and 1.
+    _seed_raster(1, "m1", np.full(65536, 1, dtype=np.uint8).tobytes(), bbox=(0.0, 0.0, 0.1, 0.1))
+    _seed_raster(1, "m2", np.full(65536, 2, dtype=np.uint8).tobytes(), bbox=(0.1, 0.0, 0.2, 0.1))
     export_tiles.run(tmp_path, status="reviewed", project_id=1, mosaic=True)
-    assert (tmp_path / "gt_mosaic.tif").exists()
+    mosaic = tmp_path / "gt_mosaic.tif"
+    assert mosaic.exists()
+    with rasterio.open(mosaic) as ds:
+        arr = ds.read(1)
+        assert ds.nodata == 255 and ds.crs.to_epsg() == 4326
+    vals = set(np.unique(arr).tolist())
+    assert 0 in vals and 1 in vals  # both tiles' remapped classes present in the mosaic
 
 
 def test_raster_export_honours_non_256_tile_px(client, admin_user, tmp_path):
@@ -140,15 +151,19 @@ def test_exporters_isolate_by_kind(client, admin_user, tiles, tmp_path):
         {"type": "Feature", "properties": {"class_id": 1},
          "geometry": {"type": "Polygon", "coordinates": [[[-50, -25], [-49.99, -25], [-49.99, -24.99], [-50, -24.99], [-50, -25]]]}}]})
 
-    # export_tiles over ALL projects: only the raster tile, no crash on the others.
+    # export_tiles over ALL projects: only the raster tile, no crash on the
+    # others. Multi-project export prefixes the filename with p<project_id>.
     n_raster = export_tiles.run(tmp_path / "rt", status="reviewed", project_id=None)
     assert n_raster == 1
-    assert [p.name for p in (tmp_path / "rt").glob("gt_*.tif")] == ["gt_r_tile.tif"]
+    tifs = [p.name for p in (tmp_path / "rt").glob("gt_*.tif")]
+    assert len(tifs) == 1 and "r_tile" in tifs[0] and tifs[0].startswith("gt_p")
     # Each vector/detection exporter sees only its own kind.
     assert export_features.run(tmp_path / "ft", status="reviewed", project_id=None) == 1
-    assert [p.name for p in (tmp_path / "ft").glob("gt_*.geojson")] == ["gt_v_tile.geojson"]
+    gj_v = [p.name for p in (tmp_path / "ft").glob("gt_*.geojson")]
+    assert len(gj_v) == 1 and "v_tile" in gj_v[0]
     assert export_detections.run(tmp_path / "dt", status="reviewed", project_id=None) == 1
-    assert [p.name for p in (tmp_path / "dt").glob("gt_*.geojson")] == ["gt_d_tile.geojson"]
+    gj_d = [p.name for p in (tmp_path / "dt").glob("gt_*.geojson")]
+    assert len(gj_d) == 1 and "d_tile" in gj_d[0]
     # Classification exporter finds nothing here (no classification tiles).
     assert export_classifications.run(tmp_path / "ct", status="reviewed", project_id=None) == 0
 

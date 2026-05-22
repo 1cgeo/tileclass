@@ -87,6 +87,38 @@ def test_verify_passes_on_clean_db(app_env, tmp_path):
     assert code == 0
 
 
+def test_verify_does_not_false_fail_on_non_raster_tiles(app_env, tmp_path):
+    """verify_db's mask scan is raster-only (joins kind='raster'). A DB with
+    valid vector/detection/classification tiles must still pass the full scan —
+    their GeoJSON/class_id bodies are NOT mis-decoded as masks."""
+    _clear_seed_paths(app_env, tmp_path)
+    stub = str(tmp_path / "stub.mbtiles")
+    import json
+    fc = json.dumps({"type": "FeatureCollection", "features": [
+        {"type": "Feature", "properties": {"class_id": 1},
+         "geometry": {"type": "Polygon", "coordinates": [[[-50, -25], [-49.9, -25], [-49.9, -24.9], [-50, -24.9], [-50, -25]]]}}]})
+    conn = sqlite3.connect(app_env)
+    try:
+        for pid, kind in ((2, "vector"), (3, "detection"), (4, "classification")):
+            conn.execute("INSERT INTO projects(id,name,kind,tile_px,meters_per_pixel,"
+                         "mask_complete_required,primary_mbtiles,active,created_at) "
+                         "VALUES (?,?,?,256,2.5,1,?,1,'2026-01-01T00:00:00+00:00')",
+                         (pid, f"k{pid}", kind, stub))
+            conn.execute("INSERT INTO project_classes(project_id,class_id,name,color,ordering) "
+                         "VALUES (?,1,'a','#112233',0)", (pid,))
+        conn.execute("INSERT INTO tiles(project_id,name,bbox_west,bbox_south,bbox_east,bbox_north,"
+                     "status,data_geojson,feature_count) VALUES (2,'v',-50,-25,-49.9,-24.9,'reviewed',?,1)", (fc,))
+        conn.execute("INSERT INTO tiles(project_id,name,bbox_west,bbox_south,bbox_east,bbox_north,"
+                     "status,data_geojson,feature_count) VALUES (3,'d',-50,-25,-49.9,-24.9,'reviewed',?,1)", (fc,))
+        conn.execute("INSERT INTO tiles(project_id,name,bbox_west,bbox_south,bbox_east,bbox_north,"
+                     "status,data_class_id) VALUES (4,'c',-50,-25,-49.9,-24.9,'reviewed',1)")
+        conn.commit()
+    finally:
+        conn.close()
+    code = _run_cli("backend.scripts.verify_db", [])  # full scan (not --quick)
+    assert code == 0
+
+
 def test_verify_catches_orphan_tile(app_env):
     """Insert a tile pointing at a non-existent project_id (bypass FK on
     pragma off) and verify_db should fail with code 2."""

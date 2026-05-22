@@ -42,7 +42,7 @@ def main() -> None:
         if not args.force:
             where += " AND class_counts IS NULL"
         rows = conn.execute(
-            f"SELECT id, data_png FROM tiles WHERE {where} ORDER BY id",
+            f"SELECT id, project_id, data_png FROM tiles WHERE {where} ORDER BY id",
             params,
         ).fetchall()
     finally:
@@ -52,12 +52,22 @@ def main() -> None:
         print("Nada a fazer — nenhum tile elegível.")
         return
 
+    # tile_px is per-project; decode with the right size or non-256 projects
+    # would all fail to decode. Cache one lookup per project.
+    from backend import project_service
+    _px: dict[int, int] = {}
+
+    def px_for(pid: int) -> int:
+        if pid not in _px:
+            _px[pid] = int((project_service.get_project(pid) or {}).get("tile_px", 256))
+        return _px[pid]
+
     print(f"[info] backfill em {len(rows)} tile(s)...")
     updated = errors = 0
     with transaction("IMMEDIATE") as conn:
         for r in rows:
             try:
-                raw = decode_mask(r["data_png"])
+                raw = decode_mask(r["data_png"], px_for(r["project_id"]))
             except (ValueError, OSError) as e:
                 errors += 1
                 print(f"  [err] tile {r['id']}: {e}")

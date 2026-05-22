@@ -101,16 +101,25 @@ def main() -> None:
                 "SELECT project_id, class_id FROM project_classes"
             ).fetchall():
                 allowed_per_project.setdefault(r["project_id"], set()).add(r["class_id"])
+            # tile_px is per-project; decode with the right size (a raster
+            # project with tile_px != 256 would otherwise fail every decode).
+            tile_px_per_project: dict[int, int] = {}
+            for r in conn.execute(
+                "SELECT id, tile_px FROM projects WHERE kind='raster'"
+            ).fetchall():
+                tile_px_per_project[r["id"]] = int(r["tile_px"])
 
             tiles = conn.execute(
-                """SELECT id, project_id, status, data_png FROM tiles
-                   WHERE status IN ('classified','in_review','reviewed')
-                     AND data_png IS NOT NULL"""
+                """SELECT t.id, t.project_id, t.status, t.data_png FROM tiles t
+                   JOIN projects p ON p.id=t.project_id
+                   WHERE p.kind='raster'
+                     AND t.status IN ('classified','in_review','reviewed')
+                     AND t.data_png IS NOT NULL"""
             ).fetchall()
             for t in tiles:
                 allowed = allowed_per_project.get(t["project_id"], set()) | {255}
                 try:
-                    raw = decode_mask(t["data_png"])
+                    raw = decode_mask(t["data_png"], tile_px_per_project.get(t["project_id"], 256))
                 except Exception as e:
                     _problem("mask", f"tile {t['id']} decode failed: {e}", problems)
                     continue

@@ -197,6 +197,21 @@ def test_operator_token_rejected_on_all_admin_endpoints(client, operators, tiles
                         headers=h(t), json={"active": False}).status_code == 403
 
 
+def test_nonassignee_with_stale_version_gets_403_not_409(client, operators, tiles):
+    """Authorization is checked before the optimistic-lock version: a non-assignee
+    must get 403 (never a 409 that leaks the tile's current version)."""
+    t1 = token(client, "op1", "secret123")
+    tile = client.get("/api/tiles/next", headers=h(t1)).json()
+    t2 = token(client, "op2", "secret123")
+    r = client.post(f"/api/tiles/{tile['id']}/classify",
+                    headers={**h(t2), "Content-Type": "application/octet-stream",
+                             "X-Tile-Version": "999999"},  # deliberately stale/wrong
+                    content=_mask())
+    assert r.status_code == 403
+    # The 409 body (which carries current_version) must NOT leak to a non-assignee.
+    assert "current_version" not in (r.json().get("detail") or {})
+
+
 def test_tile_submit_on_nonexistent_tile_returns_404(client, operators):
     """Unknown tile is 404 (project_for_tile resolves first), never 403/500."""
     t = token(client, "op1", "secret123")

@@ -24,6 +24,10 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA synchronous=NORMAL")
+    # WAL allows a single writer; without a busy timeout a concurrent
+    # `BEGIN IMMEDIATE` (e.g. several operators hitting /api/tiles/next at once)
+    # would fail fast with SQLITE_BUSY instead of briefly waiting for the lock.
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 
@@ -187,6 +191,24 @@ CREATE TABLE IF NOT EXISTS token_blacklist (
     expires_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_tb_exp ON token_blacklist(expires_at);
+
+-- Background export jobs: large datasets are zipped off the request thread so
+-- the admin can poll and download when ready instead of holding a long HTTP
+-- request open. The zip lives on disk (file_path) until downloaded.
+CREATE TABLE IF NOT EXISTS export_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    status_param TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending','running','done','error')),
+    file_path TEXT,
+    filename TEXT,
+    tile_count INTEGER,
+    error TEXT,
+    created_by INTEGER REFERENCES users(id),
+    created_at TEXT NOT NULL,
+    finished_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_export_jobs_project ON export_jobs(project_id);
 """
 
 

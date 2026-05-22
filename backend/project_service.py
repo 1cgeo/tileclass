@@ -708,8 +708,8 @@ def remove_member(project_id: int, user_id: int, *, by_user: int) -> None:
 
 
 def delete_project(project_id: int, *, by_user: int) -> None:
-    """Hard-delete a project. Refuses if there is any tile or action in this
-    project — the operator-facing history would otherwise dangle. Use
+    """Hard-delete a project. Refuses (409 project_has_tiles) if the project
+    has any tile — the tile bodies and history would otherwise dangle. Use
     `update_project(active=False)` to soft-disable instead."""
     with transaction("IMMEDIATE") as conn:
         if not conn.execute(

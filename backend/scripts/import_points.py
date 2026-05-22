@@ -24,12 +24,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from backend.database import init_db, connect
-from backend.mask_utils import empty_mask_png
-from backend.geo import bbox_from_center, offset_center
-from backend import project_service
-from backend.scripts._common import (
-    resolve_project_arg, insert_tile_dedup, load_tile_geometry,
-)
+from backend import tile_ingest
+from backend.scripts._common import resolve_project_arg
 
 
 def _read_points(args) -> list[tuple[float, float, str]]:
@@ -48,12 +44,6 @@ def _read_points(args) -> list[tuple[float, float, str]]:
         name = p[2] if len(p) >= 3 else f"{lat:.4f}_{lon:.4f}"
         pts.append((lat, lon, name))
     return pts
-
-
-def _insert_at(conn, project_id: int, name: str, lat_c: float, lon_c: float,
-               empty_png: bytes, tile_meters: float) -> bool:
-    bbox = bbox_from_center(lat_c, lon_c, tile_meters)
-    return insert_tile_dedup(conn, project_id, name, bbox, empty_png)
 
 
 def main():
@@ -77,37 +67,18 @@ def main():
         print("nenhum ponto informado"); sys.exit(1)
 
     init_db()
-    radius = args.block // 2
-    inserted = skipped = 0
-
     conn = connect()
     try:
         project_id = resolve_project_arg(conn, args.project)
-        tile_px, tile_meters = load_tile_geometry(project_id)
-        proj = project_service.get_project(project_id) or {}
-        # Vector projects don't use data_png; raster gets the canonical empty.
-        empty_png = empty_mask_png(tile_px) if proj.get("kind", "raster") == "raster" else None
-        conn.execute("BEGIN")
-        for lat, lon, name in pts:
-            for dy in range(-radius, radius + 1):
-                for dx in range(-radius, radius + 1):
-                    lat_c, lon_c = offset_center(lat, lon, dx, dy, tile_meters)
-                    tname = name if args.block == 1 else f"{name}_{dx:+d}{dy:+d}"
-                    if _insert_at(conn, project_id, tname, lat_c, lon_c,
-                                   empty_png, tile_meters):
-                        inserted += 1
-                    else:
-                        skipped += 1
-        conn.execute("COMMIT")
-    except Exception:
-        conn.execute("ROLLBACK")
-        raise
     finally:
         conn.close()
 
-    print(f"inseridos: {inserted} · já existiam: {skipped} · "
-          f"cada tile = {tile_meters:.0f}m × {tile_meters:.0f}m "
-          f"({tile_px}×{tile_px} px)")
+    # Shared with the admin UI endpoint (backend.tile_ingest) so both insert
+    # tiles identically (geodesic bbox, per-project geometry, dedup).
+    res = tile_ingest.add_points(project_id, pts, block=args.block)
+    print(f"inseridos: {res['inserted']} · já existiam: {res['skipped']} · "
+          f"cada tile = {res['tile_meters']:.0f}m × {res['tile_meters']:.0f}m "
+          f"({res['tile_px']}×{res['tile_px']} px)")
 
 
 if __name__ == "__main__":

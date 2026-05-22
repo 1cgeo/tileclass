@@ -7,6 +7,7 @@
 import { describe, it, expect } from "vitest";
 import {
     addFeature, removeFeature, updateFeatureProps, updateFeatureGeometry,
+    moveVertex, insertVertex, removeVertex,
     snapToEndpoint, SNAP_TOLERANCE_DEG,
     makeHistory, push, undo, redo,
     validateAttributes, validateTopology, validateBeforeSubmit,
@@ -22,6 +23,50 @@ function _line(coords, props = {}) {
     };
 }
 
+
+describe("vertex editing", () => {
+    const base = () => addFeature(emptyFC(), [[0, 0], [1, 1], [2, 2]], { tipo: "rio" });
+
+    it("moveVertex replaces one coordinate, preserving props and others", () => {
+        const fc = moveVertex(base(), 0, 1, 5, 7);
+        expect(fc.features[0].geometry.coordinates).toEqual([[0, 0], [5, 7], [2, 2]]);
+        expect(fc.features[0].properties).toEqual({ tipo: "rio" });
+    });
+
+    it("moveVertex is a no-op for out-of-range indices", () => {
+        const src = base();
+        expect(moveVertex(src, 9, 0, 1, 1)).toBe(src);
+        expect(moveVertex(src, 0, 9, 1, 1)).toBe(src);
+    });
+
+    it("insertVertex adds a point inside the chosen segment", () => {
+        const fc = insertVertex(base(), 0, 0, 0.5, 0.5);  // between v0 and v1
+        expect(fc.features[0].geometry.coordinates).toEqual([[0, 0], [0.5, 0.5], [1, 1], [2, 2]]);
+    });
+
+    it("insertVertex rejects a segment index past the last segment", () => {
+        const src = base();
+        expect(insertVertex(src, 0, 2, 9, 9)).toBe(src);  // only 2 segments (0,1)
+    });
+
+    it("removeVertex drops a point but keeps ≥2 vertices", () => {
+        const fc = removeVertex(base(), 0, 1);
+        expect(fc.features[0].geometry.coordinates).toEqual([[0, 0], [2, 2]]);
+    });
+
+    it("removeVertex refuses to go below 2 vertices", () => {
+        const two = addFeature(emptyFC(), [[0, 0], [1, 1]]);
+        expect(removeVertex(two, 0, 0)).toBe(two);
+    });
+
+    it("does not mutate the source FC", () => {
+        const src = base();
+        moveVertex(src, 0, 0, 9, 9);
+        insertVertex(src, 0, 0, 9, 9);
+        removeVertex(src, 0, 1);
+        expect(src.features[0].geometry.coordinates).toEqual([[0, 0], [1, 1], [2, 2]]);
+    });
+});
 
 describe("addFeature", () => {
     it("appends a LineString with copied coords + props", () => {

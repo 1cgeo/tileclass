@@ -185,7 +185,11 @@ def run(out_dir, *, status: str = "reviewed", project_id=None,
         for r in rows:
             tile_px = _px_for(r["project_id"])
             arr = _decode_tile(r, raw, tile_px)
-            fname = f"gt_{r['name']}.tif"
+            # On a multi-project export (no --project), prefix with the project
+            # id so two projects with a same-named tile don't overwrite each
+            # other (the manifest still distinguishes them by project_id).
+            prefix = "" if project_id is not None else f"p{r['project_id']}_"
+            fname = f"gt_{prefix}{r['name']}.tif"
             _write_geotiff(out_dir / fname, arr, (r["bbox_west"], r["bbox_south"],
                                                   r["bbox_east"], r["bbox_north"]), tile_px)
             paths.append(out_dir / fname)
