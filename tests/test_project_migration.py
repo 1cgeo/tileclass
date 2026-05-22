@@ -77,6 +77,15 @@ def _make_legacy_db(path):
             "VALUES (?,?,?,?,?, 'pending')",
             (f"tile_{i}", 0.0 + i, 0.0, 0.1 + i, 0.1),
         )
+    # action_log rows that FK-reference tiles. A real DB always has these; the
+    # NOT NULL rebuild must drop the old `tiles` table while they exist, which
+    # fails under foreign_keys=ON unless the migration disables FKs around the
+    # swap. Without these rows the rebuild path is never stressed.
+    for tid in (1, 2, 3):
+        conn.execute(
+            "INSERT INTO action_log(user_id, tile_id, action, detail, created_at) "
+            "VALUES (?,?,?,?,?)", (3, tid, "assign_classify", None, now),
+        )
     conn.close()
 
 
@@ -152,6 +161,76 @@ def test_migration_is_idempotent(app_env, tmp_path, monkeypatch):
     try:
         assert conn.execute("SELECT COUNT(*) c FROM projects").fetchone()["c"] == 1
         assert conn.execute("SELECT COUNT(*) c FROM project_members").fetchone()["c"] == 3
+    finally:
+        conn.close()
+
+
+def test_migration_preserves_action_log_referencing_tiles(app_env, tmp_path, monkeypatch):
+    """The NOT NULL rebuild drops/recreates `tiles` while action_log FK-references
+    it. Migration must complete and leave those rows (and their tile_id) intact."""
+    legacy = tmp_path / "legacy.db"
+    _make_legacy_db(legacy)
+
+    import backend.database as dbmod
+    monkeypatch.setattr(dbmod, "_DB_PATH", legacy, raising=True)
+    dbmod.init_db()
+
+    conn = sqlite3.connect(legacy)
+    conn.row_factory = sqlite3.Row
+    try:
+        info = {r["name"]: r for r in conn.execute("PRAGMA table_info(tiles)").fetchall()}
+        assert info["project_id"]["notnull"] == 1
+        log = conn.execute(
+            "SELECT tile_id FROM action_log ORDER BY tile_id"
+        ).fetchall()
+        assert [r["tile_id"] for r in log] == [1, 2, 3]
+        # No dangling FK and no leftover shadow table.
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='tiles_new'"
+        ).fetchone() is None
+    finally:
+        conn.close()
+
+
+def test_migration_resumes_after_partial_rebuild(app_env, tmp_path, monkeypatch):
+    """A run that aborted after adding the nullable project_id column but before
+    enforcing NOT NULL (orphan tiles_new, unseeded members) must be completed by
+    a subsequent init_db, not skipped because the column already exists."""
+    legacy = tmp_path / "legacy.db"
+    _make_legacy_db(legacy)
+
+    # Simulate the half-migrated state of a crash mid-rebuild.
+    conn = sqlite3.connect(legacy, isolation_level=None)
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.executescript(
+        """
+        CREATE TABLE projects (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL,
+            description TEXT, mask_complete_required INTEGER NOT NULL DEFAULT 1
+        );
+        INSERT INTO projects(name) VALUES ('default');
+        """
+    )
+    conn.execute("ALTER TABLE tiles ADD COLUMN project_id INTEGER REFERENCES projects(id)")
+    conn.execute("UPDATE tiles SET project_id=1")
+    conn.execute("CREATE TABLE tiles_new (id INTEGER PRIMARY KEY)")  # orphan from abort
+    conn.close()
+
+    import backend.database as dbmod
+    monkeypatch.setattr(dbmod, "_DB_PATH", legacy, raising=True)
+    dbmod.init_db()
+
+    conn = sqlite3.connect(legacy)
+    conn.row_factory = sqlite3.Row
+    try:
+        info = {r["name"]: r for r in conn.execute("PRAGMA table_info(tiles)").fetchall()}
+        assert info["project_id"]["notnull"] == 1  # rebuild finished
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='tiles_new'"
+        ).fetchone() is None  # orphan cleaned up
+        assert conn.execute("SELECT COUNT(*) c FROM project_members").fetchone()["c"] == 3
+        assert all(t["project_id"] == 1 for t in conn.execute("SELECT project_id FROM tiles"))
     finally:
         conn.close()
 

@@ -240,7 +240,34 @@ def _seed_members(conn: sqlite3.Connection, project_id: int) -> None:
 
 
 def _rebuild_tiles_with_project_not_null(conn: sqlite3.Connection) -> None:
-    """SQLite cannot ALTER COLUMN to NOT NULL. Rebuild via shadow table."""
+    """SQLite cannot ALTER COLUMN to NOT NULL. Rebuild via shadow table.
+
+    Other tables (action_log) carry FKs into tiles, so dropping the old table
+    with foreign_keys=ON makes SQLite refuse to delete the referenced rows.
+    Follow SQLite's canonical schema-change recipe: toggle foreign_keys OFF
+    (a no-op inside a transaction, so it must happen outside), do the swap in
+    one transaction for atomicity, then re-check FK integrity and re-enable.
+    `tiles_new` is dropped first so a prior aborted run can be retried.
+    """
+    conn.execute("DROP TABLE IF EXISTS tiles_new")
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        _rebuild_tiles_swap(conn)
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        conn.execute("PRAGMA foreign_keys=ON")
+        raise
+    violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+    conn.execute("PRAGMA foreign_keys=ON")
+    if violations:
+        raise RuntimeError(
+            f"project migration: foreign-key violations after rebuild: {violations}"
+        )
+
+
+def _rebuild_tiles_swap(conn: sqlite3.Connection) -> None:
     conn.execute(
         """CREATE TABLE tiles_new (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -361,9 +388,16 @@ def _migrate(conn: sqlite3.Connection) -> None:
 
     # Project migration: pre-project DBs have a `tiles` table without project_id.
     # We add the column nullable, seed the default project from config.yaml,
-    # backfill, then rebuild the table to enforce NOT NULL.
-    if "project_id" not in cols:
-        conn.execute("ALTER TABLE tiles ADD COLUMN project_id INTEGER REFERENCES projects(id)")
+    # backfill, then rebuild the table to enforce NOT NULL. Gated on project_id
+    # being NOT NULL (not merely present) so a run that aborted mid-rebuild —
+    # column added but the NOT NULL swap unfinished — resumes instead of being
+    # skipped and left half-migrated.
+    pid_col = next((r for r in conn.execute("PRAGMA table_info(tiles)").fetchall()
+                    if r[1] == "project_id"), None)
+    project_id_enforced = pid_col is not None and pid_col[3] == 1  # notnull flag
+    if not project_id_enforced:
+        if pid_col is None:
+            conn.execute("ALTER TABLE tiles ADD COLUMN project_id INTEGER REFERENCES projects(id)")
         pid = _seed_default_project(conn)
         if pid is None:
             row = conn.execute("SELECT id FROM projects ORDER BY id LIMIT 1").fetchone()
