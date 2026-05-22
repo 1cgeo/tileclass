@@ -84,13 +84,16 @@ def test_classify_and_admin_reset_race(client, admin_user, operators_10, tiles):
     tile = client.get("/api/tiles/next", headers=h(t1)).json()
 
     results = {}
+    barrier = threading.Barrier(2)  # release both writers at the same instant
     def do_classify():
+        barrier.wait()
         r = client.post(f"/api/tiles/{tile['id']}/classify",
                         headers={**h(t1), "Content-Type": "application/octet-stream"},
                         content=_mask(1))
         results["classify"] = r.status_code
 
     def do_reset():
+        barrier.wait()
         r = client.post(f"/api/admin/tiles/{tile['id']}/reset", headers=h(adm))
         results["reset"] = r.status_code
 

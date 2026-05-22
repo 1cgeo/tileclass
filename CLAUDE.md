@@ -35,6 +35,7 @@ python -m backend.scripts.import_qc_tiles --csv qc_tiles.csv --bdf-dir <dir> [--
 python -m backend.scripts.export_tiles <out_dir> [--status reviewed|reviewed+classified] [--raw] [--mosaic] [--manifest <path>] [--project <id|name>]      # raster (GeoTIFF)
 python -m backend.scripts.export_features <out_dir> [--status ...] [--mosaic] [--manifest <path>] [--project <id|name>]                                  # vector (GeoJSON)
 python -m backend.scripts.export_classifications <out_dir> [--status ...] [--manifest <path>] [--project <id|name>]                                      # classification (CSV)
+python -m backend.scripts.export_detections <out_dir> [--status ...] [--mosaic] [--manifest <path>] [--project <id|name>]                                # detection (GeoJSON bboxes)
 python -m backend.scripts.build_mbtiles <raster_in> <out.mbtiles>           # raster grande → tiles XYZ
 python -m backend.scripts.build_xyz_pyramid <raster_in> <out_dir>            # alternativa em disco
 python -m backend.scripts.merge_db <other.db>                                # funde tileclass.db de outra equipe
@@ -158,7 +159,7 @@ Cada campo aceita três formatos:
 
 ## Projetos vetoriais (kind=vector)
 
-Projetos têm `kind ∈ {raster, vector, classification}` (default raster, **imutável após criação**). Vector é para anotações de linhas com atributos — drenagem (com direção/conectividade), rodovias (com pavimento/faixas), etc. O dataset é consumido por modelos de IA via export GeoJSON.
+Projetos têm `kind ∈ {raster, vector, classification, detection}` (default raster, **imutável após criação**). Vector é para anotações de linhas com atributos — drenagem (com direção/conectividade), rodovias (com pavimento/faixas), etc. O dataset é consumido por modelos de IA via export GeoJSON.
 
 **Onde diverge de raster:**
 
@@ -186,11 +187,11 @@ Projetos têm `kind ∈ {raster, vector, classification}` (default raster, **imu
 
 **Pause vs submit:** pause persiste o body do jeito que está (qualquer GeoJSON parsável, mesmo com required ausente ou ciclos), submit valida tudo. Operador pode pausar parcial sem perder trabalho.
 
-**Mutual exclusion no payload:** `POST /api/admin/projects` rejeita `attributes` em projeto raster ou classification (400 `attributes_not_supported`) e `classes` em projeto vector (400 `classes_on_vector`). Tentar mudar `kind` via PATCH é silenciosamente ignorado (campo fora do allow-list — invariante de imutabilidade).
+**Mutual exclusion no payload:** `POST /api/admin/projects` rejeita `attributes` em projeto raster/classification/detection (400 `attributes_not_supported`) e `classes` em projeto vector (400 `classes_on_vector`). Tentar mudar `kind` via PATCH é silenciosamente ignorado (campo fora do allow-list — invariante de imutabilidade).
 
 **Invariantes críticos do dispatch:**
-- `tile_service.project_for_tile()` resolve a kind antes de cada submit/pause; `_submit_raster`/`_submit_vector`/`_submit_classification` (e `_pause_*`) ficam isolados.
-- `routers/operator._read_body_for_kind` lê o body certo (raster: tile_px² bytes exatos; vector: até 1.5MB JSON; classification: até 1KB JSON).
+- `tile_service.project_for_tile()` resolve a kind antes de cada submit/pause; `_submit_raster`/`_submit_vector`/`_submit_classification`/`_submit_detection` (e `_pause_*`) ficam isolados.
+- `routers/operator._read_body_for_kind` lê o body certo (raster: tile_px² bytes exatos; vector/detection: até 1.5MB JSON; classification: até 1KB JSON).
 - `report_problem` limpa `data_png`, `data_geojson` **e** `data_class_id` para que mudanças futuras não vazem corpo de tipo errado.
 - `mask_tile_service.get_tile()` despacha por kind. Cache mbtiles é per-projeto (`<base>_p<id>.mbtiles`); kinds diferentes em projetos diferentes não compartilham linhas.
 
@@ -216,6 +217,32 @@ Operador escolhe **uma classe** do projeto pra todo o tile — sem pintura, sem 
 **Editor:** sidebar mostra um botão por classe (cor + nome). Operador clica → highlight; rodapé Submit habilitado → modal confirm → POST. Sem undo/redo (escolha é atômica). Heartbeat e state machine iguais aos outros.
 
 **Tile_px em classification:** afeta só thumbnail/overlay rasterizado (não há body de pixels). `tile_meters = tile_px × meters_per_pixel` continua definindo a bbox.
+
+## Projetos de detecção (kind=detection)
+
+Operador desenha **caixas (bounding boxes)** ao redor de objetos de interesse, cada caixa com **uma classe** do projeto. Caso de uso: dataset de detecção de objetos (consumido por modelos via export GeoJSON, convertível a COCO/YOLO downstream).
+
+**Reaproveita a infra vetorial** (corpo em `data_geojson`), mas com geometria de retângulo + classe por caixa em vez de linha + atributos.
+
+**Onde diverge de vector:**
+
+| Camada | Vector | Detection |
+|---|---|---|
+| Geometria | `LineString` (≥2 vértices) | `Polygon` retângulo alinhado aos eixos (2 longitudes × 2 latitudes distintas) |
+| Schema de domínio | `project_attributes` (por feature) | `project_classes` — `properties.class_id` por caixa |
+| Validação no submit | attributes + `topology_required` | `class_id ∈ project_classes` + `box_required` (≥1 caixa) |
+| Flag por projeto | `topology_required` | `box_required` (0 = tile vazio é negative sample válido) |
+| Caches | `feature_count` | `feature_count` (nº de caixas) + `class_counts` (caixas por classe) |
+| Editor | `editor-vector.js` (caneta) | `editor-detection.js` (arrastar retângulo; tecla B=desenhar, V=selecionar) |
+| Overlay admin | rasteriza linhas | `_render_detection_tile` (retângulos coloridos por classe) |
+| Distribuição no dashboard | `feature_distribution` | `class_distribution` (reusa `class_counts` — contagem de caixas) |
+| Export CLI | `export_features.py` | `export_detections.py` (GeoJSON; `box_count` no manifest) |
+
+**Compartilha com vector:** leitura em `GET /api/tiles/{id}/features` (FeatureCollection), body JSON até 1.5MB, pause salva parcial (só checa parse), `detection-core.js` reusa os helpers de undo/redo do `vector-core.js`.
+
+**`box_required`:** quando `True`, submit rejeita 0 caixas (`invalid_boxes`); quando `False`, tile vazio classifica normalmente (negative sample). Editor espelha o gate em `validateForSubmit`.
+
+**Validação (`detection_utils`):** `parse_detection` (estrutural — cada feature é Polygon retângulo alinhado), `validate_class_ids` (membership na paleta), `validate_submission` (estrutural → class_ids → gate box_required). Tudo puro/sem DB, espelhado em `detection-core.js`.
 
 ## Invariantes do domínio
 

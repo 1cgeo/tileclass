@@ -37,6 +37,21 @@ def test_rate_limit_window_expires_after_60s(client, admin_user, monkeypatch):
     assert r.status_code == 200, r.text
 
 
+def test_rate_limit_is_per_ip(app_env):
+    """Each client IP has its own bucket: exhausting one IP must not throttle a
+    different IP (a global counter would be a DoS-amplification regression)."""
+    from fastapi import HTTPException
+    from backend import auth as authmod
+    authmod.reset_rate_limits()
+    for _ in range(5):
+        authmod.check_login_rate_limit("10.0.0.1")  # within limit
+    with pytest.raises(HTTPException) as exc:
+        authmod.check_login_rate_limit("10.0.0.1")  # 6th → throttled
+    assert exc.value.status_code == 429
+    # A different IP is unaffected — its own fresh bucket.
+    authmod.check_login_rate_limit("10.0.0.2")  # must not raise
+
+
 def test_rate_limit_counts_successful_logins_too(client, admin_user):
     """Rate limit is per-IP regardless of outcome — protects against credential
     stuffing where some attempts happen to succeed."""

@@ -57,8 +57,28 @@ def test_request_changes_returns_tile_to_pending(client, admin_user, operators, 
     assert row["status"] == "pending"
     assert row["assigned_to"] is None
     assert row["classified_by"] == operators[0]["id"]  # original classifier preserved
-    # Mask NOT wiped — request_changes preserves work, unlike report_problem.
-    assert row["data_png"] is not None and len(row["data_png"]) > 100
+    # Mask preserved BYTE-FOR-BYTE (unlike report_problem which wipes it):
+    # the classifier submitted an all-1s mask, and it must round-trip intact.
+    from backend.mask_utils import decode_mask
+    assert decode_mask(row["data_png"]) == bytes([1]) * 65536
+
+
+def test_review_note_retired_after_admin_reset(client, admin_user, operators, tiles):
+    """A live request_changes note must NOT resurface once an admin resets the
+    tile (reset clears classified_at, which retires the ghost feedback)."""
+    tile_id = _classify_first_tile(client, operators[0])
+    op2_tok = token(client, operators[1]["username"], operators[1]["password"])
+    client.get("/api/tiles/next?project_id=1", headers=h(op2_tok))
+    client.post(f"/api/tiles/{tile_id}/request-changes",
+                json={"note": "feedback do ciclo antigo"}, headers=h(op2_tok))
+    # Note is live before the reset.
+    op1_tok = token(client, operators[0]["username"], operators[0]["password"])
+    assert client.get(f"/api/tiles/{tile_id}/review-note", headers=h(op1_tok)).status_code == 200
+    # Admin reset clears classified_at → the note is retired.
+    adm = token(client, "admin", "admin123")
+    assert client.post(f"/api/admin/tiles/{tile_id}/reset", headers=h(adm)).status_code == 200
+    r = client.get(f"/api/tiles/{tile_id}/review-note", headers=h(op1_tok))
+    assert r.status_code == 204, "ghost note from a discarded cycle must not resurface"
 
 
 def test_review_note_surfaces_on_next_load(client, admin_user, operators, tiles):

@@ -212,6 +212,8 @@ def _render_tile(project_id: int, z: int, x: int, y: int) -> bytes | None:
         return _render_vector_tile(project_id, z, x, y, proj)
     if kind == "classification":
         return _render_classification_tile(project_id, z, x, y, proj)
+    if kind == "detection":
+        return _render_detection_tile(project_id, z, x, y, proj)
     return _render_raster_tile(project_id, z, x, y)
 
 
@@ -488,6 +490,70 @@ def _render_classification_tile(project_id: int, z: int, x: int, y: int,
                 draw.text((tx + dx_, ty + dy_), label, fill=(255, 255, 255, 200), font=font)
             draw.text((tx, ty), label, fill=(*rgb, 255), font=font)
 
+    if not has_any:
+        return None
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    return buf.getvalue()
+
+
+def _render_detection_tile(project_id: int, z: int, x: int, y: int,
+                           proj: dict) -> bytes | None:
+    """Rasterize detection boxes into a 256×256 RGBA PNG: each box is an
+    axis-aligned rectangle outlined (+translucent fill) in its class color."""
+    import json
+    from PIL import ImageDraw
+
+    west, south, east, north = wm_tile_bounds_4326(z, x, y)
+    placeholders = ",".join("?" * len(_VISIBLE_STATUSES))
+    conn = connect_main()
+    try:
+        rows = conn.execute(
+            f"""SELECT data_geojson FROM tiles
+                WHERE project_id=?
+                  AND status IN ({placeholders})
+                  AND data_geojson IS NOT NULL
+                  AND bbox_west < ? AND bbox_east > ?
+                  AND bbox_south < ? AND bbox_north > ?""",
+            (project_id, *_VISIBLE_STATUSES, east, west, north, south),
+        ).fetchall()
+    finally:
+        conn.close()
+    if not rows:
+        return None
+
+    lonlat_to_pixel, span_ok = _make_lonlat_to_pixel(z, x, y)
+    if not span_ok:
+        return None
+
+    img = Image.new("RGBA", (XYZ_TILE_PX, XYZ_TILE_PX), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    classes_by_id = {c["id"]: c for c in (proj.get("classes") or [])}
+    has_any = False
+
+    for r in rows:
+        try:
+            doc = json.loads(r["data_geojson"])
+        except (TypeError, ValueError):
+            continue
+        for f in doc.get("features", []) or []:
+            geom = f.get("geometry") or {}
+            if geom.get("type") != "Polygon":
+                continue
+            rings = geom.get("coordinates") or []
+            if not rings or len(rings[0]) < 4:
+                continue
+            ring = rings[0]
+            xs = [c[0] for c in ring if len(c) >= 2]
+            ys = [c[1] for c in ring if len(c) >= 2]
+            if not xs or not ys:
+                continue
+            cls = classes_by_id.get((f.get("properties") or {}).get("class_id"))
+            rgb = _hex_to_rgb(cls["color"]) if cls else (228, 26, 28)
+            x0, y0 = lonlat_to_pixel(min(xs), max(ys))
+            x1, y1 = lonlat_to_pixel(max(xs), min(ys))
+            draw.rectangle([x0, y0, x1, y1], fill=(*rgb, 40), outline=(*rgb, 230), width=2)
+            has_any = True
     if not has_any:
         return None
     buf = io.BytesIO()

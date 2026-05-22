@@ -43,6 +43,41 @@ def test_admin_endpoints_forbid_operator(client, operators):
     assert r.status_code == 403
 
 
+def test_logout_revokes_token(client, admin_user):
+    """After logout the same access token is rejected (jti blacklisted) and the
+    revocation is persisted in token_blacklist."""
+    from backend import auth as authmod
+    from backend.database import connect
+    r = client.post("/api/auth/login", json={"username": "admin", "password": "admin123"})
+    access = r.json()["access_token"]
+    H = {"Authorization": f"Bearer {access}"}
+    assert client.get("/api/auth/me", headers=H).status_code == 200  # works before
+    assert client.post("/api/auth/logout", headers=H).status_code == 200
+    # Same token now refused for any authenticated endpoint.
+    after = client.get("/api/auth/me", headers=H)
+    assert after.status_code == 401
+    # Revocation persisted by jti for the right user.
+    jti = authmod.decode_token(access)["jti"]
+    conn = connect()
+    try:
+        row = conn.execute("SELECT user_id FROM token_blacklist WHERE jti=?", (jti,)).fetchone()
+    finally:
+        conn.close()
+    assert row is not None and row["user_id"] == admin_user["id"]
+
+
+def test_logout_does_not_affect_other_sessions(client, admin_user):
+    """Revoking one token must not revoke a second, independently-issued token
+    (distinct jti) for the same user."""
+    a = client.post("/api/auth/login", json={"username": "admin", "password": "admin123"}).json()["access_token"]
+    b = client.post("/api/auth/login", json={"username": "admin", "password": "admin123"}).json()["access_token"]
+    assert a != b
+    client.post("/api/auth/logout", headers={"Authorization": f"Bearer {a}"})
+    # Session A revoked, session B still valid.
+    assert client.get("/api/auth/me", headers={"Authorization": f"Bearer {a}"}).status_code == 401
+    assert client.get("/api/auth/me", headers={"Authorization": f"Bearer {b}"}).status_code == 200
+
+
 def test_refresh(client, admin_user):
     """New access_token from /refresh must actually authenticate against /me."""
     r = client.post("/api/auth/login", json={"username": "admin", "password": "admin123"})

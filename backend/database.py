@@ -56,14 +56,18 @@ CREATE TABLE IF NOT EXISTS projects (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT UNIQUE NOT NULL,
     description TEXT,
-    -- 'raster' (pixel-mask flow), 'vector' (GeoJSON FeatureCollection),
-    -- or 'classification' (single class_id per tile). Immutable after
+    -- 'raster' (pixel-mask flow), 'vector' (GeoJSON LineStrings),
+    -- 'classification' (single class_id per tile), or 'detection' (GeoJSON
+    -- axis-aligned bounding boxes, one class per box). Immutable after
     -- creation: changing kind would orphan every tile body.
     kind TEXT NOT NULL DEFAULT 'raster'
-        CHECK (kind IN ('raster','vector','classification')),
+        CHECK (kind IN ('raster','vector','classification','detection')),
     -- Vector projects only: when 1, submits run validate_topology
     -- (each LineString has direction; endpoints snap; no cycles).
     topology_required INTEGER NOT NULL DEFAULT 0,
+    -- Detection projects only: when 1, submit requires ≥1 box (a tile with
+    -- zero boxes is rejected). When 0, an empty tile is a valid negative.
+    box_required INTEGER NOT NULL DEFAULT 0,
     -- Tile geometry. tile_meters = tile_px * meters_per_pixel; mask body
     -- size = tile_px². Locked once any tile exists (mask bytes assume the
     -- original shape).
@@ -244,6 +248,70 @@ def _seed_members(conn: sqlite3.Connection, project_id: int) -> None:
         )
 
 
+def _rebuild_projects_widen_kind_check(conn: sqlite3.Connection) -> None:
+    """Widen the projects.kind CHECK to include 'detection'. SQLite can't ALTER
+    a CHECK, so rebuild via shadow table. Idempotent: skips when the current
+    table SQL already allows 'detection'. Other tables FK-reference projects
+    (project_classes/attributes/members/tiles), so the swap runs with
+    foreign_keys=OFF in one transaction, then re-checks FK integrity."""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='projects'"
+    ).fetchone()
+    if not row or "'detection'" in row[0]:
+        return
+    conn.execute("DROP TABLE IF EXISTS projects_rebuild")
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            """CREATE TABLE projects_rebuild (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL,
+                description TEXT,
+                kind TEXT NOT NULL DEFAULT 'raster'
+                    CHECK (kind IN ('raster','vector','classification','detection')),
+                topology_required INTEGER NOT NULL DEFAULT 0,
+                box_required INTEGER NOT NULL DEFAULT 0,
+                tile_px INTEGER NOT NULL DEFAULT 256 CHECK (tile_px > 0),
+                meters_per_pixel REAL NOT NULL DEFAULT 2.5 CHECK (meters_per_pixel > 0),
+                mask_complete_required INTEGER NOT NULL DEFAULT 1,
+                primary_mbtiles TEXT NOT NULL,
+                secondary_mbtiles TEXT,
+                tertiary_mbtiles TEXT,
+                ref_mask_primary_mbtiles TEXT,
+                ref_mask_secondary_mbtiles TEXT,
+                active INTEGER NOT NULL DEFAULT 1,
+                created_by INTEGER REFERENCES users(id),
+                created_at TEXT NOT NULL
+            )"""
+        )
+        conn.execute(
+            """INSERT INTO projects_rebuild (id, name, description, kind,
+               topology_required, box_required, tile_px, meters_per_pixel,
+               mask_complete_required, primary_mbtiles, secondary_mbtiles,
+               tertiary_mbtiles, ref_mask_primary_mbtiles, ref_mask_secondary_mbtiles,
+               active, created_by, created_at)
+               SELECT id, name, description, kind,
+               topology_required, box_required, tile_px, meters_per_pixel,
+               mask_complete_required, primary_mbtiles, secondary_mbtiles,
+               tertiary_mbtiles, ref_mask_primary_mbtiles, ref_mask_secondary_mbtiles,
+               active, created_by, created_at FROM projects"""
+        )
+        conn.execute("DROP TABLE projects")
+        conn.execute("ALTER TABLE projects_rebuild RENAME TO projects")
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        conn.execute("PRAGMA foreign_keys=ON")
+        raise
+    violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+    conn.execute("PRAGMA foreign_keys=ON")
+    if violations:
+        raise RuntimeError(
+            f"projects kind-check rebuild: foreign-key violations: {violations}"
+        )
+
+
 def _rebuild_tiles_with_project_not_null(conn: sqlite3.Connection) -> None:
     """SQLite cannot ALTER COLUMN to NOT NULL. Rebuild via shadow table.
 
@@ -374,6 +442,16 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE projects ADD COLUMN meters_per_pixel REAL NOT NULL DEFAULT 2.5"
         )
+    if "box_required" not in proj_cols:
+        # Detection projects: when 1, submit requires ≥1 box.
+        conn.execute(
+            "ALTER TABLE projects ADD COLUMN box_required INTEGER NOT NULL DEFAULT 0"
+        )
+    # The projects.kind CHECK predates the 'detection' kind on older DBs.
+    # SQLite can't ALTER a CHECK, so rebuild the table to widen it (idempotent:
+    # no-op once the constraint already lists 'detection'). Runs after the
+    # box_required ADD above so the rebuilt table copies that column.
+    _rebuild_projects_widen_kind_check(conn)
     # Indices on migrated columns must run after the ALTER above (cannot live
     # in SCHEMA because executescript runs before this fn on existing DBs).
     conn.execute(

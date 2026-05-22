@@ -76,6 +76,53 @@ def _seed_pending(conn, project_id: int, n: int):
         )
 
 
+def test_preview_and_stats_scoped_to_membership(client, admin_user, operators, two_projects):
+    """/next-preview and /me/stats-today are project-scoped: a non-member is 403
+    on another project's preview (no peeking across project boundaries)."""
+    admin_tok, default_pid, beta_pid = two_projects
+    from backend.database import connect
+    conn = connect()
+    try:
+        _seed_pending(conn, beta_pid, 2)
+        conn.commit()
+    finally:
+        conn.close()
+    op1 = token(client, operators[0]["username"], operators[0]["password"])  # default only
+    # Preview of own project works, of beta is forbidden.
+    assert client.get(f"/api/tiles/next-preview?project_id={default_pid}", headers=h(op1)).status_code in (200, 204)
+    assert client.get(f"/api/tiles/next-preview?project_id={beta_pid}", headers=h(op1)).status_code == 403
+    # stats-today for a project the user isn't a member of is forbidden.
+    assert client.get(f"/api/me/stats-today?project_id={beta_pid}", headers=h(op1)).status_code == 403
+
+
+def test_cross_project_submit_is_rejected(client, admin_user, operators, two_projects):
+    """A non-member can't classify another project's tile even by POSTing the
+    id directly (they were never assigned it). State stays untouched."""
+    import numpy as np
+    admin_tok, default_pid, beta_pid = two_projects
+    from backend.database import connect
+    conn = connect()
+    try:
+        _seed_pending(conn, beta_pid, 1)
+        conn.commit()
+        beta_tile = conn.execute(
+            "SELECT id FROM tiles WHERE project_id=? ORDER BY id LIMIT 1", (beta_pid,)
+        ).fetchone()["id"]
+    finally:
+        conn.close()
+    op1 = token(client, operators[0]["username"], operators[0]["password"])  # default only
+    r = client.post(f"/api/tiles/{beta_tile}/classify",
+                    headers={**h(op1), "Content-Type": "application/octet-stream"},
+                    content=np.full(65536, 1, dtype=np.uint8).tobytes())
+    assert r.status_code == 403  # not assigned to op1
+    conn = connect()
+    try:
+        row = conn.execute("SELECT status, classified_by FROM tiles WHERE id=?", (beta_tile,)).fetchone()
+    finally:
+        conn.close()
+    assert row["status"] == "pending" and row["classified_by"] is None
+
+
 def test_next_serves_only_member_project_tiles(client, admin_user, operators, two_projects):
     admin_tok, default_pid, beta_pid = two_projects
     from backend.database import connect

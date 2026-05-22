@@ -159,6 +159,12 @@ describe("validateAttributes", () => {
         expect(errs.some(e => e.includes("boolean"))).toBe(true);
     });
 
+    it("rejects a boolean for a number attribute (parity with backend guard)", () => {
+        // typeof true === "boolean" → not a number; backend excludes bool too.
+        const errs = validateAttributes([{ properties: { tipo: "a", lanes: true } }], schema);
+        expect(errs.some(e => e.includes("lanes"))).toBe(true);
+    });
+
     it("accepts a clean feature", () => {
         expect(validateAttributes(
             [{ properties: { tipo: "a", lanes: 2, iluminacao: true } }],
@@ -187,6 +193,32 @@ describe("validateTopology", () => {
             _line([[1, 1], [0, 0]], { direction: "forward" }),
         ]);
         expect(errs.some(e => e.toLowerCase().includes("ciclo"))).toBe(true);
+    });
+
+    it("rejects an invalid direction VALUE (not just absence)", () => {
+        // Parity with backend: 'north' is not in {forward,reverse,both}.
+        const errs = validateTopology([_line([[0, 0], [1, 1]], { direction: "north" })]);
+        expect(errs.some(e => e.includes("direction"))).toBe(true);
+    });
+
+    it("detects a cycle built from reverse edges", () => {
+        // All edges reverse: b→a orientation, still forms a directed cycle.
+        const errs = validateTopology([
+            _line([[0, 0], [1, 0]], { direction: "reverse" }),
+            _line([[1, 0], [1, 1]], { direction: "reverse" }),
+            _line([[1, 1], [0, 0]], { direction: "reverse" }),
+        ]);
+        expect(errs.some(e => e.toLowerCase().includes("ciclo"))).toBe(true);
+    });
+
+    it("does NOT false-positive on a converging DAG (diamond)", () => {
+        // a→b, a→c, b→d, c→d : two paths converge but there is no cycle.
+        expect(validateTopology([
+            _line([[0, 0], [1, 1]], { direction: "forward" }),
+            _line([[0, 0], [1, -1]], { direction: "forward" }),
+            _line([[1, 1], [2, 0]], { direction: "forward" }),
+            _line([[1, -1], [2, 0]], { direction: "forward" }),
+        ])).toEqual([]);
     });
 
     it("snaps endpoints within tolerance", () => {

@@ -97,6 +97,52 @@ def test_stale_tile_auto_paused_on_next_call(client, admin_user, operators, tile
     assert row["assigned_to"] == operators[0]["id"]
 
 
+def test_recent_heartbeat_prevents_sweep(client, admin_user, operators, tiles):
+    """Negative case: a tile with a RECENT heartbeat is NOT auto-paused when
+    another operator triggers the sweep via /next. Guards against a regression
+    that would pause every active tile, not just stale ones."""
+    op_a = token(client, operators[0]["username"], operators[0]["password"])
+    nxt_a = client.get("/api/tiles/next?project_id=1", headers=h(op_a)).json()
+    client.post(f"/api/tiles/{nxt_a['id']}/heartbeat", headers=h(op_a))  # fresh ping
+    op_b = token(client, operators[1]["username"], operators[1]["password"])
+    client.get("/api/tiles/next?project_id=1", headers=h(op_b))  # runs the sweep
+    from backend.database import connect
+    conn = connect()
+    try:
+        row = conn.execute(
+            "SELECT status, paused_at, assigned_to FROM tiles WHERE id=?", (nxt_a["id"],)
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row["paused_at"] is None  # NOT swept
+    assert row["status"] == "in_progress" and row["assigned_to"] == operators[0]["id"]
+
+
+def test_stale_in_review_tile_is_swept(client, admin_user, operators, tiles):
+    """The sweep frees stale in_review tiles too, not only in_progress."""
+    op_a = token(client, operators[0]["username"], operators[0]["password"])
+    tile = client.get("/api/tiles/next?project_id=1", headers=h(op_a)).json()
+    client.post(f"/api/tiles/{tile['id']}/classify",
+                headers={**h(op_a), "Content-Type": "application/octet-stream"},
+                content=bytes([1]) * 65536)
+    op_b = token(client, operators[1]["username"], operators[1]["password"])
+    rev = client.get("/api/tiles/next?project_id=1", headers=h(op_b)).json()
+    assert rev["id"] == tile["id"] and rev["status"] == "in_review"
+    _expire_heartbeat(rev["id"], seconds=400)
+    op_c = token(client, operators[2]["username"], operators[2]["password"])
+    client.get("/api/tiles/next?project_id=1", headers=h(op_c))  # triggers sweep
+    from backend.database import connect
+    conn = connect()
+    try:
+        row = conn.execute(
+            "SELECT status, paused_at, assigned_to FROM tiles WHERE id=?", (rev["id"],)
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row["paused_at"] is not None  # in_review tile auto-paused
+    assert row["status"] == "in_review" and row["assigned_to"] == operators[1]["id"]
+
+
 def test_pause_log_marks_auto(client, admin_user, operators, tiles):
     """The pause log entry has detail='auto' so the dashboard's cycle-
     duration pairing distinguishes auto-pauses from manual ones."""

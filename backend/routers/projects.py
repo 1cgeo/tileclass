@@ -133,6 +133,7 @@ def create_project(
         description=body.description,
         kind=body.kind,
         topology_required=body.topology_required,
+        box_required=body.box_required,
         mask_complete_required=body.mask_complete_required,
         tile_px=body.tile_px,
         meters_per_pixel=body.meters_per_pixel,

@@ -259,6 +259,17 @@ describe("validateSubmission — mirrors backend", () => {
         expect(() => validateSubmission(new Uint8Array(100))).toThrow(/expected 65536/);
     });
 
+    it("honours a restricted per-project palette (not just the 1..6 default)", () => {
+        // Project allows only {1,2,3}; a pixel of class 4 must be rejected even
+        // though it's valid under the default palette.
+        const m = new Uint8Array(PIXELS).fill(1);
+        m[100] = 4;
+        expect(() => validateSubmission(m, [1, 2, 3])).toThrow(/invalid class/);
+        // A mask using only the allowed subset passes.
+        const ok = new Uint8Array(PIXELS).fill(2);
+        expect(validateSubmission(ok, [1, 2, 3]).ok).toBe(true);
+    });
+
     it("accepts all 6 valid classes", () => {
         for (let c = 1; c <= 6; c++) {
             const m = new Uint8Array(PIXELS).fill(c);

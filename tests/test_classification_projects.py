@@ -344,6 +344,35 @@ def test_report_problem_clears_data_class_id(client, admin_user, operators, tmp_
 
 # ---- Review flow (in_review → reviewed) -----------------------------------
 
+def test_classification_review_rejects_invalid_class(client, admin_user, operators, tmp_path):
+    """The review branch re-validates class_id against the palette — a reviewer
+    can't push an out-of-palette class. State stays in_review."""
+    tok = token(client, admin_user["username"], admin_user["password"])
+    proj = _create_classification_project(client, tok, tmp_path, name="revbad")
+    for op in operators[:2]:
+        client.post(f"/api/admin/projects/{proj['id']}/members",
+                    json={"user_id": op["id"], "role": "reviewer"}, headers=h(tok))
+    tile_id = _seed_pending_tile(proj["id"])
+    op1 = token(client, operators[0]["username"], operators[0]["password"])
+    client.get(f"/api/tiles/next?project_id={proj['id']}", headers=h(op1))
+    client.post(f"/api/tiles/{tile_id}/classify",
+                headers={**h(op1), "Content-Type": "application/json"},
+                content=json.dumps({"class_id": 1}))
+    op2 = token(client, operators[1]["username"], operators[1]["password"])
+    client.get(f"/api/tiles/next?project_id={proj['id']}", headers=h(op2))
+    r = client.post(f"/api/tiles/{tile_id}/review",
+                    headers={**h(op2), "Content-Type": "application/json"},
+                    content=json.dumps({"class_id": 99}))
+    assert r.status_code == 422 and r.json()["detail"]["error"] == "invalid_class"
+    from backend.database import connect
+    conn = connect()
+    try:
+        row = conn.execute("SELECT status, data_class_id, reviewed_by FROM tiles WHERE id=?", (tile_id,)).fetchone()
+    finally:
+        conn.close()
+    assert row["status"] == "in_review" and row["data_class_id"] == 1 and row["reviewed_by"] is None
+
+
 def test_classification_review_cycle(client, admin_user, operators, tmp_path):
     """Full classify → review cycle. The reviewer may change the class id
     (e.g. correcting a misclassification); the second branch of

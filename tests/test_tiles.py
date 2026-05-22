@@ -92,11 +92,73 @@ def test_classify_submit_valid(client, operators, tiles):
     from backend.database import connect
     conn = connect()
     try:
-        row = conn.execute("SELECT status, classified_by FROM tiles WHERE id=?", (tile["id"],)).fetchone()
+        row = conn.execute(
+            "SELECT status, classified_by, assigned_to, version FROM tiles WHERE id=?",
+            (tile["id"],)).fetchone()
     finally:
         conn.close()
     assert row["status"] == "classified"
     assert row["classified_by"] == operators[0]["id"]
+    # Submit must release the assignment and bump the optimistic-lock version.
+    assert row["assigned_to"] is None
+    assert row["version"] > tile["version"]
+
+
+def test_classify_rejects_stale_version(client, operators, tiles):
+    """Optimistic lock on the SUBMIT path: a stale X-Tile-Version is rejected
+    409 tile_modified and the tile is left untouched (mirrors the pause lock)."""
+    from backend.database import connect
+    t = token(client, "op1", "secret123")
+    tile = client.get("/api/tiles/next", headers=headers(t)).json()
+    conn = connect()
+    try:
+        cur = conn.execute("SELECT version FROM tiles WHERE id=?", (tile["id"],)).fetchone()["version"]
+    finally:
+        conn.close()
+    raw = np.full(65536, 1, dtype=np.uint8).tobytes()
+    r = client.post(f"/api/tiles/{tile['id']}/classify",
+                    headers={**headers(t), "Content-Type": "application/octet-stream",
+                             "X-Tile-Version": str(cur - 1)},  # one behind current
+                    content=raw)
+    assert r.status_code == 409
+    assert r.json()["detail"]["error"] == "tile_modified"
+    conn = connect()
+    try:
+        row = conn.execute("SELECT status, classified_by FROM tiles WHERE id=?",
+                           (tile["id"],)).fetchone()
+    finally:
+        conn.close()
+    assert row["status"] == "in_progress" and row["classified_by"] is None
+
+
+def test_review_rejects_stale_version(client, operators, tiles):
+    """Same optimistic lock on the review submit path (in_review→reviewed)."""
+    from backend.database import connect
+    t1 = token(client, "op1", "secret123")
+    t2 = token(client, "op2", "secret123")
+    tile = client.get("/api/tiles/next", headers=headers(t1)).json()
+    raw = np.full(65536, 1, dtype=np.uint8).tobytes()
+    client.post(f"/api/tiles/{tile['id']}/classify",
+                headers={**headers(t1), "Content-Type": "application/octet-stream"}, content=raw)
+    rev = client.get("/api/tiles/next", headers=headers(t2)).json()
+    assert rev["id"] == tile["id"] and rev["status"] == "in_review"
+    conn = connect()
+    try:
+        cur = conn.execute("SELECT version FROM tiles WHERE id=?", (tile["id"],)).fetchone()["version"]
+    finally:
+        conn.close()
+    r = client.post(f"/api/tiles/{tile['id']}/review",
+                    headers={**headers(t2), "Content-Type": "application/octet-stream",
+                             "X-Tile-Version": str(cur - 1)},
+                    content=np.full(65536, 2, dtype=np.uint8).tobytes())
+    assert r.status_code == 409
+    assert r.json()["detail"]["error"] == "tile_modified"
+    conn = connect()
+    try:
+        row = conn.execute("SELECT status, reviewed_by FROM tiles WHERE id=?", (tile["id"],)).fetchone()
+    finally:
+        conn.close()
+    assert row["status"] == "in_review" and row["reviewed_by"] is None
 
 
 def test_classify_rejects_unfilled(client, operators, tiles):

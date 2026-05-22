@@ -37,10 +37,10 @@ async def _read_body_for_kind(request: Request, tile_id: int) -> tuple[bytes, di
     accepts a small JSON envelope (`{"class_id": int}`)."""
     proj = tile_service.project_for_tile(tile_id)
     kind = proj.get("kind")
-    if kind == "vector":
+    if kind in ("vector", "detection"):
         cl = request.headers.get("content-length")
         if cl and cl.isdigit() and int(cl) > 1_500_000:
-            raise HTTPException(413, "vector body too large")
+            raise HTTPException(413, "geojson body too large")
         return await request.body(), proj
     if kind == "classification":
         cl = request.headers.get("content-length")
@@ -209,14 +209,15 @@ def get_tile_image(tile_id: int = Path(ge=1),
 @router.get("/tiles/{tile_id}/features")
 def get_tile_features(tile_id: int = Path(ge=1),
                       user: auth.CurrentUser = Depends(auth.get_current_user)):
-    """Vector body — returns the FeatureCollection JSON, or the canonical
-    empty FC if the tile has never been submitted."""
+    """GeoJSON body — returns the FeatureCollection JSON (LineStrings for
+    vector, box Polygons for detection), or the canonical empty FC if the tile
+    has never been submitted."""
     proj = tile_service.project_for_tile(tile_id)
-    if proj.get("kind") != "vector":
+    if proj.get("kind") not in ("vector", "detection"):
         raise HTTPException(415, detail={
             "error": "wrong_kind",
             "kind": proj.get("kind"),
-            "message": "Endpoint /features só está disponível para tiles vetoriais.",
+            "message": "Endpoint /features só está disponível para tiles vetoriais/detection.",
         })
     text = tile_service.get_tile_geojson(tile_id)
     if text is None:

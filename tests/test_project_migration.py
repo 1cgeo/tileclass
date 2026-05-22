@@ -200,16 +200,33 @@ def test_migration_resumes_after_partial_rebuild(app_env, tmp_path, monkeypatch)
     legacy = tmp_path / "legacy.db"
     _make_legacy_db(legacy)
 
-    # Simulate the half-migrated state of a crash mid-rebuild.
+    # Simulate the half-migrated state of a crash mid-rebuild. The projects
+    # table always carries the full schema (executescript creates it before
+    # the tiles rebuild); only the tiles NOT NULL swap is unfinished here.
     conn = sqlite3.connect(legacy, isolation_level=None)
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(
         """
         CREATE TABLE projects (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL,
-            description TEXT, mask_complete_required INTEGER NOT NULL DEFAULT 1
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE NOT NULL,
+            description TEXT,
+            kind TEXT NOT NULL DEFAULT 'raster'
+                CHECK (kind IN ('raster','vector','classification','detection')),
+            topology_required INTEGER NOT NULL DEFAULT 0,
+            box_required INTEGER NOT NULL DEFAULT 0,
+            tile_px INTEGER NOT NULL DEFAULT 256 CHECK (tile_px > 0),
+            meters_per_pixel REAL NOT NULL DEFAULT 2.5 CHECK (meters_per_pixel > 0),
+            mask_complete_required INTEGER NOT NULL DEFAULT 1,
+            primary_mbtiles TEXT NOT NULL,
+            secondary_mbtiles TEXT, tertiary_mbtiles TEXT,
+            ref_mask_primary_mbtiles TEXT, ref_mask_secondary_mbtiles TEXT,
+            active INTEGER NOT NULL DEFAULT 1,
+            created_by INTEGER REFERENCES users(id),
+            created_at TEXT NOT NULL
         );
-        INSERT INTO projects(name) VALUES ('default');
+        INSERT INTO projects(name, primary_mbtiles, created_at)
+            VALUES ('default', '', '2026-01-01T00:00:00+00:00');
         """
     )
     conn.execute("ALTER TABLE tiles ADD COLUMN project_id INTEGER REFERENCES projects(id)")

@@ -95,6 +95,7 @@ def _row_to_project(row) -> dict:
         "description": row["description"] or "",
         "kind": row["kind"] if "kind" in keys else "raster",
         "topology_required": bool(row["topology_required"]) if "topology_required" in keys else False,
+        "box_required": bool(row["box_required"]) if "box_required" in keys else False,
         "mask_complete_required": bool(row["mask_complete_required"]),
         "tile_px": tile_px,
         "meters_per_pixel": mpp,
@@ -307,6 +308,7 @@ def _validate_layer_path(stored: str, *, required: bool) -> None:
 def create_project(
     *, name: str, description: str = "",
     kind: str = "raster", topology_required: bool = False,
+    box_required: bool = False,
     mask_complete_required: bool = True,
     tile_px: int = 256, meters_per_pixel: float = 2.5,
     primary_mbtiles: str, secondary_mbtiles: str | None = None,
@@ -320,13 +322,13 @@ def create_project(
     name = (name or "").strip()
     if not name:
         raise HTTPException(400, detail={"error": "invalid_name"})
-    if kind not in ("raster", "vector", "classification"):
+    if kind not in ("raster", "vector", "classification", "detection"):
         raise HTTPException(400, detail={"error": "invalid_kind"})
     _validate_tile_geometry(tile_px, meters_per_pixel)
-    # Mutual exclusion: raster/classification expect `classes`; vector
-    # expects `attributes`. Mixing is rejected so a payload with both
-    # never silently picks one.
-    if kind in ("raster", "classification"):
+    # Mutual exclusion: raster/classification/detection expect `classes`
+    # (each box/tile/pixel carries a class); vector expects `attributes`.
+    # Mixing is rejected so a payload with both never silently picks one.
+    if kind in ("raster", "classification", "detection"):
         if attributes:
             raise HTTPException(400, detail={
                 "error": "attributes_not_supported",
@@ -357,12 +359,13 @@ def create_project(
             raise HTTPException(409, detail={"error": "name_taken"})
         conn.execute(
             """INSERT INTO projects(name, description, kind, topology_required,
-               mask_complete_required, tile_px, meters_per_pixel,
+               box_required, mask_complete_required, tile_px, meters_per_pixel,
                primary_mbtiles, secondary_mbtiles,
                tertiary_mbtiles, ref_mask_primary_mbtiles, ref_mask_secondary_mbtiles,
                active, created_by, created_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)""",
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)""",
             (name, description, kind, 1 if topology_required else 0,
+             1 if box_required else 0,
              1 if mask_complete_required else 0,
              int(tile_px), float(meters_per_pixel),
              primary_mbtiles, secondary_mbtiles or None, tertiary_mbtiles or None,
@@ -370,7 +373,7 @@ def create_project(
              created_by, now_iso()),
         )
         pid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        if kind in ("raster", "classification"):
+        if kind in ("raster", "classification", "detection"):
             for ord_idx, c in enumerate(classes):
                 conn.execute(
                     """INSERT INTO project_classes(project_id, class_id, name, color, ordering)
@@ -451,14 +454,15 @@ def clone_project(source_id: int, *, new_name: str | None, by_user: int) -> dict
             raise HTTPException(409, detail={"error": "name_taken"})
         conn.execute(
             """INSERT INTO projects(name, description, kind, topology_required,
-               mask_complete_required, tile_px, meters_per_pixel,
+               box_required, mask_complete_required, tile_px, meters_per_pixel,
                primary_mbtiles, secondary_mbtiles,
                tertiary_mbtiles, ref_mask_primary_mbtiles, ref_mask_secondary_mbtiles,
                active, created_by, created_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)""",
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)""",
             (name, source["description"],
              source.get("kind", "raster"),
              1 if source.get("topology_required") else 0,
+             1 if source.get("box_required") else 0,
              1 if source["mask_complete_required"] else 0,
              int(source.get("tile_px", 256)),
              float(source.get("meters_per_pixel", 2.5)),
@@ -496,7 +500,7 @@ def update_project(project_id: int, *, fields: dict, updated_by: int) -> dict:
     or recreate to switch kinds."""
     cols_allowed = {
         "name", "description", "mask_complete_required", "active",
-        "topology_required", "tile_px", "meters_per_pixel",
+        "topology_required", "box_required", "tile_px", "meters_per_pixel",
         "primary_mbtiles", "secondary_mbtiles", "tertiary_mbtiles",
         "ref_mask_primary_mbtiles", "ref_mask_secondary_mbtiles",
     }
@@ -512,7 +516,7 @@ def update_project(project_id: int, *, fields: dict, updated_by: int) -> dict:
         if k in fields:
             _validate_layer_path(fields[k], required=False)
     for k, v in fields.items():
-        if k in ("mask_complete_required", "active", "topology_required"):
+        if k in ("mask_complete_required", "active", "topology_required", "box_required"):
             v = 1 if v else 0
         if k == "tile_px":
             v = int(v)

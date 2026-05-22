@@ -130,8 +130,9 @@ class ProjectAttributeIn(BaseModel):
 class ProjectCreateIn(BaseModel):
     name: str = Field(min_length=1, max_length=64)
     description: str = ""
-    kind: Literal["raster", "vector", "classification"] = "raster"
+    kind: Literal["raster", "vector", "classification", "detection"] = "raster"
     topology_required: bool = False
+    box_required: bool = False
     mask_complete_required: bool = True
     # Tile geometry (defaults match the historical 256×256 @ 2.5 m/px = 640 m
     # tile). Range validated by project_service._validate_tile_geometry too,
@@ -155,6 +156,7 @@ class ProjectUpdateIn(BaseModel):
     description: Optional[str] = None
     mask_complete_required: Optional[bool] = None
     topology_required: Optional[bool] = None
+    box_required: Optional[bool] = None
     # Editable only while the project has no tiles (mask bytes / bbox are
     # otherwise tied to the original geometry). Server returns 409
     # tile_geometry_locked if the project already has tiles.

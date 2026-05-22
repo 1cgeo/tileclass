@@ -106,19 +106,13 @@ def test_problem_to_pending_via_admin_reset(client, admin_user, operators, tiles
     assert r.status_code == 200
     assert _status(client, adm, tile["id"]) == "pending"
 
-    # And requeuable: op2 can now pick it up
+    # Requeuable and FIFO: the reset tile was the first one assigned, so it has
+    # the smallest id among pending tiles and /next returns it first.
     t2 = token(client, "op2", "secret123")
-    # Consume pending queue until we see it or exhaust
-    seen_ids = set()
-    for _ in range(12):
-        r = client.get("/api/tiles/next", headers=h(t2))
-        if r.status_code == 204:
-            break
-        seen_ids.add(r.json()["id"])
-        # Skip forward without classifying — use report-problem? No: just stop checking.
-        break
-    # The reset tile has the smallest id among pending (was tile_000) → first in queue
-    assert tile["id"] in seen_ids or tile["id"] <= min(seen_ids) if seen_ids else False
+    nxt = client.get("/api/tiles/next", headers=h(t2))
+    assert nxt.status_code == 200
+    assert nxt.json()["id"] == tile["id"]
+    assert nxt.json()["status"] == "in_progress"
 
 
 def test_reviewed_to_classified_via_admin_rereview(client, admin_user, operators, tiles):
@@ -138,15 +132,16 @@ def test_reviewed_to_classified_via_admin_rereview(client, admin_user, operators
 
 # ---------- Illegal transitions ----------
 
-@pytest.mark.parametrize("initial_status", ["reviewed", "pending"])
+@pytest.mark.parametrize("initial_status",
+                         ["reviewed", "pending", "classified", "blocked", "problem"])
 def test_classify_rejected_in_wrong_state(client, operators, tiles, initial_status):
-    """Classify is only legal from in_progress; must be rejected in other states."""
+    """The submit endpoint acts only from in_progress (→classified) or in_review
+    (→reviewed). Every other state is rejected 409 and left untouched. (in_review
+    is intentionally absent — there the same endpoint legally performs a review.)"""
     from backend.database import connect, transaction
-    from backend.mask_utils import empty_mask_png
 
     t = token(client, "op1", "secret123")
     tile = client.get("/api/tiles/next", headers=h(t)).json()
-    # Force tile into the target state
     with transaction("IMMEDIATE") as conn:
         conn.execute(
             "UPDATE tiles SET status=?, assigned_to=? WHERE id=?",
@@ -155,6 +150,14 @@ def test_classify_rejected_in_wrong_state(client, operators, tiles, initial_stat
 
     r = _classify(client, t, tile["id"])
     assert r.status_code == 409, f"expected 409 from {initial_status}, got {r.status_code}"
+    # State untouched: still in the forced status, not classified.
+    conn = connect()
+    try:
+        row = conn.execute("SELECT status, classified_by FROM tiles WHERE id=?",
+                           (tile["id"],)).fetchone()
+    finally:
+        conn.close()
+    assert row["status"] == initial_status and row["classified_by"] is None
 
 
 def test_rereview_on_non_reviewed_tile_is_rejected(client, admin_user, operators, tiles):

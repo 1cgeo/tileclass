@@ -113,6 +113,62 @@ def test_operator_cannot_report_problem_on_other_users_tile(client, operators, t
     assert r.status_code == 403
 
 
+def test_operator_cannot_pause_other_users_tile(client, operators, tiles):
+    """op2 pausing op1's in_progress tile → 403, paused_at untouched."""
+    from backend.database import connect
+    t1 = token(client, "op1", "secret123")
+    tile = client.get("/api/tiles/next", headers=h(t1)).json()
+    t2 = token(client, "op2", "secret123")
+    r = client.post(f"/api/tiles/{tile['id']}/pause",
+                    headers={**h(t2), "Content-Type": "application/octet-stream"}, content=_mask(255))
+    assert r.status_code == 403
+    conn = connect()
+    try:
+        row = conn.execute("SELECT paused_at, assigned_to FROM tiles WHERE id=?", (tile["id"],)).fetchone()
+    finally:
+        conn.close()
+    assert row["paused_at"] is None and row["assigned_to"] == operators[0]["id"]
+
+
+def test_operator_cannot_resume_other_users_tile(client, operators, tiles):
+    """op1 pauses; op2 cannot resume it (→403)."""
+    t1 = token(client, "op1", "secret123")
+    tile = client.get("/api/tiles/next", headers=h(t1)).json()
+    client.post(f"/api/tiles/{tile['id']}/pause",
+                headers={**h(t1), "Content-Type": "application/octet-stream",
+                         "X-Tile-Version": str(tile["version"])}, content=_mask(255))
+    t2 = token(client, "op2", "secret123")
+    assert client.post(f"/api/tiles/{tile['id']}/resume", headers=h(t2)).status_code == 403
+
+
+def test_operator_cannot_heartbeat_other_users_tile(client, operators, tiles):
+    t1 = token(client, "op1", "secret123")
+    tile = client.get("/api/tiles/next", headers=h(t1)).json()
+    t2 = token(client, "op2", "secret123")
+    assert client.post(f"/api/tiles/{tile['id']}/heartbeat", headers=h(t2)).status_code == 403
+
+
+def test_classifier_cannot_request_changes_on_review(client, operators, tiles):
+    """request_changes is a reviewer action (assigned_to==reviewer). The original
+    classifier (not the assigned reviewer) is rejected 403, tile stays in_review."""
+    from backend.database import connect
+    t1 = token(client, "op1", "secret123")
+    tile = client.get("/api/tiles/next", headers=h(t1)).json()
+    _post_mask(client, t1, f"/api/tiles/{tile['id']}/classify")
+    t2 = token(client, "op2", "secret123")
+    rev = client.get("/api/tiles/next", headers=h(t2)).json()
+    assert rev["id"] == tile["id"] and rev["status"] == "in_review"
+    # op1 (classifier, not the assigned reviewer) tries to kick it back.
+    r = client.post(f"/api/tiles/{tile['id']}/request-changes", headers=h(t1), json={"note": "x"})
+    assert r.status_code == 403
+    conn = connect()
+    try:
+        row = conn.execute("SELECT status FROM tiles WHERE id=?", (tile["id"],)).fetchone()
+    finally:
+        conn.close()
+    assert row["status"] == "in_review"
+
+
 # ---------- Admin gate on every admin endpoint ----------
 
 def test_operator_token_rejected_on_all_admin_endpoints(client, operators, tiles):
@@ -142,8 +198,7 @@ def test_operator_token_rejected_on_all_admin_endpoints(client, operators, tiles
 
 
 def test_tile_submit_on_nonexistent_tile_returns_404(client, operators):
-    """No confusion between 403 and 404 — unknown tile is 404 (not authz leak)."""
+    """Unknown tile is 404 (project_for_tile resolves first), never 403/500."""
     t = token(client, "op1", "secret123")
     r = _post_mask(client, t, "/api/tiles/99999/classify")
-    # 403 first (not assigned) is also acceptable; never 500.
-    assert r.status_code in (403, 404)
+    assert r.status_code == 404

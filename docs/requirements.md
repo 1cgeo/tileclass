@@ -22,14 +22,21 @@ HTML5, MapLibre GL JS).
 
 - API REST (FastAPI) servindo o frontend estático.
 - SQLite WAL como banco único.
-- **Dois tipos de projeto** (coluna `projects.kind`, imutável após criação):
+- **Quatro tipos de projeto** (coluna `projects.kind`, imutável após criação):
   - `raster` — body do tile é uma **máscara PNG single-band** (BLOB,
-    65536 bytes). Schema de domínio em `project_classes` (id+name+color).
+    tile_px² bytes). Schema de domínio em `project_classes` (id+name+color).
   - `vector` — body é um **GeoJSON FeatureCollection** (TEXT) com
     LineStrings + properties. Schema de domínio em `project_attributes`
     (key+label+type+required+options). Para drenagem como grafo, o flag
     `topology_required` ativa validação de direção, conectividade
     (snap-tolerância intra-tile) e ausência de ciclos.
+  - `classification` — body é um único `data_class_id` (INTEGER). Operador
+    rotula o tile inteiro com uma classe de `project_classes`. Sem pause.
+  - `detection` — body é um **GeoJSON FeatureCollection** (TEXT) de
+    **bounding boxes** (Polygons retângulos alinhados aos eixos), uma classe
+    de `project_classes` por caixa (`properties.class_id`). O flag
+    `box_required` exige ≥1 caixa no submit (senão tile vazio é negative
+    sample válido). Export GeoJSON via `export_detections.py`.
 - Imagens e máscaras de referência por projeto. Cada projeto declara até 5
   layers: `primary` (obrigatório), `secondary`, `tertiary` (atalhos D/R),
   `ref_primary`, `ref_secondary` (atalhos T/Y, máscaras categorizadas). Cada
@@ -63,8 +70,9 @@ HTML5, MapLibre GL JS).
 | id                           | INTEGER | PK                                                                   |
 | name                         | TEXT    | Único                                                                |
 | description                  | TEXT    | Livre                                                                |
-| kind                         | TEXT    | `raster` (default) ou `vector`. **Imutável após criação.**           |
-| topology_required            | INTEGER | 0/1 — vector projects only; ativa direction + cycle check no submit  |
+| kind                         | TEXT    | `raster`(default)/`vector`/`classification`/`detection`. **Imutável.** |
+| topology_required            | INTEGER | 0/1 — vector only; ativa direction + cycle check no submit           |
+| box_required                 | INTEGER | 0/1 — detection only; quando 1, submit exige ≥1 caixa                |
 | mask_complete_required       | INTEGER | 0/1; raster only — quando 1, submit rejeita pixels=255               |
 | primary_mbtiles              | TEXT    | Path mbtiles **ou** URL remota com `{z}/{x}/{y}`. Obrigatório.       |
 | secondary_mbtiles            | TEXT    | Opcional — path ou URL — atalho `D`                                  |

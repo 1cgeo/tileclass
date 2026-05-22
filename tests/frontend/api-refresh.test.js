@@ -159,6 +159,39 @@ describe("api.js — token handling & refresh", () => {
         }
     });
 
+    it("coalesces concurrent 401s into a single /refresh", async () => {
+        api.setTokens({ access_token: makeJwt(3600), refresh_token: "r" });
+        let refreshCalls = 0;
+        const seen = {};
+        global.fetch = vi.fn(async (url) => {
+            if (url === "/api/auth/refresh") {
+                refreshCalls++;
+                return new Response(
+                    JSON.stringify({ access_token: makeJwt(3600), refresh_token: "r2" }),
+                    { status: 200, headers: { "content-type": "application/json" } });
+            }
+            seen[url] = (seen[url] || 0) + 1;
+            if (seen[url] === 1) return new Response(null, { status: 401 });  // first hit
+            return new Response(JSON.stringify({ ok: true }),
+                { status: 200, headers: { "content-type": "application/json" } });
+        });
+        // Two requests hit 401 simultaneously → must share ONE refresh.
+        const [a, b] = await Promise.all([api.apiGet("/api/a"), api.apiGet("/api/b")]);
+        expect(a).toEqual({ ok: true });
+        expect(b).toEqual({ ok: true });
+        expect(refreshCalls).toBe(1);  // not 2 — refresh is coalesced
+    });
+
+    it("does NOT refresh on non-401 errors (no double-spend of refresh token)", async () => {
+        api.setTokens({ access_token: makeJwt(3600), refresh_token: "r" });
+        const fetchMock = vi.fn().mockResolvedValue(new Response(
+            JSON.stringify({ detail: "boom" }),
+            { status: 500, headers: { "content-type": "application/json" } }));
+        global.fetch = fetchMock;
+        await expect(api.apiGet("/api/x")).rejects.toThrow();
+        expect(fetchMock).toHaveBeenCalledTimes(1);  // single call, no /refresh
+    });
+
     it("apiJson returns null on 204 No Content", async () => {
         global.fetch = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
         const r = await api.apiGet("/api/tiles/next");

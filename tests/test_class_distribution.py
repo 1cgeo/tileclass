@@ -25,6 +25,33 @@ def _classify(client, op_tok, class_id: int) -> int:
     return nxt["id"]
 
 
+def test_mixed_class_counts_split_correctly(client, admin_user, operators, tiles):
+    """A non-uniform mask must record per-class pixel counts that sum to the
+    tile area — guards against a transpose/aggregation bug that a uniform-fill
+    test (every other test here) would never catch."""
+    op_tok = token(client, operators[0]["username"], operators[0]["password"])
+    nxt = client.get("/api/tiles/next?project_id=1", headers=h(op_tok)).json()
+    raw = bytearray(65536)
+    for i in range(65536):
+        raw[i] = 1 if i < 20000 else (2 if i < 50000 else 3)  # 20000 / 30000 / 15536
+    r = client.post(f"/api/tiles/{nxt['id']}/classify",
+                    headers={**h(op_tok), "Content-Type": "application/octet-stream"},
+                    content=bytes(raw))
+    assert r.status_code == 200, r.text
+    from backend.database import connect
+    conn = connect()
+    try:
+        cc = json.loads(conn.execute("SELECT class_counts FROM tiles WHERE id=?", (nxt["id"],)).fetchone()["class_counts"])
+    finally:
+        conn.close()
+    assert cc == {"1": 20000, "2": 30000, "3": 15536}
+    assert sum(cc.values()) == 65536
+    # And the dashboard aggregate reflects the same split.
+    adm = token(client, admin_user["username"], admin_user["password"])
+    by_id = {c["class_id"]: c["pixels"] for c in client.get("/api/admin/class-distribution", headers=h(adm)).json()}
+    assert by_id[1] == 20000 and by_id[2] == 30000 and by_id[3] == 15536
+
+
 def test_class_counts_cached_on_submit(client, admin_user, operators, tiles):
     """A fully-painted submit writes JSON pixel counts to tiles.class_counts."""
     op_tok = token(client, operators[0]["username"], operators[0]["password"])

@@ -56,6 +56,7 @@ function renderProjectList(projects) {
     for (const p of projects) {
         const kindChip = p.kind === "vector" ? "vetorial"
                        : p.kind === "classification" ? "classificação"
+                       : p.kind === "detection" ? "detecção"
                        : "matricial";
         const tr = document.createElement("tr");
         tr.innerHTML = `
@@ -100,6 +101,7 @@ async function selectProject(projectId) {
 function renderProjectDetail(proj, members) {
     const isVector = proj.kind === "vector";
     const isClassification = proj.kind === "classification";
+    const isDetection = proj.kind === "detection";
     const layerRows = LAYER_FIELDS.map(f => {
         const v = proj[f.key] || "";
         return `
@@ -139,11 +141,18 @@ function renderProjectDetail(proj, members) {
         ? ' <span class="chip info">vetorial</span>'
         : isClassification
         ? ' <span class="chip info">classificação</span>'
+        : isDetection
+        ? ' <span class="chip info">detecção</span>'
         : ' <span class="chip">matricial</span>';
     const maskCompleteBlock = isVector ? `
             <label class="field">
                 <input type="checkbox" data-field="topology_required" ${proj.topology_required ? "checked" : ""}>
                 Validar topologia (drenagem como grafo: direção + conectividade + sem ciclos)
+            </label>
+    ` : isDetection ? `
+            <label class="field">
+                <input type="checkbox" data-field="box_required" ${proj.box_required ? "checked" : ""}>
+                Exigir ≥1 caixa para submeter (senão tile vazio é negative sample válido)
             </label>
     ` : isClassification ? "" : `
             <label class="field">
@@ -311,7 +320,7 @@ function readField(field) {
 async function saveProjectFields(projectId) {
     const fields = {};
     for (const f of ["name", "description", "mask_complete_required",
-                      "topology_required", "active"]) {
+                      "topology_required", "box_required", "active"]) {
         const v = readField(f);
         if (v !== undefined) fields[f] = v;
     }
@@ -539,6 +548,7 @@ function showProjectForm(root, _) {
                     <option value="raster">Matricial (máscara pixel)</option>
                     <option value="vector">Vetorial (linhas com atributos)</option>
                     <option value="classification">Classificação (1 classe por tile)</option>
+                    <option value="detection">Detecção (caixas por classe)</option>
                 </select>
             </label>
             <p class="muted">O tipo é imutável após a criação — para mudar, clone para um projeto novo.</p>
@@ -553,6 +563,10 @@ function showProjectForm(root, _) {
             <label class="field hidden" id="np-topo-row">
                 <input type="checkbox" id="np-topology-required">
                 Validar topologia (drenagem como grafo)
+            </label>
+            <label class="field hidden" id="np-box-row">
+                <input type="checkbox" id="np-box-required">
+                Exigir ≥1 caixa para submeter (senão tile vazio é negative sample)
             </label>
             <fieldset class="field" style="display:grid;grid-template-columns:auto auto;gap:8px;">
                 <legend>Geometria do tile</legend>
@@ -615,13 +629,15 @@ function showProjectForm(root, _) {
         const kind = kindSel.value;
         const isVector = kind === "vector";
         const isClassification = kind === "classification";
-        // Classes are used by raster + classification; attributes only by vector.
+        const isDetection = kind === "detection";
+        // Classes are used by raster/classification/detection; attributes only by vector.
         document.getElementById("np-classes-block").classList.toggle("hidden", isVector);
         document.getElementById("np-attrs-block").classList.toggle("hidden", !isVector);
         // mask_complete_required only applies to raster (pixel painting).
         document.getElementById("np-mask-row").classList.toggle(
-            "hidden", isVector || isClassification);
+            "hidden", isVector || isClassification || isDetection);
         document.getElementById("np-topo-row").classList.toggle("hidden", !isVector);
+        document.getElementById("np-box-row").classList.toggle("hidden", !isDetection);
     };
     kindSel.onchange = refreshKindUI;
     refreshKindUI();
@@ -662,10 +678,14 @@ function showProjectForm(root, _) {
             body.topology_required = document.getElementById("np-topology-required").checked;
             body.attributes = readAttributes();
         } else {
-            // Raster + classification both ship class lists; mask_complete_required
-            // only matters for raster (classification has no partial state).
+            // Raster/classification/detection all ship class lists.
+            // mask_complete_required only matters for raster (pixel painting);
+            // box_required only for detection.
             if (kindSel.value === "raster") {
                 body.mask_complete_required = document.getElementById("np-mask-required").checked;
+            }
+            if (kindSel.value === "detection") {
+                body.box_required = document.getElementById("np-box-required").checked;
             }
             body.classes = readClasses();
         }

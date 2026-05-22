@@ -35,6 +35,11 @@ import {
     getCurrentBody as getClassificationBody,
     validateForSubmit as validateClassification,
 } from "./editor-classification.js";
+import {
+    enterDetectionTile, exitDetectionTile,
+    getCurrentBody as getDetectionBody,
+    validateForSubmit as validateDetection,
+} from "./editor-detection.js";
 
 // Tile geometry is per-project (project.tile_px). These are mutated on
 // project load via setTileGeometry. DISPLAY is the on-screen canvas size
@@ -450,6 +455,10 @@ function isClassificationProject() {
     return window.tileclassActiveProject?.kind === "classification";
 }
 
+function isDetectionProject() {
+    return window.tileclassActiveProject?.kind === "detection";
+}
+
 async function loadTile(t, preloadedMask = null) {
     _tileReady = false;
     currentTile = t;
@@ -489,6 +498,15 @@ async function loadTile(t, preloadedMask = null) {
     if (isClassificationProject()) {
         // Classification: MapLibre satellite + class-picker sidebar; no canvas.
         await enterClassificationTile(t, window.tileclassActiveProject);
+        refreshRequestChangesButton(t);
+        loadReviewNoteBanner(t.id);
+        startHeartbeat(t.id);
+        _tileReady = true;
+        return;
+    }
+    if (isDetectionProject()) {
+        // Detection: MapLibre satellite + draw-box tool; no canvas.
+        await enterDetectionTile(t, window.tileclassActiveProject);
         refreshRequestChangesButton(t);
         loadReviewNoteBanner(t.id);
         startHeartbeat(t.id);
@@ -1300,6 +1318,12 @@ async function submit() {
             showToast(errs[0], "error");
             return;
         }
+    } else if (isDetectionProject()) {
+        const errs = validateDetection();
+        if (errs.length) {
+            showToast(`Não foi possível submeter:\n${errs.slice(0, 3).join("\n")}`, "error", 6000);
+            return;
+        }
     } else if (maskCompleteRequired && filledCount < PIXELS) {
         // Loose projects (mask_complete_required=false) accept any mask — the
         // backend mirrors this rule.
@@ -1334,6 +1358,10 @@ async function submit() {
             await apiPostJson(
                 `/api/tiles/${currentTile.id}/classify`, JSON.parse(getClassificationBody()),
             );
+        } else if (isDetectionProject()) {
+            await apiPostJson(
+                `/api/tiles/${currentTile.id}/classify`, JSON.parse(getDetectionBody()),
+            );
         } else {
             await apiPostBytes(
                 `/api/tiles/${currentTile.id}/classify`, mask, versionHeaders,
@@ -1348,6 +1376,7 @@ async function submit() {
         // while they decide whether to pull the next one.
         if (isVectorProject()) exitVectorTile();
         if (isClassificationProject()) exitClassificationTile();
+        if (isDetectionProject()) exitDetectionTile();
         flashSuccess();
         showIdleScreen("Tile enviado ✓", "Verificando próximo tile...", { previewNext: true });
     } catch (e) {
@@ -1615,6 +1644,10 @@ async function pauseTile() {
             await apiPostJson(
                 `/api/tiles/${currentTile.id}/pause`, JSON.parse(getVectorBody()),
             );
+        } else if (isDetectionProject()) {
+            await apiPostJson(
+                `/api/tiles/${currentTile.id}/pause`, JSON.parse(getDetectionBody()),
+            );
         } else {
             await apiPostBytes(
                 `/api/tiles/${currentTile.id}/pause`, mask,
@@ -1624,6 +1657,7 @@ async function pauseTile() {
         clearBackup();
         if (isVectorProject()) exitVectorTile();
         if (isClassificationProject()) exitClassificationTile();
+        if (isDetectionProject()) exitDetectionTile();
         showToast("Tile pausado. Suas alterações foram salvas no servidor.", "success");
         showIdleScreen("Tile pausado ⏸", "Faça login depois para continuar de onde parou.");
     } catch (e) {

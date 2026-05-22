@@ -164,21 +164,37 @@ def test_create_rejects_duplicate_name(client, admin_user, tmp_path):
     assert r.json()["detail"]["error"] == "name_taken"
 
 
-def test_create_rejects_invalid_classes(client, admin_user, tmp_path):
+@pytest.mark.parametrize("bad_classes,label", [
+    ([{"id": 1, "name": "a", "color": "#aabbcc"}, {"id": 1, "name": "dup", "color": "#aabbcc"}], "duplicate id"),
+    ([{"id": 1, "name": "a", "color": "not-a-hex"}], "bad color"),
+    ([{"id": 1, "name": "", "color": "#aabbcc"}], "empty name"),
+    ([{"id": 255, "name": "a", "color": "#aabbcc"}], "id out of mask byte range (>254)"),
+    ([{"id": 0, "name": "a", "color": "#aabbcc"}], "id 0 reserved"),
+])
+def test_create_rejects_invalid_classes(client, admin_user, tmp_path, bad_classes, label):
+    """Each malformed class set is rejected (4xx), not silently accepted —
+    id range matters because class ids become raw mask bytes."""
     tok = token(client, admin_user["username"], admin_user["password"])
     r = client.post(
         "/api/admin/projects",
-        json={
-            "name": "broken",
-            "primary_mbtiles": _stub_mbtiles(tmp_path),
-            "classes": [
-                {"id": 1, "name": "a", "color": "#aabbcc"},
-                {"id": 1, "name": "dup", "color": "#aabbcc"},  # duplicate id
-            ],
-        },
+        json={"name": f"broken-{label[:6]}", "primary_mbtiles": _stub_mbtiles(tmp_path),
+              "classes": bad_classes},
         headers=h(tok),
     )
-    assert r.status_code == 400
+    assert r.status_code in (400, 422), f"{label} should be rejected, got {r.status_code}"
+
+
+def test_add_class_allowed_while_tiles_exist(client, admin_user, tiles):
+    """Removing a class with tiles present is blocked (mask bytes may reference
+    it), but ADDING a new class id is always allowed."""
+    tok = token(client, admin_user["username"], admin_user["password"])
+    # Default seed has classes 1..6; add a 7th, keeping all existing ones.
+    new_classes = [{"id": i, "name": f"c{i}", "color": "#377eb8"} for i in range(1, 7)]
+    new_classes.append({"id": 7, "name": "nova", "color": "#123456"})
+    r = client.put("/api/admin/projects/1/classes", json={"classes": new_classes}, headers=h(tok))
+    assert r.status_code == 200, r.text
+    got = client.get("/api/projects/1", headers=h(tok)).json()["classes"]
+    assert {c["id"] for c in got} == set(range(1, 8))
 
 
 # ---- Update -----------------------------------------------------------------

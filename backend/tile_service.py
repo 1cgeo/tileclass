@@ -4,7 +4,7 @@ import json
 from fastapi import HTTPException
 from .database import connect, transaction, log_action, now_iso
 from .mask_utils import encode_mask, decode_mask, empty_mask_png, validate_submission, validate_partial, class_counts
-from . import vector_utils, classify_utils
+from . import vector_utils, classify_utils, detection_utils
 from . import mask_tile_service, project_service
 
 
@@ -509,6 +509,8 @@ def submit_classification(tile_id: int, user_id: int, body: bytes,
         return _submit_vector(tile_id, user_id, body, proj, expected_version)
     if kind == "classification":
         return _submit_classification(tile_id, user_id, body, proj, expected_version)
+    if kind == "detection":
+        return _submit_detection(tile_id, user_id, body, proj, expected_version)
     return _submit_raster(tile_id, user_id, body, proj, expected_version)
 
 
@@ -607,6 +609,51 @@ def _submit_vector(tile_id: int, user_id: int, body: bytes,
                    assigned_to=NULL, paused_at=NULL, version=version+1
                    WHERE id=?""",
                 (text, fcount, user_id, now_iso(), tile_id),
+            )
+            log_action(conn, user_id, tile_id, "review")
+        else:
+            raise HTTPException(409, f"invalid state for submit: {status}")
+    mask_tile_service.safe_invalidate_tile(tile_id)
+    return {"ok": True}
+
+
+def _submit_detection(tile_id: int, user_id: int, body: bytes,
+                      proj: dict, expected_version: int | None) -> dict:
+    if len(body) > _MAX_VECTOR_BODY_BYTES:
+        raise HTTPException(413, detail={"error": "body_too_large"})
+    try:
+        text = body.decode("utf-8")
+    except UnicodeDecodeError:
+        raise HTTPException(400, detail={"error": "invalid_utf8"})
+    allowed = [c["id"] for c in proj["classes"]]
+    ok, payload = detection_utils.validate_submission(
+        text, allowed, box_required=bool(proj.get("box_required")),
+    )
+    if not ok:
+        raise HTTPException(422, detail={"error": "invalid_boxes", **payload})
+    doc = payload["doc"]
+    fcount = len(doc["features"])
+    cc_json = json.dumps(detection_utils.class_counts(doc), separators=(",", ":"))
+
+    with transaction("IMMEDIATE") as conn:
+        row = _lock_tile_for_user(conn, tile_id, user_id, expected_version)
+        status = row["status"]
+        if status == "in_progress":
+            conn.execute(
+                """UPDATE tiles SET status='classified', data_geojson=?,
+                   feature_count=?, class_counts=?, classified_by=?, classified_at=?,
+                   assigned_to=NULL, paused_at=NULL, version=version+1
+                   WHERE id=?""",
+                (text, fcount, cc_json, user_id, now_iso(), tile_id),
+            )
+            log_action(conn, user_id, tile_id, "classify")
+        elif status == "in_review":
+            conn.execute(
+                """UPDATE tiles SET status='reviewed', data_geojson=?,
+                   feature_count=?, class_counts=?, reviewed_by=?, reviewed_at=?,
+                   assigned_to=NULL, paused_at=NULL, version=version+1
+                   WHERE id=?""",
+                (text, fcount, cc_json, user_id, now_iso(), tile_id),
             )
             log_action(conn, user_id, tile_id, "review")
         else:
@@ -777,6 +824,8 @@ def pause_tile(tile_id: int, user_id: int, body: bytes,
         })
     if kind == "vector":
         return _pause_vector(tile_id, user_id, body, proj, expected_version)
+    if kind == "detection":
+        return _pause_detection(tile_id, user_id, body, proj, expected_version)
     return _pause_raster(tile_id, user_id, body, proj, expected_version)
 
 
@@ -834,6 +883,38 @@ def _pause_vector(tile_id: int, user_id: int, body: bytes,
             "UPDATE tiles SET data_geojson=?, feature_count=?, paused_at=?, "
             "version=version+1 WHERE id=?",
             (text, fcount, now_iso(), tile_id),
+        )
+        log_action(conn, user_id, tile_id, "pause")
+        row = conn.execute(f"{_TILE_SELECT} WHERE tiles.id=?", (tile_id,)).fetchone()
+    mask_tile_service.safe_invalidate_tile(tile_id)
+    return _row_to_tile_dict(row)
+
+
+def _pause_detection(tile_id: int, user_id: int, body: bytes,
+                     proj: dict, expected_version: int | None) -> dict:
+    """Pause for detection tiles only checks the body parses as a box
+    FeatureCollection (structural). class_id membership and the box_required
+    gate are deferred to submit — pause is a "save my partial work" affordance."""
+    if len(body) > _MAX_VECTOR_BODY_BYTES:
+        raise HTTPException(413, detail={"error": "body_too_large"})
+    try:
+        text = body.decode("utf-8")
+    except UnicodeDecodeError:
+        raise HTTPException(400, detail={"error": "invalid_utf8"})
+    try:
+        doc = detection_utils.parse_detection(text)
+    except ValueError as e:
+        raise HTTPException(400, detail={"error": "invalid_geojson", "message": str(e)})
+    fcount = len(doc["features"])
+    cc_json = json.dumps(detection_utils.class_counts(doc), separators=(",", ":"))
+    with transaction("IMMEDIATE") as conn:
+        row = _lock_tile_for_user(conn, tile_id, user_id, expected_version)
+        if row["status"] not in ("in_progress", "in_review"):
+            raise HTTPException(409, f"cannot pause from state: {row['status']}")
+        conn.execute(
+            "UPDATE tiles SET data_geojson=?, feature_count=?, class_counts=?, "
+            "paused_at=?, version=version+1 WHERE id=?",
+            (text, fcount, cc_json, now_iso(), tile_id),
         )
         log_action(conn, user_id, tile_id, "pause")
         row = conn.execute(f"{_TILE_SELECT} WHERE tiles.id=?", (tile_id,)).fetchone()
