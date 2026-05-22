@@ -32,10 +32,25 @@ def main(db_path: str) -> None:
     conn = connect()
     now = datetime.now(timezone.utc).isoformat()
     try:
-        # init_db seeded a default project from config.yaml; pin its id.
-        pid = conn.execute(
-            "SELECT id FROM projects ORDER BY id LIMIT 1"
-        ).fetchone()["id"]
+        # init_db no longer seeds a project (a fresh app starts empty). Create
+        # the project the E2E flow classifies against, with the standard classes.
+        conn.execute(
+            "INSERT INTO projects(id, name, description, kind, tile_px, meters_per_pixel, "
+            "mask_complete_required, primary_mbtiles, active, created_at) "
+            "VALUES (1,'default','','raster',256,2.5,1,'',1,?)",
+            (now,),
+        )
+        pid = 1
+        for ordering, (cid, cname, color) in enumerate([
+            (1, "Massa d'água", "#377eb8"), (2, "Área edificada", "#e41a1c"),
+            (3, "Floresta", "#4daf4a"), (4, "Campo", "#ffff33"),
+            (5, "Cultivo", "#984ea3"), (6, "Terreno exposto", "#ff7f00"),
+        ]):
+            conn.execute(
+                "INSERT INTO project_classes(project_id, class_id, name, color, ordering) "
+                "VALUES (1,?,?,?,?)",
+                (cid, cname, color, ordering),
+            )
 
         conn.execute(
             "INSERT INTO users(username, password_hash, role, active, created_at) "

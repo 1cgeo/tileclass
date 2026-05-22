@@ -474,6 +474,39 @@ def test_remote_url_accepted_as_layer(client, admin_user):
     assert primary["ext"] == "webp"
 
 
+def test_is_remote_layer_recognizes_schemes():
+    """Pure check on the single source of truth for remote-vs-file layers."""
+    from backend.project_service import is_remote_layer
+    assert is_remote_layer("https://h/{z}/{x}/{y}.png") is True
+    assert is_remote_layer("http://h/{z}/{x}/{y}.png") is True
+    assert is_remote_layer("bingmaps://{z}/{x}/{y}") is True
+    assert is_remote_layer("../data_external/tiles.mbtiles") is False
+    assert is_remote_layer("/abs/path.mbtiles") is False
+    assert is_remote_layer(None) is False
+    assert is_remote_layer("") is False
+
+
+def test_bingmaps_url_accepted_as_layer(client, admin_user):
+    """bingmaps:// is a remote scheme (frontend rewrites it to Bing quadkeys),
+    so it passes validation and reaches the editor as a pass-through URL."""
+    tok = token(client, admin_user["username"], admin_user["password"])
+    r = client.post(
+        "/api/admin/projects",
+        json={
+            "name": "bing",
+            "primary_mbtiles": "https://martin.example.com/sat/{z}/{x}/{y}.webp",
+            "tertiary_mbtiles": "bingmaps://{z}/{x}/{y}",
+            "classes": [{"id": 1, "name": "x", "color": "#112233"}],
+        },
+        headers=h(tok),
+    )
+    assert r.status_code == 200, r.text
+    pid = r.json()["id"]
+    tertiary = client.get(f"/api/projects/{pid}", headers=h(tok)).json()["layers"]["tertiary"]
+    assert tertiary["remote"] is True
+    assert tertiary["url"] == "bingmaps://{z}/{x}/{y}"
+
+
 def test_remote_url_rejects_missing_placeholders(client, admin_user):
     tok = token(client, admin_user["username"], admin_user["password"])
     r = client.post(

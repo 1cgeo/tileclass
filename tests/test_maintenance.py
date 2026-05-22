@@ -49,7 +49,11 @@ def test_overview_shape(client, admin_user):
         assert "name" in payload and "layers" in payload, pid
         for layer, info in payload["layers"].items():
             assert "open" in info and "configured" in info, (pid, layer)
-            if info["open"]:
+            if info.get("remote"):
+                # Remote tile-servers (incl. bingmaps://) aren't file-backed:
+                # no reader metadata, just the pass-through source.
+                assert set(info) >= {"open", "configured", "remote", "path"}, (pid, layer)
+            elif info["open"]:
                 assert set(info) >= {
                     "open", "configured", "format", "min_zoom", "max_zoom", "path"
                 }, (pid, layer)

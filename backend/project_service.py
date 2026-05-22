@@ -36,10 +36,15 @@ def layer_path(project: dict, layer: str) -> str | None:
     return project.get(column) if column else None
 
 
+_REMOTE_SCHEMES = ("http://", "https://", "bingmaps://")
+
+
 def is_remote_layer(value: str | None) -> bool:
-    """A layer source is treated as a remote tile server when it starts with
-    http:// or https://. Otherwise it's a local mbtiles file path."""
-    return bool(value) and (value.startswith("http://") or value.startswith("https://"))
+    """A layer source is treated as a remote tile server (fetched directly by
+    the frontend, not file-backed) when it uses a remote scheme: http(s):// for
+    standard XYZ servers, or bingmaps:// for the Bing quadkey scheme that
+    maplib.js rewrites on the fly. Otherwise it's a local mbtiles file path."""
+    return bool(value) and value.startswith(_REMOTE_SCHEMES)
 
 
 def resolve_mbtiles_path(stored: str | None) -> Optional[Path]:

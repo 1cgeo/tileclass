@@ -44,9 +44,17 @@ from rasterio.warp import reproject
 
 # Make backend/ importable when running as `python backend/scripts/build_mask_mbtiles.py`
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from backend.config import get_config
 from backend.scripts.export_tiles import EDGV_REMAP_LUT
 from backend.tile_grid import TILE, force_crs_3857, tile_bounds_3857, tiles_for_bbox, merc_to_lonlat
+
+# Default TileClass palette (class id → #RRGGBB) used to color the EDGV-id
+# rasters via EDGV_REMAP_LUT. Self-contained because config.yaml no longer
+# carries classes (they're per-project domain data in the DB). Pass --project
+# to pull live colors from a specific project's classes instead.
+DEFAULT_PALETTE = {
+    1: "#377eb8", 2: "#e41a1c", 3: "#4daf4a",
+    4: "#ffff33", 5: "#984ea3", 6: "#ff7f00",
+}
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -56,15 +64,35 @@ except Exception:
 
 # ------------- Color LUT (EDGV id → RGBA from config.yaml) -------------
 
-def build_rgba_lut() -> np.ndarray:
-    """LUT (256, 4) uint8 mapping EDGV class id → RGBA. NoData/unknown → transparent."""
+def build_rgba_lut(palette: dict[int, str]) -> np.ndarray:
+    """LUT (256, 4) uint8 mapping EDGV class id → RGBA. NoData/unknown → transparent.
+    `palette` maps TileClass id (1..6) → #RRGGBB."""
     lut = np.zeros((256, 4), dtype=np.uint8)
-    for cls in get_config()["classes"]:
-        tc_id = int(cls["id"])              # TileClass id 1..6
-        edgv_id = int(EDGV_REMAP_LUT[tc_id])  # EDGV id 0..5
-        rgb = bytes.fromhex(cls["color"].lstrip("#"))
+    for tc_id, color in palette.items():
+        edgv_id = int(EDGV_REMAP_LUT[int(tc_id)])  # EDGV id 0..5
+        rgb = bytes.fromhex(color.lstrip("#"))
         lut[edgv_id] = (rgb[0], rgb[1], rgb[2], 255)
     return lut
+
+
+def _resolve_palette(project_arg: str | None) -> dict[int, str]:
+    """DEFAULT_PALETTE, or a specific project's class colors when --project is given."""
+    if not project_arg:
+        return DEFAULT_PALETTE
+    from backend.database import connect
+    from backend.scripts._common import resolve_project_arg
+    conn = connect()
+    try:
+        pid = resolve_project_arg(conn, project_arg)
+        rows = conn.execute(
+            "SELECT class_id, color FROM project_classes WHERE project_id=? ORDER BY ordering",
+            (pid,),
+        ).fetchall()
+    finally:
+        conn.close()
+    if not rows:
+        sys.exit(f"[err] projeto {project_arg} não tem classes")
+    return {int(r[0]): r[1] for r in rows}
 
 
 # ------------- Rendering -------------
@@ -177,6 +205,8 @@ def main() -> None:
     ap.add_argument("--name", default="DSG")
     ap.add_argument("--description", default="DSG: EDGV 6c predictions (test split) colored with TileClass palette")
     ap.add_argument("--resume", action="store_true", help="pula tiles já presentes (idempotente)")
+    ap.add_argument("--project", default=None,
+                    help="id ou nome do projeto cujas cores usar (default: paleta TileClass padrão)")
     args = ap.parse_args()
 
     src_dir = Path(args.src_dir).resolve()
@@ -188,7 +218,7 @@ def main() -> None:
         sys.exit(f"[err] nenhum .tif em {src_dir}")
     print(f"[info] {len(tifs)} GeoTIFFs em {src_dir}")
 
-    lut = build_rgba_lut()
+    lut = build_rgba_lut(_resolve_palette(args.project))
     lut_bytes = lut.tobytes()
     print(f"[info] LUT EDGV→RGBA: " + ", ".join(
         f"{i}={tuple(lut[i])}" for i in range(6)

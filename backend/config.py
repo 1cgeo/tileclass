@@ -11,8 +11,8 @@ _HEX_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
 
 def validate_classes(classes: list) -> None:
     """Validate a list of {id, name, color} dicts. Raises ValueError on the
-    first problem. Used by the YAML loader (default-project seed) and by the
-    project_service.set_classes path so both share the same rules."""
+    first problem. Used by the project_service.set_classes path (classes are
+    domain data — defined per project in the DB, never in config.yaml)."""
     seen_ids: set[int] = set()
     for c in classes or []:
         cid = c.get("id")
@@ -28,21 +28,12 @@ def validate_classes(classes: list) -> None:
             raise ValueError(f"classe {cid} color inválida: {color!r} (esperado #RRGGBB)")
 
 
-def _validate(cfg: dict) -> None:
-    # Classes in the YAML are seed-only (used to bootstrap the default project
-    # on a fresh DB). If present, must be well-formed; otherwise skip — the
-    # source of truth post-bootstrap is the `project_classes` table.
-    if cfg.get("classes"):
-        validate_classes(cfg["classes"])
-
-
 def get_config() -> dict:
     global _cache
     if _cache is None:
         path = os.environ.get("TILECLASS_CONFIG") or _CONFIG_PATH
         with open(path, "r", encoding="utf-8") as f:
             cfg = yaml.safe_load(f)
-        _validate(cfg)
         _cache = cfg
     return _cache
 

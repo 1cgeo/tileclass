@@ -3,7 +3,7 @@
 Aplicação web para classificação pixel-a-pixel de tiles de satélite. **Geometria do tile é por projeto** (`projects.tile_px` × `projects.meters_per_pixel`). Default herdado: 256×256 px @ 2.5 m/pixel = 640 m × 640 m no chão.
 Backend FastAPI + SQLite; frontend Vanilla JS com Canvas HTML5. Imagem de fundo via mbtiles XYZ por projeto.
 
-**Projetos:** classes, paleta de cores, mbtiles (imagem primária/secundária/terciária + duas máscaras de referência), a flag `mask_complete_required` e a geometria do tile (`tile_px`, `meters_per_pixel`) vivem por projeto. Tiles, membership de operador/revisor e o dashboard são todos escopados por `project_id`. O `config.yaml` é seed para o projeto "default" criado no primeiro `init_db()`; depois disso a fonte de verdade são as tabelas `projects/project_classes/project_members`.
+**Projetos:** classes, paleta de cores, mbtiles (imagem primária/secundária/terciária + duas máscaras de referência), a flag `mask_complete_required` e a geometria do tile (`tile_px`, `meters_per_pixel`) vivem por projeto. Tiles, membership de operador/revisor e o dashboard são todos escopados por `project_id`. **Uma instalação nova começa vazia — sem projeto, sem classes.** O admin cria e configura o primeiro projeto pela UI admin (aba Projetos) ou `POST /api/admin/projects`. A fonte de verdade é sempre as tabelas `projects/project_classes/project_members`; o `config.yaml` **não** carrega dado de domínio.
 
 Spec completa: `docs/requirements.md`. Em caso de dúvida, o requirements manda.
 
@@ -12,7 +12,7 @@ Spec completa: `docs/requirements.md`. Em caso de dúvida, o requirements manda.
 - **Backend:** Python 3.11+, FastAPI, Uvicorn, SQLite (sqlite3 nativo — **sem ORM**), PyJWT, bcrypt, Pillow, NumPy, PyYAML, rasterio (export), pyproj (geodésica WGS84)
 - **Frontend:** Vanilla JS (sem framework), Canvas HTML5, fetch API. MapLibre GL JS (via CDN) para renderização georreferenciada dos tiles XYZ. Servido como estático pelo FastAPI.
 - **Testes:** pytest + httpx (backend), Vitest + jsdom (frontend unit), Puppeteer + uvicorn real (E2E)
-- **Config:** `backend/config.yaml` mantém apenas `database.path`, `auth.jwt_secret`, `mask_overlay` e o bloco seed `default_project`/`classes`/`tileserver*`/`dsg`/`mapbiomas` — usados **uma única vez** para criar o projeto default. Override por env: `TILECLASS_CONFIG=<path>` (usado nos E2E). Rate limit desligável via `TILECLASS_DISABLE_RATE_LIMIT=1` (apenas E2E — nunca em produção).
+- **Config:** `backend/config.yaml` carrega **apenas o que NÃO é configurável no nível da aplicação** — infra/segredos: `database.path`, `auth` (jwt_secret + TTLs) e `mask_overlay` (cache do overlay admin). **Nada de domínio** (projetos, classes, layers, geometria, membros) — isso vive no banco e é editado pela UI admin. Override por env: `TILECLASS_CONFIG=<path>` (usado nos E2E). Rate limit desligável via `TILECLASS_DISABLE_RATE_LIMIT=1` (apenas E2E — nunca em produção).
 
 ## Comandos
 
@@ -126,11 +126,12 @@ Cada projeto define seu próprio mundo de classificação. As tabelas-chave são
 | `ref_mask_primary_mbtiles` | `ref_primary` | `T` (hold) | não |
 | `ref_mask_secondary_mbtiles` | `ref_secondary` | `Y` (hold) | não |
 
-Cada campo aceita dois formatos:
+Cada campo aceita três formatos:
 - **Path mbtiles** (relativo a `backend/` ou absoluto): backend abre via pool `mbtiles_service.get_reader(project_id, layer)` e serve em `/api/projects/{id}/xyz/{layer}/{z}/{x}/{y}.{ext}`. JWT exigido (autenticação intra-rede).
 - **URL de tile-server remoto** (Martin / TileServer-GL / similares): valor começando com `http(s)://` e contendo `{z}/{x}/{y}`. MapLibre busca direto, sem proxy do backend. Útil para integrar com infraestrutura existente. CSP do servidor pode precisar ajuste (`connect-src` em `main.py`).
+- **Esquema `bingmaps://{z}/{x}/{y}`**: Bing Maps usa quadkeys em vez de z/x/y, então o frontend (`maplib.js` → `tileTransformRequest`) reescreve `bingmaps://` para o endpoint quadkey do `virtualearth.net` on-the-fly. O backend trata como remoto (pass-through, sem proxy). É o valor seed do tertiary do projeto default.
 
-`project_service.is_remote_layer(value)` detecta URL; `layer_path(proj, layer)` é o único ponto de leitura. Layers ausentes não registram atalho nem aparecem na sidebar/cheat-sheet — `refreshShortcutsBadges()` esconde os badges via `data-overlay-key` no HTML. `ref_*` são overlays de referência (raster categorizado, não-editável); ao serem segurados, escondem a máscara do operador (`HIDE_MASK_OVERLAYS`).
+`project_service.is_remote_layer(value)` é o ponto único que classifica remoto vs. arquivo (prefixos `http://`, `https://`, `bingmaps://`); `layer_path(proj, layer)` é o único ponto de leitura. Layers ausentes não registram atalho nem aparecem na sidebar/cheat-sheet — `refreshShortcutsBadges()` esconde os badges via `data-overlay-key` no HTML. `ref_*` são overlays de referência (raster categorizado, não-editável); ao serem segurados, escondem a máscara do operador (`HIDE_MASK_OVERLAYS`).
 
 **`mask_complete_required`:** quando `True` (default), submit rejeita pixels=255 com `unfilled_pixels`; quando `False`, aceita. Frontend espelha o gate: `updateSubmitButton` só pinta `incomplete` no projeto estrito.
 
@@ -145,7 +146,7 @@ Cada campo aceita dois formatos:
 2. `apiGet("/api/projects/{id}")` carrega `classes`, `mask_complete_required`, e `layers` com URLs prontas (`/api/projects/{id}/xyz/{layer}/{z}/{x}/{y}.{ext}`).
 3. Toda chamada de fila (`/api/tiles/next`, `/next-preview`, `/queue-stats`, `/me/stats-today`, `/tiles/assigned`) passa `?project_id=<id>`. Quando o usuário tem só uma membership o param pode ser omitido; com múltiplas, o backend devolve 400 `project_id_required`.
 
-**Migração (idempotente, em `database.py`):** DBs pré-projetos ganham um projeto "default" semeado a partir de `config.yaml.classes/tileserver/dsg/mapbiomas`; todos os tiles existentes recebem `project_id=<default>`; usuários ativos viram membros com role derivada de `role+can_review`. A coluna é tornada `NOT NULL` via tabela espelho. DBs novos passam pela mesma seed automaticamente em `init_db()`.
+**Migração (idempotente, em `database.py`):** DBs pré-projetos ganham um projeto "default" criado por `_migration_seed_project` — **hardcoded** (nome `default`, paleta padrão `_MIGRATION_CLASSES` de 6 classes, layers vazios), **não** lido do `config.yaml`; serve só para dar um lar aos tiles órfãos (cujas máscaras podem referenciar os ids 1..6) e é totalmente editável depois pela UI. Todos os tiles existentes recebem `project_id=<default>`; usuários ativos viram membros com role derivada de `role+can_review`. A coluna é tornada `NOT NULL` via tabela espelho — o rebuild roda com `foreign_keys=OFF` numa transação (a tabela `action_log` referencia `tiles` por FK, então o `DROP TABLE` falharia com FKs ligadas) e é resumível após falha parcial (guard checa `project_id` ser NOT NULL, não só existir). **DBs novos NÃO são semeados** — o `SCHEMA` já cria `tiles.project_id NOT NULL`, então o branch de migração não roda e a instalação fica vazia (admin cria o 1º projeto pela UI).
 
 **Pool de mbtiles readers:** `mbtiles_service` mantém um LRU de até 32 readers, chaveado por `(project_id, layer)`. Editar paths via admin invalida o reader correspondente. Arquivos inválidos/corruptos são tolerados (reader fica `closed`, layer some do payload). URLs remotos não consomem slots do pool — só paths mbtiles. Lifespan pré-aquece o reader `primary` de cada projeto ativo (apenas mbtiles locais) para evitar latência na primeira requisição.
 

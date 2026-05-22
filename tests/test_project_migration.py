@@ -235,13 +235,15 @@ def test_migration_resumes_after_partial_rebuild(app_env, tmp_path, monkeypatch)
         conn.close()
 
 
-def test_fresh_db_seeds_default_project(app_env):
-    """A fresh DB initialised by the fixture must already have the default project."""
+def test_fresh_db_has_no_project(app_env):
+    """A fresh DB starts EMPTY — no project, no classes. The admin creates the
+    first project via the UI. (Only the legacy migration seeds one, to home
+    pre-existing orphan tiles.) The schema still enforces project_id NOT NULL."""
     from backend.database import connect
     conn = connect()
     try:
-        rows = conn.execute("SELECT name FROM projects").fetchall()
-        assert [r["name"] for r in rows] == ["default"]
+        assert conn.execute("SELECT COUNT(*) c FROM projects").fetchone()["c"] == 0
+        assert conn.execute("SELECT COUNT(*) c FROM project_classes").fetchone()["c"] == 0
         info = {r["name"]: r for r in conn.execute("PRAGMA table_info(tiles)").fetchall()}
         assert info["project_id"]["notnull"] == 1
     finally:

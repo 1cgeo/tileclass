@@ -88,15 +88,40 @@ def _wal_checkpoint():
         conn.close()
 
 
+_TEST_PROJECT_CLASSES = [
+    (1, "Massa d'água", "#377eb8"), (2, "Área edificada", "#e41a1c"),
+    (3, "Floresta", "#4daf4a"), (4, "Campo", "#ffff33"),
+    (5, "Cultivo", "#984ea3"), (6, "Terreno exposto", "#ff7f00"),
+]
+
+
+def _seed_test_project(conn) -> int:
+    """init_db() no longer auto-seeds a project (a fresh app starts empty — the
+    admin creates the first project via the UI). Tests still want a ready-made
+    'default' project (id=1) with the standard 6 classes; create it explicitly
+    and idempotently. Returns its id."""
+    conn.execute(
+        "INSERT OR IGNORE INTO projects(id, name, description, kind, tile_px, "
+        "meters_per_pixel, mask_complete_required, primary_mbtiles, active, created_at) "
+        "VALUES (1,'default','','raster',256,2.5,1,'',1,?)",
+        (datetime.now(timezone.utc).isoformat(),),
+    )
+    for ordering, (cid, name, color) in enumerate(_TEST_PROJECT_CLASSES):
+        conn.execute(
+            "INSERT OR IGNORE INTO project_classes(project_id, class_id, name, color, ordering) "
+            "VALUES (1,?,?,?,?)",
+            (cid, name, color, ordering),
+        )
+    return 1
+
+
 def _add_to_default_project(conn, user_id: int, role: str) -> None:
     """Make the user a member of the seed default project so project-aware
     endpoints can serve them tiles in tests."""
-    row = conn.execute("SELECT id FROM projects ORDER BY id LIMIT 1").fetchone()
-    if row is None:
-        return
+    pid = _seed_test_project(conn)
     conn.execute(
         "INSERT OR IGNORE INTO project_members(project_id, user_id, role) VALUES (?,?,?)",
-        (row["id"], user_id, role),
+        (pid, user_id, role),
     )
 
 
@@ -147,21 +172,19 @@ def operators_10(app_env):
 
 
 def _default_project_id(conn) -> int:
-    row = conn.execute("SELECT id FROM projects ORDER BY id LIMIT 1").fetchone()
-    if row is None:
-        raise RuntimeError("default project missing — init_db should have seeded it")
-    return row["id"]
+    """Ensure the test 'default' project exists and return its id. init_db no
+    longer seeds it, so create-on-demand keeps tile/project fixtures working."""
+    return _seed_test_project(conn)
 
 
 @pytest.fixture()
 def default_project(app_env):
-    """Resolve the auto-seeded default project id (created by init_db)."""
-    from backend.database import connect
-    conn = connect()
-    try:
-        return _default_project_id(conn)
-    finally:
-        conn.close()
+    """Create (idempotently) and resolve the test default project id."""
+    from backend.database import transaction
+    with transaction("IMMEDIATE") as conn:
+        pid = _seed_test_project(conn)
+    _wal_checkpoint()
+    return pid
 
 
 @pytest.fixture()

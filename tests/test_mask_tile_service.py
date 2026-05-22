@@ -52,7 +52,10 @@ def test_wm_tiles_for_bbox_small_region(app_env):
 # ---- Helpers -----------------------------------------------------------------
 
 def _default_pid(conn):
-    return conn.execute("SELECT id FROM projects ORDER BY id LIMIT 1").fetchone()["id"]
+    # init_db no longer seeds a project; create the standard test project
+    # (id=1 + 6 classes) on demand so the overlay-render tests have a palette.
+    from tests.conftest import _seed_test_project
+    return _seed_test_project(conn)
 
 
 def _insert_classified(name, bbox, fill_class):

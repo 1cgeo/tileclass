@@ -43,8 +43,9 @@ def _real_mbtiles(tmp_path: Path, name: str = "real.mbtiles") -> str:
 
 # ---- Schema ----------------------------------------------------------------
 
-def test_schema_has_tile_geometry_columns(app_env):
-    """init_db creates tile_px / meters_per_pixel with the historical default."""
+def test_schema_has_tile_geometry_columns(default_project):
+    """The schema declares tile_px / meters_per_pixel with the historical
+    default; a project created with those defaults derives tile_meters=640."""
     conn = database.connect()
     try:
         cols = {r[1]: r for r in conn.execute("PRAGMA table_info(projects)").fetchall()}
@@ -52,8 +53,7 @@ def test_schema_has_tile_geometry_columns(app_env):
         conn.close()
     assert "tile_px" in cols
     assert "meters_per_pixel" in cols
-    # Default project (seeded from config.yaml) inherits the column DEFAULTs.
-    proj = project_service.get_project(1)
+    proj = project_service.get_project(default_project)
     assert proj["tile_px"] == 256
     assert proj["meters_per_pixel"] == 2.5
     # tile_meters is derived for callers that want the ground span directly.

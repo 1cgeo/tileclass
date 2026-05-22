@@ -186,38 +186,43 @@ CREATE INDEX IF NOT EXISTS idx_tb_exp ON token_blacklist(expires_at);
 """
 
 
-def _seed_default_project(conn: sqlite3.Connection) -> int | None:
-    """Create the seed project from config.yaml if no project exists yet.
-    Returns the new project id, or None when projects already exist."""
+# Palette baked into the legacy migration only. A fresh install starts with no
+# project — the admin creates and configures everything (classes, layers,
+# geometry) through the admin UI. This constant exists solely so a pre-projects
+# DB being migrated has a home for its orphan tiles whose masks may reference
+# these historical TileClass ids; names/colors are editable afterwards.
+_MIGRATION_CLASSES = (
+    (1, "Massa d'água", "#377eb8"),
+    (2, "Área edificada", "#e41a1c"),
+    (3, "Floresta", "#4daf4a"),
+    (4, "Campo", "#ffff33"),
+    (5, "Cultivo", "#984ea3"),
+    (6, "Terreno exposto", "#ff7f00"),
+)
+
+
+def _migration_seed_project(conn: sqlite3.Connection) -> int | None:
+    """Create the project that orphan tiles are backfilled into when migrating
+    a pre-projects DB. Returns its id, or None when a project already exists
+    (then the caller backfills into the existing one). Layers start empty —
+    the admin points them at mbtiles/URLs via the UI. NOT read from config:
+    domain config lives in the DB, not config.yaml."""
     has = conn.execute("SELECT id FROM projects ORDER BY id LIMIT 1").fetchone()
     if has:
         return None
-    cfg = get_config()
-    dp = cfg.get("default_project") or {}
-    name = dp.get("name") or "default"
-    description = dp.get("description") or ""
-    mask_required = 1 if dp.get("mask_complete_required", True) else 0
-    primary = (cfg.get("tileserver") or {}).get("mbtiles_path") or ""
-    secondary = (cfg.get("tileserver_secondary") or {}).get("mbtiles_path") or None
-    tertiary = (cfg.get("tileserver_tertiary") or {}).get("mbtiles_path") or None
-    ref_primary = (cfg.get("dsg") or {}).get("mbtiles_path") or None
-    ref_secondary = (cfg.get("mapbiomas") or {}).get("mbtiles_path") or None
     now = datetime.now(timezone.utc).isoformat()
     conn.execute(
         """INSERT INTO projects(name, description, mask_complete_required,
-           primary_mbtiles, secondary_mbtiles, tertiary_mbtiles,
-           ref_mask_primary_mbtiles, ref_mask_secondary_mbtiles,
-           active, created_at)
-           VALUES (?,?,?,?,?,?,?,?,1,?)""",
-        (name, description, mask_required, primary, secondary, tertiary,
-         ref_primary, ref_secondary, now),
+           primary_mbtiles, active, created_at)
+           VALUES (?,?,?,?,1,?)""",
+        ("default", "", 1, "", now),
     )
     pid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-    for ord_idx, c in enumerate(cfg.get("classes") or []):
+    for ord_idx, (cid, name, color) in enumerate(_MIGRATION_CLASSES):
         conn.execute(
             """INSERT INTO project_classes(project_id, class_id, name, color, ordering)
                VALUES (?,?,?,?,?)""",
-            (pid, c["id"], c["name"], c["color"], ord_idx),
+            (pid, cid, name, color, ord_idx),
         )
     return pid
 
@@ -387,18 +392,19 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("UPDATE users SET can_review=1 WHERE role='admin'")
 
     # Project migration: pre-project DBs have a `tiles` table without project_id.
-    # We add the column nullable, seed the default project from config.yaml,
+    # We add the column nullable, create a project to home the orphan tiles,
     # backfill, then rebuild the table to enforce NOT NULL. Gated on project_id
     # being NOT NULL (not merely present) so a run that aborted mid-rebuild —
     # column added but the NOT NULL swap unfinished — resumes instead of being
-    # skipped and left half-migrated.
+    # skipped and left half-migrated. Fresh DBs never enter here (the SCHEMA
+    # already declares project_id NOT NULL), so they stay empty.
     pid_col = next((r for r in conn.execute("PRAGMA table_info(tiles)").fetchall()
                     if r[1] == "project_id"), None)
     project_id_enforced = pid_col is not None and pid_col[3] == 1  # notnull flag
     if not project_id_enforced:
         if pid_col is None:
             conn.execute("ALTER TABLE tiles ADD COLUMN project_id INTEGER REFERENCES projects(id)")
-        pid = _seed_default_project(conn)
+        pid = _migration_seed_project(conn)
         if pid is None:
             row = conn.execute("SELECT id FROM projects ORDER BY id LIMIT 1").fetchone()
             pid = row["id"] if row else None
@@ -424,11 +430,9 @@ def init_db() -> None:
     try:
         conn.executescript(SCHEMA)
         _migrate(conn)
-        # Fresh DBs: seed the default project from config.yaml so the app is
-        # immediately usable. Idempotent — no-op once any project exists.
-        pid = _seed_default_project(conn)
-        if pid is not None:
-            _seed_members(conn, pid)
+        # A fresh DB stays empty: no project, no classes. The admin creates and
+        # configures the first project through the admin UI. Only the legacy
+        # migration above seeds a project (to home pre-existing orphan tiles).
         _create_project_id_indices(conn)
     finally:
         conn.close()

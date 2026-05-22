@@ -9,11 +9,12 @@ import { escapeHtml } from "../utils.js";
 // Each field accepts either a local mbtiles path (relative to backend/ or
 // absolute) OR a remote tile-server URL template (Martin / TileServer-GL),
 // e.g. https://martin.example.com/sat/{z}/{x}/{y}.webp. URLs must contain
-// {z}, {x}, {y} placeholders.
+// {z}, {x}, {y} placeholders. Bing satellite is supported via the custom
+// scheme bingmaps://{z}/{x}/{y} (rewritten to quadkeys by the frontend).
 const LAYER_FIELDS = [
-    { key: "primary_mbtiles",          label: "Imagem primária",            required: true,  hint: "Path .mbtiles ou URL com {z}/{x}/{y}" },
-    { key: "secondary_mbtiles",        label: "Imagem secundária",          required: false, hint: "Atalho D — path .mbtiles ou URL" },
-    { key: "tertiary_mbtiles",         label: "Imagem terciária",           required: false, hint: "Atalho R — path .mbtiles ou URL" },
+    { key: "primary_mbtiles",          label: "Imagem primária",            required: true,  hint: "Path .mbtiles, URL com {z}/{x}/{y}, ou bingmaps://{z}/{x}/{y}" },
+    { key: "secondary_mbtiles",        label: "Imagem secundária",          required: false, hint: "Atalho D — path .mbtiles, URL ou bingmaps://{z}/{x}/{y}" },
+    { key: "tertiary_mbtiles",         label: "Imagem terciária",           required: false, hint: "Atalho R — path .mbtiles, URL ou bingmaps://{z}/{x}/{y}" },
     { key: "ref_mask_primary_mbtiles", label: "Máscara de referência 1ª",   required: false, hint: "Atalho T — raster categorizado (path ou URL)" },
     { key: "ref_mask_secondary_mbtiles", label: "Máscara de referência 2ª", required: false, hint: "Atalho Y — raster categorizado (path ou URL)" },
 ];

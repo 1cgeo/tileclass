@@ -34,9 +34,11 @@ HTML5, MapLibre GL JS).
   layers: `primary` (obrigatório), `secondary`, `tertiary` (atalhos D/R),
   `ref_primary`, `ref_secondary` (atalhos T/Y, máscaras categorizadas). Cada
   layer pode apontar para um **mbtiles local** (servido por
-  `/api/projects/{id}/xyz/{layer}/{z}/{x}/{y}.{ext}`) ou para uma **URL
-  remota** de tile-server (Martin, TileServer-GL etc., contendo `{z}/{x}/{y}`).
-  URL remota é fetchada direto pelo MapLibre — backend não é proxy.
+  `/api/projects/{id}/xyz/{layer}/{z}/{x}/{y}.{ext}`), para uma **URL
+  remota** de tile-server (Martin, TileServer-GL etc., contendo `{z}/{x}/{y}`)
+  ou para o esquema **`bingmaps://{z}/{x}/{y}`** (Bing, reescrito para quadkeys
+  no frontend). URL remota / bingmaps é fetchada direto pelo MapLibre — backend
+  não é proxy.
 - JWT (access 8h, refresh 24h, HS256). Role global `operator|admin` + flag
   `can_review`. Por projeto: `project_members.role ∈ {operator,reviewer,admin}`.
 
@@ -73,11 +75,14 @@ HTML5, MapLibre GL JS).
 | created_by                   | INTEGER | FK users.id (admin que criou)                                        |
 | created_at                   | TEXT    | ISO 8601                                                             |
 
-**Detecção de URL remota:** valores começando com `http://` ou `https://` são
-tratados como tile-server remoto (Martin, TileServer-GL etc.). O backend
-valida que a URL contém os placeholders `{z}/{x}/{y}` mas não baixa nem abre
-o recurso — quem fetch é o MapLibre no cliente. Paths que não começam com
-http(s) são resolvidos como arquivo local (relativos a `backend/` ou absolutos).
+**Detecção de URL remota** (`project_service.is_remote_layer`): valores
+começando com `http://`, `https://` ou `bingmaps://` são tratados como
+tile-server remoto (Martin, TileServer-GL, Bing etc.). O backend valida que o
+valor contém os placeholders `{z}/{x}/{y}` mas não baixa nem abre o recurso —
+quem fetch é o MapLibre no cliente (`bingmaps://` é reescrito para o endpoint
+quadkey do virtualearth.net via `transformRequest`). Valores que não começam
+com esses esquemas são resolvidos como arquivo local (relativos a `backend/`
+ou absolutos).
 
 ### 3.3 `project_classes`
 
@@ -343,47 +348,21 @@ e no código (`frontend/js/`). Pontos contratuais:
 
 ## 6. Configuração (`backend/config.yaml`)
 
-> **Nota:** após a introdução de projetos, o `config.yaml` é usado como
-> *seed* — só é lido para criar o projeto "default" no primeiro
-> `init_db()`. Edições subsequentes nos blocos `classes`, `tileserver*`,
-> `dsg`, `mapbiomas` **não atualizam** o projeto no banco. Use a UI
-> admin (aba Projetos) ou os endpoints `/api/admin/projects[...]`.
+> **Nota:** o `config.yaml` carrega **apenas o que não é configurável no nível
+> da aplicação** — infra e segredos. **Não há dado de domínio aqui:** projetos,
+> classes, layers, geometria de tile e membros vivem nas tabelas do banco e são
+> criados/editados pela UI admin (aba Projetos) ou `/api/admin/projects[...]`.
+> Uma instalação nova começa **vazia** — sem projeto, sem classes; o admin cria
+> o primeiro projeto e configura tudo pela aplicação.
 
 ```yaml
-default_project:
-  name: default
-  description: "Projeto padrão (auto-migrado do config.yaml)"
-  mask_complete_required: true
-
-tileserver:
-  url_template: "https://server.arcgisonline.com/.../{z}/{y}/{x}"
-  mbtiles_path: "../data_external/tiles.mbtiles"   # opcional, override do url_template
-tileserver_secondary:
-  url_template: "https://server.arcgisonline.com/.../{z}/{y}/{x}"
-  max_zoom: 19
-tileserver_tertiary:
-  url_template: "bingmaps://{z}/{x}/{y}"           # quadkey reescrito no frontend
-  max_zoom: 19
-dsg:
-  mbtiles_path: "../data_external/dsg.mbtiles"
-mapbiomas:
-  mbtiles_path: "../data_external/mapbiomas.mbtiles"
-
-classes:
-  - { id: 1, name: "Massa d'água",     color: "#377eb8" }
-  - { id: 2, name: "Área edificada",   color: "#e41a1c" }
-  - { id: 3, name: "Floresta",         color: "#4daf4a" }
-  - { id: 4, name: "Campo",            color: "#ffff33" }
-  - { id: 5, name: "Cultivo",          color: "#984ea3" }
-  - { id: 6, name: "Terreno exposto",  color: "#ff7f00" }
-
-mask_overlay:
+mask_overlay:                       # infra do cache do overlay admin
   cache_path: "data/mask_overlay_cache.mbtiles"
   min_zoom: 8
   max_zoom: 18
 
 auth:
-  jwt_secret: "<gerar>"           # ou via env TILECLASS_JWT_SECRET
+  jwt_secret: "<gerar>"             # ou via env TILECLASS_JWT_SECRET
   access_token_expiry_hours: 8
   refresh_token_expiry_hours: 24
 
@@ -391,9 +370,15 @@ database:
   path: "tileclass.db"
 ```
 
-**Convenção de paths grandes:** `.mbtiles` (GBs) ficam em `data_external/`
-na raiz; o `config.yaml` aponta com `../data_external/<arquivo>.mbtiles`
-(relativo a `backend/`). Override do arquivo de config via env
+**Migração legada:** ao migrar um DB pré-projetos, `database._migration_seed_project`
+cria um projeto "default" com paleta **hardcoded** (6 classes, layers vazios) só
+para os tiles órfãos não ficarem sem `project_id` — editável depois pela UI. Isso
+**não** vem do `config.yaml` e **não** ocorre em DBs novos.
+
+**Convenção de paths grandes:** os layers de um projeto que apontam para
+`.mbtiles` (GBs) seguem a convenção `../data_external/<arquivo>.mbtiles`
+(relativo a `backend/`), resolvida em `project_service.resolve_mbtiles_path`.
+Override do arquivo de config via env
 `TILECLASS_CONFIG=<path>` (E2E). Rate limit desligável via
 `TILECLASS_DISABLE_RATE_LIMIT=1` (apenas E2E).
 

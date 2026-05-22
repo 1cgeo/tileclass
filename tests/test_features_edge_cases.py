@@ -603,7 +603,7 @@ def test_verify_ignores_inactive_project_paths(app_env, tmp_path):
     assert code == 0
 
 
-def test_verify_catches_invalid_remote_url(app_env, tmp_path):
+def test_verify_catches_invalid_remote_url(app_env, default_project, tmp_path):
     """An active project whose URL lost its placeholders fails verify."""
     import sqlite3, sys, importlib
     stub = tmp_path / "stub.mbtiles"; stub.write_bytes(b"")
