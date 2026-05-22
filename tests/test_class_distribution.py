@@ -66,7 +66,7 @@ def test_class_distribution_includes_color_and_name(client, admin_user, operator
     adm = token(client, admin_user["username"], admin_user["password"])
     body = client.get("/api/admin/class-distribution", headers=h(adm)).json()
     c1 = next(c for c in body if c["class_id"] == 1)
-    assert c1["name"] == "agua"  # default project's class id=1 (config.yaml seed)
+    assert c1["name"] == "Massa d'água"  # default project's class id=1 (config.yaml seed)
     assert c1["color"].startswith("#") and len(c1["color"]) == 7
 
 
