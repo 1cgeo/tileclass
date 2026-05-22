@@ -32,7 +32,7 @@ python -m backend.scripts.import_points --point <lat> <lon> <name> [--project <i
 python -m backend.scripts.import_points --csv pontos.csv [--block 3] [--project <id|name>] # CSV lat,lon,name; block NxN
 python -m backend.scripts.import_cq_tiles --geoparquet cq_selection.geoparquet [--seed empty|raw] [--project <id|name>]
 python -m backend.scripts.import_qc_tiles --csv qc_tiles.csv --bdf-dir <dir> [--project <id|name>]
-python -m backend.scripts.export_tiles <out_dir> [--status reviewed|reviewed+classified] [--raw] [--mosaic] [--manifest <path>] [--project <id|name>]      # raster (GeoTIFF)
+python -m backend.scripts.export_tiles <out_dir> [--status reviewed|classified|reviewed+classified] [--raw] [--mosaic] [--manifest <path>] [--project <id|name>]   # raster (GeoTIFF)
 python -m backend.scripts.export_features <out_dir> [--status ...] [--mosaic] [--manifest <path>] [--project <id|name>]                                  # vector (GeoJSON)
 python -m backend.scripts.export_classifications <out_dir> [--status ...] [--manifest <path>] [--project <id|name>]                                      # classification (CSV)
 python -m backend.scripts.export_detections <out_dir> [--status ...] [--mosaic] [--manifest <path>] [--project <id|name>]                                # detection (GeoJSON bboxes)
@@ -299,9 +299,14 @@ python -m backend.scripts.export_tiles <out_dir> --project default
 
 A LUT (`EDGV_REMAP_LUT`) é constante de módulo no topo do script — único ponto de verdade para o mapeamento. Indexes não usados (0, 7..254) passam como identidade.
 
-**Filtros de status:**
+**Filtros de status** (`--status`, idênticos nos 4 exportadores e no endpoint da UI):
 - `reviewed` (padrão) — só tiles que passaram pela revisão (GT estritamente aceito).
-- `reviewed+classified` — inclui também `classified` (passaram só pela classificação, ainda não revisados). Útil para dataset preliminar/maior, ciente do risco de inconsistência.
+- `classified` — **só** tiles classificados ainda **não** revisados (o lote pendente de revisão).
+- `reviewed+classified` — ambos. Útil para dataset preliminar/maior, ciente do risco de inconsistência.
+
+**Os 4 exportadores são a interface para agentes** — um por kind, todos com a mesma assinatura `run(out_dir, *, status, project_id, **opts)` (o `main()`/CLI é wrapper fino sobre ela): `export_tiles` (raster→GeoTIFF), `export_features` (vector→GeoJSON), `export_classifications` (classification→CSV), `export_detections` (detection→GeoJSON bboxes). Cobrem todos os kinds e os três filtros de status.
+
+**Export pela UI (admin):** `GET /api/admin/projects/{id}/export?status=reviewed|classified|reviewed_classified` (admin-only) despacha pelo `kind` do projeto, gera num tempdir, **zipa** e faz stream como download (`Content-Disposition`, header `X-Tile-Count`). `backend/export_service.py` é o ponto único que mapeia o status da API (`reviewed_classified` com underscore) para a chave dos scripts (`reviewed+classified`) e chama o `run()` certo. Painel "Exportar dados" no detalhe do projeto (aba Projetos).
 
 **Manifest (`<out_dir>/manifest.csv`):** uma linha por tile exportado com `filename, tile_id, project_id, name, status, classified_by, reviewed_by, classified_at, reviewed_at, bbox_*`. É o ponto de entrada pra outros agentes saberem o que receberam (status, autoria, projeto, geometria) sem precisar abrir o GeoTIFF.
 

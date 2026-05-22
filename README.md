@@ -87,23 +87,29 @@ npm run test:all
 
 Cobertura: auth (rate limit, roles, refresh, JTI revoke), fila de tiles (atribuição atômica, resume, prioridade revisão, anti auto-revisão), submissão (tamanho, valores, autorização, versão), estado (todas transições + `blocked`/`paused`), concorrência (10 ops paralelos), admin (dashboard com durações pareadas, bulk reset/assign/block, thumbnail), geometria (640m em qualquer latitude, raster mundial em 20 pontos), mask-core puro (paint/Bresenham/flood/undo).
 
-## Exportar resultados (GT extractor)
+## Exportar resultados
+
+Quatro exportadores (um por kind), todos com `--status reviewed | classified | reviewed+classified`
+e `--project <id|name>`:
 
 ```bash
-# Padrão: tiles revisados, IDs remapeados para EDGV (compatível com treinamento_6c)
-python -m backend.scripts.export_tiles ./exports
+python -m backend.scripts.export_tiles ./exports            # raster → GeoTIFF (default: revisados, remap EDGV)
+python -m backend.scripts.export_features ./exports         # vector → GeoJSON
+python -m backend.scripts.export_classifications ./exports  # classification → CSV
+python -m backend.scripts.export_detections ./exports       # detection → GeoJSON (bboxes)
 
-# Inclui classificados não revisados — dataset preliminar
-python -m backend.scripts.export_tiles ./exports --status reviewed+classified
+# Filtros de status:
+python -m backend.scripts.export_tiles ./exports --status classified            # só classificados (não revisados)
+python -m backend.scripts.export_tiles ./exports --status reviewed+classified   # ambos (preliminar)
 
-# Mantém IDs nativos do TileClass (1..6) sem remapear
+# Raster: IDs nativos 1..6 (sem remap EDGV) / mosaico
 python -m backend.scripts.export_tiles ./exports --raw
-
-# Também grava gt_mosaic.tif unindo tudo
 python -m backend.scripts.export_tiles ./exports --mosaic
 ```
 
-GeoTIFF single-band uint8 256×256, EPSG:4326, NODATA=255, deflate. Cada export gera também `manifest.csv` com status/autoria/bbox por tile.
+GeoTIFF single-band uint8, EPSG:4326, NODATA=255, deflate. Todo export gera um manifest (CSV) com status/autoria/bbox por tile.
+
+**Pela UI:** admins exportam pelo painel "Exportar dados" no detalhe do projeto (aba Projetos) — baixa um ZIP no formato do kind, com o mesmo filtro de status. Endpoint: `GET /api/admin/projects/{id}/export?status=...`.
 
 ## Scripts utilitários
 

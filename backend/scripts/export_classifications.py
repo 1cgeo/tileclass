@@ -20,6 +20,7 @@ from backend.scripts._common import resolve_project_arg
 
 STATUS_FILTERS = {
     "reviewed": ("reviewed",),
+    "classified": ("classified",),
     "reviewed+classified": ("reviewed", "classified"),
 }
 
@@ -62,6 +63,23 @@ def _select_rows(statuses: tuple[str, ...], project_id: int | None) -> list:
         conn.close()
 
 
+def run(out_dir, *, status: str = "reviewed", project_id=None,
+        manifest_path=None) -> int:
+    """Write the classification CSV for `project_id` (None = all classification
+    projects) filtered by `status` (a STATUS_FILTERS key). Returns the row count.
+    Shared by the CLI and the admin export endpoint."""
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    manifest = Path(manifest_path) if manifest_path else out_dir / "classifications.csv"
+    rows = _select_rows(STATUS_FILTERS[status], project_id)
+    with manifest.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(HEADER)
+        for r in rows:
+            w.writerow([r[col] for col in HEADER])
+    return len(rows)
+
+
 def main() -> None:
     p = argparse.ArgumentParser(
         description=__doc__.split("\n\n")[0],
@@ -75,23 +93,14 @@ def main() -> None:
                    help="id ou nome do projeto. Omitir = todos os classification.")
     args = p.parse_args()
 
-    out_dir = Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    manifest = Path(args.manifest) if args.manifest else out_dir / "classifications.csv"
-    statuses = STATUS_FILTERS[args.status]
     conn = connect()
     try:
         project_id = resolve_project_arg(conn, args.project, allow_all=True)
     finally:
         conn.close()
-
-    rows = _select_rows(statuses, project_id)
-    with manifest.open("w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(HEADER)
-        for r in rows:
-            w.writerow([r[col] for col in HEADER])
-    print(f"exported {len(rows)} classification tiles ({args.status}) to {manifest}")
+    n = run(args.out_dir, status=args.status, project_id=project_id,
+            manifest_path=args.manifest)
+    print(f"exported {n} classification tiles ({args.status}) to {args.out_dir}")
 
 
 if __name__ == "__main__":

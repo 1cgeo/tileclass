@@ -59,6 +59,7 @@ EDGV_REMAP_LUT[6] = 2   # terreno exp → terr_exp
 
 STATUS_FILTERS = {
     "reviewed": ("reviewed",),
+    "classified": ("classified",),
     "reviewed+classified": ("reviewed", "classified"),
 }
 
@@ -87,31 +88,26 @@ from backend.scripts._common import resolve_project_arg
 
 
 def _select_rows(statuses: tuple[str, ...], project_id: int | None) -> list:
+    """Raster tiles only. Joining `projects` filters out vector/detection/
+    classification tiles (whose data_png is NULL) so a no --project run on a
+    mixed-kind DB doesn't try to decode a non-raster body — matches the kind
+    guard the other three exporters use."""
     placeholders = ",".join("?" for _ in statuses)
+    extra = "" if project_id is None else " AND t.project_id=?"
+    params = list(statuses) + ([] if project_id is None else [project_id])
     conn = connect()
     try:
-        if project_id is None:
-            return conn.execute(
-                f"""SELECT id, project_id, name, status,
-                           classified_by, reviewed_by,
-                           classified_at, reviewed_at,
-                           bbox_west, bbox_south, bbox_east, bbox_north,
-                           data_png
-                    FROM tiles
-                    WHERE status IN ({placeholders})
-                    ORDER BY name""",
-                statuses,
-            ).fetchall()
         return conn.execute(
-            f"""SELECT id, project_id, name, status,
-                       classified_by, reviewed_by,
-                       classified_at, reviewed_at,
-                       bbox_west, bbox_south, bbox_east, bbox_north,
-                       data_png
-                FROM tiles
-                WHERE status IN ({placeholders}) AND project_id=?
-                ORDER BY name""",
-            (*statuses, project_id),
+            f"""SELECT t.id, t.project_id, t.name, t.status,
+                       t.classified_by, t.reviewed_by,
+                       t.classified_at, t.reviewed_at,
+                       t.bbox_west, t.bbox_south, t.bbox_east, t.bbox_north,
+                       t.data_png
+                FROM tiles t JOIN projects p ON p.id=t.project_id
+                WHERE p.kind='raster' AND t.status IN ({placeholders})
+                  AND t.data_png IS NOT NULL{extra}
+                ORDER BY t.name""",
+            params,
         ).fetchall()
     finally:
         conn.close()
@@ -163,6 +159,43 @@ def _manifest_row(fname: str, r) -> list:
     ]
 
 
+def run(out_dir, *, status: str = "reviewed", project_id=None,
+        raw: bool = False, mosaic: bool = False, manifest_path=None) -> int:
+    """Write per-tile GeoTIFF + manifest for raster `project_id` (None = all
+    raster projects), filtered by `status` (a STATUS_FILTERS key). `raw` keeps
+    native TileClass IDs (skips EDGV remap). Returns the tile count. Shared by
+    the CLI and the admin export endpoint."""
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    manifest = Path(manifest_path) if manifest_path else out_dir / "manifest.csv"
+    rows = _select_rows(STATUS_FILTERS[status], project_id)
+    # tile_px varies per project; cache lookups so we hit the DB once per project.
+    px_by_project: dict[int, int] = {}
+
+    def _px_for(pid: int) -> int:
+        if pid not in px_by_project:
+            proj = project_service.get_project(pid) or {}
+            px_by_project[pid] = int(proj.get("tile_px", 256))
+        return px_by_project[pid]
+
+    paths: list[Path] = []
+    with manifest.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(MANIFEST_HEADER)
+        for r in rows:
+            tile_px = _px_for(r["project_id"])
+            arr = _decode_tile(r, raw, tile_px)
+            fname = f"gt_{r['name']}.tif"
+            _write_geotiff(out_dir / fname, arr, (r["bbox_west"], r["bbox_south"],
+                                                  r["bbox_east"], r["bbox_north"]), tile_px)
+            paths.append(out_dir / fname)
+            w.writerow(_manifest_row(fname, r))
+
+    if mosaic and paths:
+        _write_mosaic(out_dir, paths)
+    return len(paths)
+
+
 def main() -> None:
     p = argparse.ArgumentParser(
         description=__doc__.split("\n\n")[0],
@@ -179,47 +212,15 @@ def main() -> None:
                    help="id ou nome do projeto a exportar. Omitir = todos.")
     args = p.parse_args()
 
-    out_dir = Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    manifest_path = Path(args.manifest) if args.manifest else out_dir / "manifest.csv"
-    statuses = STATUS_FILTERS[args.status]
     conn = connect()
     try:
         project_id = resolve_project_arg(conn, args.project, allow_all=True)
     finally:
         conn.close()
-
-    rows = _select_rows(statuses, project_id)
-    # tile_px varies per project; cache lookups so we hit the DB once per project.
-    px_by_project: dict[int, int] = {}
-
-    def _px_for(pid: int) -> int:
-        if pid not in px_by_project:
-            proj = project_service.get_project(pid) or {}
-            px_by_project[pid] = int(proj.get("tile_px", 256))
-        return px_by_project[pid]
-
-    paths: list[Path] = []
-    with manifest_path.open("w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(MANIFEST_HEADER)
-        for r in rows:
-            tile_px = _px_for(r["project_id"])
-            arr = _decode_tile(r, args.raw, tile_px)
-            fname = f"gt_{r['name']}.tif"
-            out = out_dir / fname
-            _write_geotiff(out, arr, (r["bbox_west"], r["bbox_south"],
-                                      r["bbox_east"], r["bbox_north"]), tile_px)
-            paths.append(out)
-            w.writerow(_manifest_row(fname, r))
-
+    n = run(args.out_dir, status=args.status, project_id=project_id,
+            raw=args.raw, mosaic=args.mosaic, manifest_path=args.manifest)
     fmt = "raw 1..6" if args.raw else "EDGV 0..5"
-    print(f"exported {len(paths)} tiles ({args.status}, {fmt}) to {out_dir}")
-    print(f"manifest: {manifest_path}")
-
-    if args.mosaic and paths:
-        mpath = _write_mosaic(out_dir, paths)
-        print(f"mosaic: {mpath}")
+    print(f"exported {n} tiles ({args.status}, {fmt}) to {args.out_dir}")
 
 
 if __name__ == "__main__":

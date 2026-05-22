@@ -1,10 +1,10 @@
 """Project endpoints — list/details (any member) + admin CRUD + raw XYZ
 passthroughs. The XYZ endpoint pulls bytes from the per-project reader pool
 in mbtiles_service so layers stay scoped to a single project."""
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel
 
-from .. import auth, mbtiles_service, project_service
+from .. import auth, export_service, mbtiles_service, project_service
 from ..models import (
     ProjectCreateIn, ProjectUpdateIn, ProjectClassesIn, ProjectAttributesIn,
     ProjectMemberIn,
@@ -165,6 +165,34 @@ def delete_project(
 ):
     project_service.delete_project(project_id, by_user=admin.id)
     return {"ok": True}
+
+
+@admin_router.get("/{project_id}/export")
+def export_project(
+    project_id: int,
+    status: str = Query("reviewed", pattern="^(reviewed|classified|reviewed_classified)$"),
+    admin: auth.CurrentUser = Depends(auth.require_admin),
+):
+    """Stream the project's finished data as a ZIP. Format follows the project
+    kind (raster→GeoTIFF, vector/detection→GeoJSON, classification→CSV); a
+    manifest is always included. `status` selects reviewed-only or
+    reviewed+classified. The X-Tile-Count header reports how many tiles went in."""
+    try:
+        data, fname, count = export_service.export_zip(project_id, status)
+    except ValueError:
+        raise HTTPException(400, detail={"error": "invalid_status"})
+    except LookupError:
+        raise HTTPException(404, detail={"error": "project_not_found"})
+    return Response(
+        content=data,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{fname}"',
+            "X-Tile-Count": str(count),
+            # Let the browser fetch read the count header cross-fetch.
+            "Access-Control-Expose-Headers": "X-Tile-Count, Content-Disposition",
+        },
+    )
 
 
 class ProjectCloneIn(BaseModel):

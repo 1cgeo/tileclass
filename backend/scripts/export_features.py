@@ -31,6 +31,7 @@ from backend.scripts._common import resolve_project_arg
 
 STATUS_FILTERS = {
     "reviewed": ("reviewed",),
+    "classified": ("classified",),
     "reviewed+classified": ("reviewed", "classified"),
 }
 
@@ -84,6 +85,49 @@ def _manifest_row(fname: str, r) -> list:
     ]
 
 
+def run(out_dir, *, status: str = "reviewed", project_id=None,
+        mosaic: bool = False, manifest_path=None) -> int:
+    """Write per-tile GeoJSON + manifest for vector `project_id` (None = all
+    vector projects), filtered by `status` (a STATUS_FILTERS key). Returns the
+    tile count. Shared by the CLI and the admin export endpoint."""
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    manifest = Path(manifest_path) if manifest_path else out_dir / "manifest.csv"
+    rows = _select_rows(STATUS_FILTERS[status], project_id)
+
+    paths: list[Path] = []
+    mosaic_features: list[dict] = []
+    with manifest.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(MANIFEST_HEADER)
+        for r in rows:
+            try:
+                doc = json.loads(r["data_geojson"])
+            except (TypeError, ValueError):
+                # Skip — verify_db should have caught this; flagging here
+                # just keeps a partial export from blowing up entirely.
+                continue
+            feats = doc.get("features") or []
+            fname = f"gt_{r['name']}.geojson"
+            _write_feature_collection(out_dir / fname, {
+                "type": "FeatureCollection", "features": feats,
+            })
+            paths.append(out_dir / fname)
+            w.writerow(_manifest_row(fname, r))
+            if mosaic:
+                for ff in feats:
+                    props = dict(ff.get("properties") or {})
+                    props["_tile_id"] = r["id"]
+                    props["_tile_name"] = r["name"]
+                    mosaic_features.append({**ff, "properties": props})
+
+    if mosaic and mosaic_features:
+        _write_feature_collection(out_dir / "gt_mosaic.geojson", {
+            "type": "FeatureCollection", "features": mosaic_features,
+        })
+    return len(paths)
+
+
 def main() -> None:
     p = argparse.ArgumentParser(
         description=__doc__,
@@ -99,57 +143,14 @@ def main() -> None:
                    help="id ou nome do projeto vetorial; omitir = todos")
     args = p.parse_args()
 
-    out_dir = Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    manifest_path = Path(args.manifest) if args.manifest else out_dir / "manifest.csv"
-    statuses = STATUS_FILTERS[args.status]
-
     conn = connect()
     try:
         project_id = resolve_project_arg(conn, args.project, allow_all=True)
     finally:
         conn.close()
-    rows = _select_rows(statuses, project_id)
-
-    paths: list[Path] = []
-    mosaic_features: list[dict] = []
-    with manifest_path.open("w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(MANIFEST_HEADER)
-        for r in rows:
-            try:
-                doc = json.loads(r["data_geojson"])
-            except (TypeError, ValueError):
-                # Skip — verify_db should have caught this; flagging here
-                # just keeps a partial export from blowing up entirely.
-                continue
-            feats = doc.get("features") or []
-            fname = f"gt_{r['name']}.geojson"
-            out = out_dir / fname
-            _write_feature_collection(out, {
-                "type": "FeatureCollection",
-                "features": feats,
-            })
-            paths.append(out)
-            w.writerow(_manifest_row(fname, r))
-            if args.mosaic:
-                # Tag each feature with its source tile so consumers can
-                # join back to the manifest.
-                for ff in feats:
-                    props = dict(ff.get("properties") or {})
-                    props["_tile_id"] = r["id"]
-                    props["_tile_name"] = r["name"]
-                    mosaic_features.append({**ff, "properties": props})
-
-    print(f"exported {len(paths)} tiles ({args.status}) to {out_dir}")
-    print(f"manifest: {manifest_path}")
-    if args.mosaic and mosaic_features:
-        mpath = out_dir / "gt_mosaic.geojson"
-        _write_feature_collection(mpath, {
-            "type": "FeatureCollection",
-            "features": mosaic_features,
-        })
-        print(f"mosaic: {mpath}  ({len(mosaic_features)} features)")
+    n = run(args.out_dir, status=args.status, project_id=project_id,
+            mosaic=args.mosaic, manifest_path=args.manifest)
+    print(f"exported {n} tiles ({args.status}) to {args.out_dir}")
 
 
 if __name__ == "__main__":

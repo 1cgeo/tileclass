@@ -2,7 +2,7 @@
 // Stays self-contained: every interaction (create, edit fields, replace
 // classes, add/remove members) re-fetches the project list to keep the UI
 // in sync with the backend cache invalidation.
-import { apiGet, apiPostJson, apiPatchJson, apiPutJson, apiDelete } from "../api.js";
+import { apiGet, apiPostJson, apiPatchJson, apiPutJson, apiDelete, authHeader } from "../api.js";
 import { showToast } from "../toast.js";
 import { escapeHtml } from "../utils.js";
 
@@ -271,7 +271,63 @@ function renderProjectDetail(proj, members) {
                 <button id="btn-add-member">Adicionar membro</button>
             </div>
         </section>
+
+        <section class="project-section">
+            <h4>Exportar dados</h4>
+            <p class="muted">Baixa os dados prontos do projeto em ZIP. Formato: <strong>${exportFormatLabel(proj.kind)}</strong>. Inclui um manifest com status/autoria/bbox por tile.</p>
+            <div class="filter-bar">
+                <select id="export-status">
+                    <option value="reviewed">Somente revisados</option>
+                    <option value="classified">Somente classificados</option>
+                    <option value="reviewed_classified">Revisados + classificados</option>
+                </select>
+                <button class="primary" id="btn-export">Baixar export (ZIP)</button>
+            </div>
+        </section>
     `;
+}
+
+function exportFormatLabel(kind) {
+    if (kind === "vector") return "GeoJSON (.geojson) + manifest.csv";
+    if (kind === "classification") return "CSV (classifications.csv)";
+    if (kind === "detection") return "GeoJSON de caixas (.geojson) + manifest.csv";
+    return "GeoTIFF (.tif, EDGV) + manifest.csv";
+}
+
+async function downloadExport(projectId) {
+    const btn = document.getElementById("btn-export");
+    const status = document.getElementById("export-status").value;
+    const prev = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "Gerando...";
+    try {
+        const res = await fetch(`/api/admin/projects/${projectId}/export?status=${status}`,
+                                { headers: authHeader() });
+        if (!res.ok) {
+            let msg = res.statusText;
+            try { const b = await res.json(); msg = b?.detail?.message || b?.detail?.error || msg; } catch {}
+            throw new Error(msg);
+        }
+        const count = res.headers.get("X-Tile-Count");
+        const cd = res.headers.get("Content-Disposition") || "";
+        const m = cd.match(/filename="([^"]+)"/);
+        const fname = m ? m[1] : `export_${projectId}.zip`;
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = fname;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+        showToast(`Export gerado: ${count ?? "?"} tile(s) em ${fname}.`, "ok");
+    } catch (e) {
+        showToast(`Falha no export: ${e.message}`, "error", 6000);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = prev;
+    }
 }
 
 function wireProjectDetail(proj, members) {
@@ -285,6 +341,8 @@ function wireProjectDetail(proj, members) {
     if (btnSaveCls) btnSaveCls.onclick = () => saveClasses(proj.id);
     const btnAddMem = document.getElementById("btn-add-member");
     if (btnAddMem) btnAddMem.onclick = () => addMember(proj.id);
+    const btnExport = document.getElementById("btn-export");
+    if (btnExport) btnExport.onclick = () => downloadExport(proj.id);
     document.querySelectorAll("[data-rm-mem]").forEach(b => {
         b.onclick = () => removeMember(proj.id, parseInt(b.dataset.rmMem, 10));
     });
