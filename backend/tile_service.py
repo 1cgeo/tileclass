@@ -163,6 +163,86 @@ def peek_next_tile(user_id: int, project_id: int) -> dict | None:
         conn.close()
 
 
+def projects_with_user_workload(user_id: int, *, is_admin: bool = False) -> list[dict]:
+    """Per-project workload summary for the operator picker. Each entry has:
+       - id, name, kind, role (in the project)
+       - pending: tiles up for grabs (status='pending')
+       - assigned_to_me: tiles already assigned, work-in-progress or review
+       - review_queue: classified tiles this user can review — only counted
+         for projects where the user is a reviewer (membership.role) AND
+         isn't the classifier of that particular tile.
+       - available: sum of the three — the number rendered in the picker
+    Three aggregated queries (pending / assigned / review-by-project) instead
+    of N+1 so picking a project with many memberships stays responsive."""
+    conn = connect()
+    try:
+        if is_admin:
+            project_rows = conn.execute(
+                "SELECT id, name, kind FROM projects WHERE active=1 ORDER BY id"
+            ).fetchall()
+            roles = {r["id"]: "admin" for r in project_rows}
+        else:
+            project_rows = conn.execute(
+                """SELECT p.id, p.name, p.kind, m.role AS project_role
+                   FROM projects p
+                   JOIN project_members m ON m.project_id=p.id
+                   WHERE m.user_id=? AND p.active=1
+                   ORDER BY p.id""",
+                (user_id,),
+            ).fetchall()
+            roles = {r["id"]: r["project_role"] for r in project_rows}
+        if not project_rows:
+            return []
+        pids = [r["id"] for r in project_rows]
+        placeholders = ",".join("?" * len(pids))
+
+        pending = {r["project_id"]: r["c"] for r in conn.execute(
+            f"""SELECT project_id, COUNT(*) c FROM tiles
+                WHERE status='pending' AND project_id IN ({placeholders})
+                GROUP BY project_id""",
+            pids,
+        ).fetchall()}
+        assigned = {r["project_id"]: r["c"] for r in conn.execute(
+            f"""SELECT project_id, COUNT(*) c FROM tiles
+                WHERE assigned_to=? AND status IN ('in_progress','in_review')
+                  AND project_id IN ({placeholders})
+                GROUP BY project_id""",
+            [user_id, *pids],
+        ).fetchall()}
+        # Review queue is membership-driven: JOIN keeps only projects where
+        # the user is `reviewer`. Mirrors `_user_can_review_project` so the
+        # picker counts match what `/api/tiles/next` will actually serve.
+        review_queue = {r["project_id"]: r["c"] for r in conn.execute(
+            f"""SELECT t.project_id, COUNT(*) c FROM tiles t
+                JOIN project_members m
+                  ON m.project_id=t.project_id AND m.user_id=? AND m.role='reviewer'
+                WHERE t.status='classified'
+                  AND (t.classified_by IS NULL OR t.classified_by != ?)
+                  AND t.project_id IN ({placeholders})
+                GROUP BY t.project_id""",
+            [user_id, user_id, *pids],
+        ).fetchall()}
+    finally:
+        conn.close()
+    out = []
+    for r in project_rows:
+        pid = r["id"]
+        p_pending = pending.get(pid, 0)
+        p_assigned = assigned.get(pid, 0)
+        p_review = review_queue.get(pid, 0)
+        out.append({
+            "id": pid,
+            "name": r["name"],
+            "kind": r["kind"],
+            "role": roles.get(pid),
+            "pending": p_pending,
+            "assigned_to_me": p_assigned,
+            "review_queue": p_review,
+            "available": p_pending + p_assigned + p_review,
+        })
+    return out
+
+
 def queue_stats(project_id: int | None = None) -> dict:
     """Queue counters for header display. Scoped to a project when given,
     aggregated across all when omitted."""
@@ -284,28 +364,17 @@ def _auto_pause_stale(conn) -> int:
 
 
 def _user_can_review_project(conn, user_id: int, project_id: int) -> bool:
-    """A user can review tiles in a project iff:
-       - they are a global admin, OR
-       - their global `can_review` flag is on AND they are a project member
-         with role 'reviewer' or 'admin'.
-
-    The global flag stays as a veto so the existing admin toggle keeps working
-    while the per-project membership becomes the primary control. Plan: drop
-    the global flag once the admin UI fully migrates to per-project roles."""
-    row = conn.execute(
-        "SELECT role, can_review FROM users WHERE id=?", (user_id,)
-    ).fetchone()
-    if not row:
-        return False
-    if row["role"] == "admin":
-        return True
-    if not row["can_review"]:
-        return False
+    """A user can review tiles in a project iff they are a project member
+    with role 'reviewer'. Global `users.role='admin'` no longer implies
+    review rights — admins are admins of the application (can manage users
+    + projects), but they only review the projects where they are
+    explicitly added as reviewers. This keeps work assignment per-project,
+    auditable, and avoids "everyone is a reviewer" sprawl."""
     member = conn.execute(
         "SELECT role FROM project_members WHERE project_id=? AND user_id=?",
         (project_id, user_id),
     ).fetchone()
-    return bool(member) and member["role"] in ("reviewer", "admin")
+    return bool(member) and member["role"] == "reviewer"
 
 
 def get_next_tile(user_id: int, project_id: int) -> dict | None:

@@ -373,21 +373,25 @@ def test_list_tiles_exposes_current_assignee(
     assert row["classified_by_username"] is None
 
 
-def _set_can_review(client, admin_tok, user_id, flag):
-    return client.patch(f"/api/admin/users/{user_id}/can-review",
-                        headers=headers(admin_tok), json={"can_review": flag})
+# Review eligibility is per-project now: a user reviews if and only if they
+# are a project member with role='reviewer'. Tests below exercise that
+# membership-driven model.
+
+def _set_member_role(client, admin_tok, project_id, user_id, role):
+    return client.post(f"/api/admin/projects/{project_id}/members",
+                       headers=headers(admin_tok),
+                       json={"user_id": user_id, "role": role})
 
 
-def test_operator_without_can_review_skips_review_queue(
+def test_operator_member_skips_review_queue(
     client, admin_user, operators, tiles
 ):
-    """An operator not opted-in as reviewer must never be assigned a classified
-    tile from the review queue — even if one is available. They fall through to
-    the pending queue instead."""
+    """A project member with role='operator' (not reviewer) must never get a
+    classified tile from the review queue — they fall through to pending."""
     import numpy as np
     adm = token(client, "admin", "admin123")
-    # Revoke op2 so we can assert the filter blocks them.
-    _set_can_review(client, adm, operators[1]["id"], False)
+    # Fixture seeded op2 as reviewer; flip to operator-only here.
+    _set_member_role(client, adm, 1, operators[1]["id"], "operator")
 
     op1 = token(client, "op1", "secret123")
     tile1 = client.get("/api/tiles/next", headers=headers(op1)).json()
@@ -401,14 +405,15 @@ def test_operator_without_can_review_skips_review_queue(
     assert served["status"] == "in_progress"
 
 
-def test_operator_with_can_review_gets_review_tile_first(
+def test_reviewer_member_gets_review_tile_first(
     client, admin_user, operators, tiles
 ):
-    """Happy path: opted-in operator is assigned the review queue before pending."""
+    """Happy path: a project member with role='reviewer' is assigned the
+    review queue ahead of the pending queue."""
     import numpy as np
     adm = token(client, "admin", "admin123")
-    # Revoke then re-grant to also exercise the endpoint's on path.
-    _set_can_review(client, adm, operators[1]["id"], False)
+    # Demote then re-promote to exercise both transitions.
+    _set_member_role(client, adm, 1, operators[1]["id"], "operator")
 
     op1 = token(client, "op1", "secret123")
     tile1 = client.get("/api/tiles/next", headers=headers(op1)).json()
@@ -416,8 +421,8 @@ def test_operator_with_can_review_gets_review_tile_first(
                 headers={**headers(op1), "Content-Type": "application/octet-stream"},
                 content=np.full(65536, 1, dtype=np.uint8).tobytes())
 
-    r = _set_can_review(client, adm, operators[1]["id"], True)
-    assert r.status_code == 200 and r.json()["can_review"] is True
+    r = _set_member_role(client, adm, 1, operators[1]["id"], "reviewer")
+    assert r.status_code == 200
 
     op2 = token(client, "op2", "secret123")
     served = client.get("/api/tiles/next", headers=headers(op2)).json()
@@ -425,9 +430,12 @@ def test_operator_with_can_review_gets_review_tile_first(
     assert served["status"] == "in_review"
 
 
-def test_revoking_can_review_blocks_future_review_assignments(
+def test_demoting_reviewer_blocks_future_review_assignments(
     client, admin_user, operators, tiles
 ):
+    """Demoting reviewer → operator takes effect immediately on the next
+    /tiles/next: the classified tile stays in the queue, but this user
+    no longer pulls from it."""
     import numpy as np
     op1 = token(client, "op1", "secret123")
     tile1 = client.get("/api/tiles/next", headers=headers(op1)).json()
@@ -436,32 +444,20 @@ def test_revoking_can_review_blocks_future_review_assignments(
                 content=np.full(65536, 1, dtype=np.uint8).tobytes())
 
     adm = token(client, "admin", "admin123")
-    # Opt-out: was defaulted on by the fixture; admin turns it off.
-    _set_can_review(client, adm, operators[1]["id"], False)
+    _set_member_role(client, adm, 1, operators[1]["id"], "operator")
 
     op2 = token(client, "op2", "secret123")
     served = client.get("/api/tiles/next", headers=headers(op2)).json()
-    # Opt-out effective immediately: tile1 still 'classified' in the DB,
-    # but op2 gets a pending one.
     assert served["id"] != tile1["id"]
     assert served["status"] == "in_progress"
 
 
-def test_list_users_exposes_can_review_flag(client, admin_user, operators):
-    """The users endpoint must surface can_review so the admin UI can render
-    and toggle it. Default value is not asserted here (the fixture forces on);
-    what matters is that the column exists in the payload."""
+def test_add_member_rejects_admin_role(client, admin_user, operators):
+    """Project-level roles only accept operator/reviewer — admin would be
+    ambiguous (the user is either a global admin or not). 400 invalid_role."""
     adm = token(client, "admin", "admin123")
-    users = client.get("/api/admin/users", headers=headers(adm)).json()
-    for u in users:
-        assert "can_review" in u, f"user row missing can_review: {u}"
-
-
-def test_can_review_endpoint_requires_admin(client, admin_user, operators):
-    op1 = token(client, "op1", "secret123")
-    r = client.patch(f"/api/admin/users/{operators[1]['id']}/can-review",
-                     headers=headers(op1), json={"can_review": True})
-    assert r.status_code == 403
+    r = _set_member_role(client, adm, 1, operators[0]["id"], "admin")
+    assert r.status_code == 400
 
 
 def _set_role(client, admin_tok, user_id, role):
@@ -469,21 +465,30 @@ def _set_role(client, admin_tok, user_id, role):
                         headers=headers(admin_tok), json={"role": role})
 
 
-def test_promote_operator_to_admin_grants_review_rights(
-    client, admin_user, operators
+def test_promote_to_admin_does_not_grant_review_rights(
+    client, admin_user, operators, tiles
 ):
+    """Promoting to admin gives the panel privileges but NOT implicit reviewer
+    on any project. Membership role still controls /tiles/next routing."""
+    import numpy as np
     adm = token(client, "admin", "admin123")
-    # operator starts with can_review=0 (fixture forces it on, normalize first)
-    client.patch(f"/api/admin/users/{operators[0]['id']}/can-review",
-                 headers=headers(adm), json={"can_review": False})
-    r = _set_role(client, adm, operators[0]["id"], "admin")
-    assert r.status_code == 200, r.text
-    assert r.json() == {"id": operators[0]["id"], "role": "admin"}
-    # The promoted user should now show up as admin AND as a reviewer.
-    users = {u["id"]: u for u in client.get("/api/admin/users",
-                                            headers=headers(adm)).json()}
-    assert users[operators[0]["id"]]["role"] == "admin"
-    assert bool(users[operators[0]["id"]]["can_review"]) is True
+    # Demote op2 to plain operator membership.
+    _set_member_role(client, adm, 1, operators[1]["id"], "operator")
+    # Then promote them to global admin.
+    r = _set_role(client, adm, operators[1]["id"], "admin")
+    assert r.status_code == 200
+
+    op1 = token(client, "op1", "secret123")
+    tile1 = client.get("/api/tiles/next", headers=headers(op1)).json()
+    client.post(f"/api/tiles/{tile1['id']}/classify",
+                headers={**headers(op1), "Content-Type": "application/octet-stream"},
+                content=np.full(65536, 1, dtype=np.uint8).tobytes())
+
+    # op2 is now admin but membership is operator → must skip review queue.
+    op2 = token(client, "op2", "secret123")
+    served = client.get("/api/tiles/next", headers=headers(op2)).json()
+    assert served["id"] != tile1["id"]
+    assert served["status"] == "in_progress"
 
 
 def test_demote_admin_to_operator(client, admin_user, operators):
@@ -504,15 +509,18 @@ def test_cannot_demote_last_active_admin(client, admin_user, operators):
     assert "last active admin" in r.json()["detail"].lower()
 
 
-def test_cannot_deactivate_last_active_admin(client, admin_user, operators):
-    """Deactivating the last active admin would lock everyone out — same guard
-    as the role-demotion path."""
+def test_cannot_deactivate_any_admin(client, admin_user, operators):
+    """Admins can never be deactivated directly — they have to be demoted to
+    operator first. Prevents accidental lock-outs and removes the asymmetric
+    "last admin only" guard the old model had."""
     adm = token(client, "admin", "admin123")
     me = client.get("/api/auth/me", headers=headers(adm)).json()
     r = client.patch(f"/api/admin/users/{me['id']}/active",
                      headers=headers(adm), json={"active": False})
     assert r.status_code == 409
-    assert "last active admin" in r.json()["detail"].lower()
+    body = r.json()
+    err = body["detail"]["error"] if isinstance(body["detail"], dict) else body["detail"]
+    assert err == "cannot_deactivate_admin"
     # Still active afterwards.
     from backend.database import connect
     conn = connect()
@@ -520,6 +528,19 @@ def test_cannot_deactivate_last_active_admin(client, admin_user, operators):
         assert conn.execute("SELECT active FROM users WHERE id=?", (me["id"],)).fetchone()["active"] == 1
     finally:
         conn.close()
+
+
+def test_cannot_deactivate_admin_even_with_other_admins(
+    client, admin_user, operators
+):
+    """The rule is "no admin is deactivatable" — not "last admin". Create a
+    second admin and verify neither can be deactivated without demotion."""
+    adm = token(client, "admin", "admin123")
+    _set_role(client, adm, operators[0]["id"], "admin")
+    # Try to deactivate the secondary admin → still rejected.
+    r = client.patch(f"/api/admin/users/{operators[0]['id']}/active",
+                     headers=headers(adm), json={"active": False})
+    assert r.status_code == 409
 
 
 def test_set_role_rejects_invalid_value(client, admin_user, operators):
@@ -537,7 +558,10 @@ def test_set_role_endpoint_requires_admin(client, admin_user, operators):
     assert r.status_code == 403
 
 
-def test_create_admin_user_seeds_can_review(client, admin_user):
+def test_create_admin_user_has_no_implicit_reviewer_status(client, admin_user):
+    """Creating an admin no longer flips any reviewer flag — reviewer is
+    per-project membership only. The created row shows up with role=admin
+    and nothing else inferred about review eligibility."""
     adm = token(client, "admin", "admin123")
     r = client.post("/api/admin/users", headers=headers(adm),
                     json={"username": "admin2", "password": "secret123",
@@ -546,7 +570,8 @@ def test_create_admin_user_seeds_can_review(client, admin_user):
     users = {u["username"]: u for u in client.get("/api/admin/users",
                                                   headers=headers(adm)).json()}
     assert users["admin2"]["role"] == "admin"
-    assert bool(users["admin2"]["can_review"]) is True
+    # `can_review` is no longer surfaced in the API payload.
+    assert "can_review" not in users["admin2"]
 
 
 def test_admin_assigns_pending_tile_to_operator(
@@ -620,12 +645,14 @@ def test_admin_assign_rejects_classifier_as_reviewer(
     assert r.status_code == 409
 
 
-def test_admin_assign_reviewer_must_have_can_review(
+def test_admin_assign_reviewer_must_be_project_reviewer(
     client, admin_user, operators, tiles
 ):
+    """Admin can't assign a classified tile to someone who isn't a reviewer
+    in that project — even if they're a global admin. Membership decides."""
     import numpy as np
     adm = token(client, "admin", "admin123")
-    _set_can_review(client, adm, operators[1]["id"], False)
+    _set_member_role(client, adm, 1, operators[1]["id"], "operator")
 
     op1 = token(client, "op1", "secret123")
     tile = client.get("/api/tiles/next", headers=headers(op1)).json()

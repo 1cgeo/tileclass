@@ -712,16 +712,44 @@ def clear_cache() -> int:
     """Wipe every cached tile across all projects. Returns total rows deleted."""
     total = 0
     for pid in _project_ids():
-        path = cache_path(pid)
-        if not path.exists():
-            continue
-        conn = _open_cache(pid)
-        try:
-            cur = conn.execute("DELETE FROM tiles")
-            total += cur.rowcount or 0
-        finally:
-            conn.close()
+        total += clear_cache_for_project(pid)
     return total
+
+
+def clear_cache_for_project(project_id: int) -> int:
+    """Wipe cached tiles for a single project. Used when something the renderer
+    depends on changes mid-life — palette colors, attribute schema, or the
+    underlying mbtiles source — none of which the per-tile invalidation paths
+    cover. Returns the row count deleted; silent no-op when the cache file
+    doesn't exist yet."""
+    path = cache_path(project_id)
+    if not path.exists():
+        return 0
+    try:
+        conn = _open_cache(project_id)
+    except sqlite3.Error:
+        return 0
+    try:
+        cur = conn.execute("DELETE FROM tiles")
+        return cur.rowcount or 0
+    finally:
+        conn.close()
+
+
+def delete_cache_for_project(project_id: int) -> None:
+    """Hard-remove the cache file for a project being deleted. Frees disk that
+    `clear_cache_for_project` would leave reserved (DELETE keeps the SQLite
+    pages allocated until VACUUM). Best-effort: a stray cache file is never
+    a correctness issue."""
+    path = cache_path(project_id)
+    for suffix in ("", "-wal", "-shm"):
+        p = path.with_name(path.name + suffix) if suffix else path
+        try:
+            p.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
 
 
 def cache_stats() -> dict:

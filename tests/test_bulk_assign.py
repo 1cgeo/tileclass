@@ -394,9 +394,11 @@ def test_bulk_assign_rollback_on_bad_tile(client, admin_user, operators, tiles):
         assert row["assigned_to"] is None
 
 
-def test_bulk_assign_rejects_reviewer_without_can_review(
+def test_bulk_assign_rejects_non_reviewer_member(
     client, admin_user, operators, tiles
 ):
+    """Bulk assign of a classified tile fails when the chosen user is only an
+    operator (not reviewer) in that project. Mirrors the per-tile guard."""
     op1 = token(client, "op1", "secret123")
     raw = np.full(65536, 1, dtype=np.uint8).tobytes()
     tile = client.get("/api/tiles/next", headers=h(op1)).json()
@@ -405,9 +407,9 @@ def test_bulk_assign_rejects_reviewer_without_can_review(
                 content=raw)
 
     adm = token(client, "admin", "admin123")
-    # Remove can_review from op2.
-    client.patch(f"/api/admin/users/{operators[1]['id']}/can-review",
-                 headers=h(adm), json={"can_review": False})
+    # Demote op2 from reviewer to plain operator in project 1.
+    client.post("/api/admin/projects/1/members", headers=h(adm),
+                json={"user_id": operators[1]["id"], "role": "operator"})
 
     r = client.post("/api/admin/tiles/assign", headers=h(adm),
                     json={"tile_ids": [tile["id"]], "user_id": operators[1]["id"]})

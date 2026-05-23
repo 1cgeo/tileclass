@@ -4,6 +4,7 @@ existing import paths (`from .. import admin_service`, tests, routers) working
 without touching call sites."""
 from .admin.dashboard import (
     dashboard, class_distribution, feature_distribution, tile_class_distribution,
+    detection_distribution, projects_stats,
 )
 from .admin.tiles_query import (
     list_tiles,
@@ -30,7 +31,6 @@ from .admin.tiles_mutations import (
 )
 from .admin.users import (
     list_users,
-    set_user_can_review,
     create_user,
     set_user_role,
     set_user_active,
@@ -42,7 +42,7 @@ from .admin.thumbnails import (
 
 __all__ = [
     "dashboard", "class_distribution", "feature_distribution",
-    "tile_class_distribution",
+    "tile_class_distribution", "detection_distribution", "projects_stats",
     "list_tiles", "count_tiles", "list_tiles_map", "list_problems",
     "reset_many", "reset_tile",
     "report_problem_many",
@@ -52,7 +52,7 @@ __all__ = [
     "admin_pause_tile",
     "unassign_operator", "unassign_many",
     "block_many", "unblock_many", "block_tile", "unblock_tile",
-    "list_users", "set_user_can_review", "create_user", "set_user_role",
+    "list_users", "create_user", "set_user_role",
     "set_user_active",
     "tile_thumbnail", "tile_satellite_thumbnail",
 ]

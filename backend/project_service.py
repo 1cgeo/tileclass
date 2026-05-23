@@ -64,15 +64,18 @@ _CACHE_LOCK = threading.Lock()
 _PROJECT_CACHE: dict[int, dict] = {}
 
 
-def _invalidate(project_id: int | None = None) -> None:
+def _invalidate(project_id: int | None = None, *, drop_overlay_cache: bool = False) -> None:
+    """Drop the project LRU + mbtiles reader pool. Pass
+    `drop_overlay_cache=True` when palette/attribute/layer-source changed —
+    the admin overlay caches the rendered PNG (already with the palette
+    baked in), so it doesn't refresh from per-tile invalidation alone."""
     with _CACHE_LOCK:
         if project_id is None:
             _PROJECT_CACHE.clear()
         else:
             _PROJECT_CACHE.pop(project_id, None)
-    # Drop any cached mbtiles readers for the project so the next tile fetch
-    # picks up new paths. Imported lazily to avoid a circular dependency with
-    # mbtiles_service (which imports project_service for path resolution).
+    # Imports are lazy: mbtiles_service and mask_tile_service both import
+    # project_service for path resolution / palette lookups.
     try:
         from . import mbtiles_service
         if project_id is None:
@@ -81,6 +84,12 @@ def _invalidate(project_id: int | None = None) -> None:
             mbtiles_service.invalidate_project(project_id)
     except Exception:
         pass
+    if drop_overlay_cache and project_id is not None:
+        try:
+            from . import mask_tile_service
+            mask_tile_service.clear_cache_for_project(project_id)
+        except Exception:
+            pass
 
 
 # ---- Reads ------------------------------------------------------------------
@@ -266,7 +275,7 @@ def list_members(project_id: int) -> list[dict]:
 
 # ---- Mutations --------------------------------------------------------------
 
-_PROJECT_ROLES = ("operator", "reviewer", "admin")
+_PROJECT_ROLES = ("operator", "reviewer")
 _ALLOWED_LAYER_FIELDS = {
     "primary_mbtiles", "secondary_mbtiles", "tertiary_mbtiles",
     "ref_mask_primary_mbtiles", "ref_mask_secondary_mbtiles",
@@ -560,7 +569,17 @@ def update_project(project_id: int, *, fields: dict, updated_by: int) -> dict:
                 raise HTTPException(409, detail={"error": "name_taken"})
         conn.execute(f"UPDATE projects SET {', '.join(sets)} WHERE id=?", params)
         log_action(conn, updated_by, None, "project_update", str(project_id))
-    _invalidate(project_id)
+    # Layer-source / meters_per_pixel / tile_px changes flip the raster pipeline
+    # output for tiles already cached; drop the overlay cache so the next admin
+    # map view re-renders with the new source.
+    overlay_dirty = any(
+        k in fields for k in (
+            "primary_mbtiles", "secondary_mbtiles", "tertiary_mbtiles",
+            "ref_mask_primary_mbtiles", "ref_mask_secondary_mbtiles",
+            "tile_px", "meters_per_pixel",
+        )
+    )
+    _invalidate(project_id, drop_overlay_cache=overlay_dirty)
     return get_project(project_id)
 
 
@@ -599,7 +618,9 @@ def set_classes(project_id: int, classes: list[dict], *, updated_by: int) -> dic
                 (project_id, c["id"], c["name"], c["color"], ord_idx),
             )
         log_action(conn, updated_by, None, "project_classes_update", str(project_id))
-    _invalidate(project_id)
+    # Palette changes (rename/recolor/add) propagate through the overlay LUT;
+    # already-cached PNGs still hold the old colors until cleared.
+    _invalidate(project_id, drop_overlay_cache=True)
     return get_project(project_id)
 
 
@@ -650,7 +671,9 @@ def set_attributes(project_id: int, attributes: list[dict], *, updated_by: int) 
                  ord_idx),
             )
         log_action(conn, updated_by, None, "project_attributes_update", str(project_id))
-    _invalidate(project_id)
+    # Vector overlay colors come from the attribute schema (direction → preset,
+    # else first enum → palette). Schema change ⇒ stale overlay colors.
+    _invalidate(project_id, drop_overlay_cache=True)
     return get_project(project_id)
 
 
@@ -729,6 +752,13 @@ def delete_project(project_id: int, *, by_user: int) -> None:
         # ON DELETE CASCADE drops project_classes + project_members.
         conn.execute("DELETE FROM projects WHERE id=?", (project_id,))
     _invalidate(project_id)
+    # Remove the per-project overlay cache file outright — keeping it would
+    # leak disk space and create an orphan if a future project_id collides.
+    try:
+        from . import mask_tile_service
+        mask_tile_service.delete_cache_for_project(project_id)
+    except Exception:
+        pass
 
 
 # ---- FastAPI dependencies ---------------------------------------------------
@@ -740,13 +770,15 @@ def require_membership(
     min_role: str = "operator",
 ):
     """Return the user's project role, raising 403 if not a member or below
-    the required role tier. Global admins always pass."""
+    the required role tier. Global admins always pass (they read/write any
+    project to administer it — review eligibility for assignments is a
+    separate check via tile_service._user_can_review_project)."""
     if user.role == "admin":
         return "admin"
     role = get_membership_role(project_id, user.id)
     if role is None:
         raise HTTPException(403, detail={"error": "not_project_member"})
-    tiers = {"operator": 0, "reviewer": 1, "admin": 2}
+    tiers = {"operator": 0, "reviewer": 1}
     if tiers.get(role, -1) < tiers.get(min_role, 0):
         raise HTTPException(403, detail={"error": "insufficient_project_role"})
     return role

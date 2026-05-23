@@ -496,6 +496,8 @@ function _commit(newFc) {
     _fc = newFc;
     _refreshLayers();
     _refreshMeta();
+    // Submit-state mirrors validity (e.g. "0 features" → orange "Faltam dados").
+    window.tcRefreshSubmit?.();
 }
 
 // -------- Attribute form -------------------------------------------------

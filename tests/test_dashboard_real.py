@@ -297,6 +297,65 @@ def test_dashboard_handles_orphan_pause(client, admin_user, operators, tiles):
     assert 98 <= d["avg_classify_seconds"] <= 102
 
 
+# ---------- Portfolio (project_count + by-kind breakdown) ----------
+
+def test_dashboard_unscoped_reports_portfolio(client, admin_user, tiles):
+    """Cross-project view exposes how many projects exist + per-kind counts of
+    both projects and tiles. Built from a single fixture project so the shape
+    is stable to assert; the per-kind dicts only carry kinds that actually
+    appear (no rows of zeros)."""
+    adm = token(client, "admin", "admin123")
+    d = client.get("/api/admin/dashboard", headers=h(adm)).json()
+    # `tiles` fixture seeds the default raster project + 10 tiles.
+    assert d["project_count"] == 1
+    assert d["projects_by_kind"] == {"raster": 1}
+    assert d["tiles_by_kind"] == {"raster": 10}
+    # Scoped fields stay empty in the unscoped view.
+    assert d["project_kind"] is None
+
+
+def test_dashboard_scoped_reports_project_kind(client, admin_user, tiles):
+    """When filtered to a single project, the payload surfaces that project's
+    kind (used as a UI cue) and drops `tiles_by_kind` to avoid duplicating
+    `total_tiles` under a kind key."""
+    adm = token(client, "admin", "admin123")
+    d = client.get("/api/admin/dashboard?project_id=1", headers=h(adm)).json()
+    assert d["project_kind"] == "raster"
+    assert d["tiles_by_kind"] == {}
+    # Project_count is still the portfolio-wide figure — useful as context.
+    assert d["project_count"] == 1
+    assert d["projects_by_kind"] == {"raster": 1}
+
+
+def test_dashboard_portfolio_aggregates_multiple_kinds(client, admin_user):
+    """Insert one project of each kind directly to prove the GROUP BY rolls up
+    the four kinds cleanly. Uses raw SQL so we don't depend on the project CRUD
+    routes — this test is about the dashboard's aggregation, not the API."""
+    from backend.database import connect
+    conn = connect()
+    try:
+        from tests.conftest import _seed_test_project
+        _seed_test_project(conn)  # id=1, kind=raster
+        for pid, kind in [(2, "vector"), (3, "classification"), (4, "detection")]:
+            conn.execute(
+                "INSERT INTO projects(id,name,kind,tile_px,meters_per_pixel,"
+                "mask_complete_required,primary_mbtiles,active,created_at) "
+                "VALUES (?,?,?,256,2.5,0,'',1,'2026-01-01T00:00:00+00:00')",
+                (pid, f"p_{kind}", kind),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    adm = token(client, "admin", "admin123")
+    d = client.get("/api/admin/dashboard", headers=h(adm)).json()
+    assert d["project_count"] == 4
+    assert d["projects_by_kind"] == {
+        "raster": 1, "vector": 1, "classification": 1, "detection": 1,
+    }
+    # No tiles inserted for the new kinds — they don't appear in the tile dict.
+    assert d["tiles_by_kind"].get("vector", 0) == 0
+    assert d["tiles_by_kind"].get("detection", 0) == 0
+
 def test_dashboard_pause_scoped_to_latest_cycle(client, admin_user, operators, tiles):
     """Pauses from a previous (reset, re-assigned) cycle must NOT be subtracted
     from a fresh assign→classify cycle."""

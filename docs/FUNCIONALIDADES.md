@@ -1,6 +1,6 @@
 # TileClass — Compêndio Exaustivo de Funcionalidades
 
-> Documento de referência interno (`dev/`). Lista **tudo** que a aplicação faz —
+> Documento de referência interno. Lista **tudo** que a aplicação faz —
 > via UI web (operador e admin) e via scripts CLI — compilado a partir de uma
 > varredura completa do código (backend + frontend). Convenção: caminhos e
 > identificadores de código verbatim; prosa em pt-BR.
@@ -345,15 +345,11 @@ Rodar como módulo (`python -m backend.scripts.X`). Helpers em `_common.py` (`re
 |---|---|---|
 | `create_admin` | cria admin inicial (interativo) | — (prompts username/senha) |
 | `import_points` | importa tiles de centros lat,lon | `--point lat lon [nome]` / `--csv` / `--block N` / `--project` |
-| `import_cq_tiles` | importa tiles de CQ de geoparquet | `--geoparquet` / `--seed empty\|raw` / `--raw-dir` / `--dry-run` / `--project` |
-| `import_qc_tiles` | importa tiles do BDF com seed argmax | `--csv` / `--bdf-dir` / `--dry-run` / `--project` |
 | `export_tiles` | export raster → GeoTIFF | `--status` / `--raw` / `--mosaic` / `--manifest` / `--project` |
 | `export_features` | export vector → GeoJSON | `--status` / `--mosaic` / `--manifest` / `--project` |
 | `export_classifications` | export classification → CSV | `--status` / `--manifest` / `--project` |
 | `export_detections` | export detection → GeoJSON | `--status` / `--mosaic` / `--manifest` / `--project` |
 | `build_mbtiles` | GeoTIFFs 3857 → MBTiles WebP | `--zmin/--zmax/--quality/--workers/--batch-size/--name/--resume` |
-| `build_xyz_pyramid` | GeoTIFF → pirâmide XYZ em disco | `--zmin/--zmax/--bands/--workers` |
-| `build_mask_mbtiles` | máscaras EDGV → MBTiles overlay PNG | `--zmin/--zmax/--workers/--batch-size/--name/--resume/--project` |
 | `merge_db` | mescla outro tileclass.db | `--primary/--secondary/--dry-run` (backup automático) |
 | `backup_db` | backup WAL-safe do banco | `output` ou `--auto-name <dir>/` |
 | `verify_db` | varredura de integridade (cron/CI) | `--quick` (exit 0 ok / 2 falha) |
@@ -402,4 +398,4 @@ Rodar como módulo (`python -m backend.scripts.X`). Helpers em `_common.py` (`re
 
 ---
 
-*Gerado a partir de varredura completa do código-fonte (backend + frontend). Para o contrato detalhado de invariantes, ver `CLAUDE.md` e `docs/requirements.md`.*
+*Gerado a partir de varredura completa do código-fonte (backend + frontend). Para o contrato detalhado de invariantes, ver `CLAUDE.md` e `docs/sistema.md`.*

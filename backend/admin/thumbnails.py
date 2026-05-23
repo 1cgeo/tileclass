@@ -40,8 +40,9 @@ def _project_class_lut(project_id: int) -> np.ndarray:
 
 def tile_thumbnail(tile_id: int, size: int = 128) -> bytes:
     """Return the best thumbnail for the admin grid. Dispatches by the
-    project's kind: raster colorizes the painted mask, vector overlays
-    LineStrings on the satellite backdrop."""
+    project's kind: raster colorizes the painted mask; vector overlays
+    LineStrings on the satellite; classification badges the tile with its
+    class name; detection overlays bounding boxes."""
     row = _tile_row(tile_id)
     if not row:
         raise HTTPException(404, "tile not found")
@@ -52,6 +53,8 @@ def tile_thumbnail(tile_id: int, size: int = 128) -> bytes:
         return _vector_thumbnail(row, proj, size)
     if kind == "classification":
         return _classification_thumbnail(row, proj, size)
+    if kind == "detection":
+        return _detection_thumbnail(row, proj, size)
     primary = mbtiles_service.get_reader(pid, "primary") if pid else None
     tile_px = int((proj or {}).get("tile_px", 256))
     pixels = tile_px * tile_px
@@ -204,6 +207,68 @@ def _vector_thumbnail(row, proj: dict, size: int) -> bytes:
             if len(pts) >= 2:
                 draw.line(pts, fill=color_for(f.get("properties") or {}),
                           width=max(2, size // 64))
+    composed = Image.alpha_composite(base, overlay)
+    buf = io.BytesIO()
+    composed.convert("RGB").save(buf, format="PNG", optimize=True)
+    return buf.getvalue()
+
+
+def _detection_thumbnail(row, proj: dict, size: int) -> bytes:
+    """Bounding boxes overlaid on the satellite backdrop. Each Polygon feature
+    becomes an axis-aligned rectangle outlined in the class color (lookup by
+    `properties.class_id`). Mirrors the vector thumbnail flow — same bbox
+    linear-projection trick — but draws rectangles instead of polylines."""
+    import json as _json
+    from PIL import ImageDraw
+    from io import BytesIO
+    from ..mask_tile_service import _hex_to_rgb
+    try:
+        base = Image.open(BytesIO(_tile_satellite_png(row["id"], size, row=row))).convert("RGBA")
+    except Exception:
+        base = Image.new("RGBA", (size, size), (32, 32, 32, 255))
+
+    text = row["data_geojson"]
+    if not text:
+        buf = io.BytesIO()
+        base.save(buf, format="PNG", optimize=True)
+        return buf.getvalue()
+    try:
+        doc = _json.loads(text)
+    except (TypeError, ValueError):
+        doc = None
+
+    overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    if doc:
+        draw = ImageDraw.Draw(overlay)
+        classes_by_id = {c["id"]: c for c in (proj.get("classes") or [])}
+        w, s, e, n = (row["bbox_west"], row["bbox_south"],
+                      row["bbox_east"], row["bbox_north"])
+        span_x = e - w
+        span_y = n - s
+        if span_x > 0 and span_y > 0:
+            stroke = max(2, size // 64)
+            for f in doc.get("features", []) or []:
+                geom = f.get("geometry") or {}
+                if geom.get("type") != "Polygon":
+                    continue
+                rings = geom.get("coordinates") or []
+                if not rings or len(rings[0]) < 4:
+                    continue
+                ring = rings[0]
+                xs = [c[0] for c in ring if len(c) >= 2]
+                ys = [c[1] for c in ring if len(c) >= 2]
+                if not xs or not ys:
+                    continue
+                cls = classes_by_id.get((f.get("properties") or {}).get("class_id"))
+                rgb = _hex_to_rgb(cls["color"]) if cls else (228, 26, 28)
+                x0 = (min(xs) - w) / span_x * size
+                x1 = (max(xs) - w) / span_x * size
+                y0 = (n - max(ys)) / span_y * size
+                y1 = (n - min(ys)) / span_y * size
+                # Translucent fill + opaque outline so admins see both the
+                # cluster (when many boxes overlap) and the individual class.
+                draw.rectangle([x0, y0, x1, y1],
+                               fill=(*rgb, 50), outline=(*rgb, 230), width=stroke)
     composed = Image.alpha_composite(base, overlay)
     buf = io.BytesIO()
     composed.convert("RGB").save(buf, format="PNG", optimize=True)

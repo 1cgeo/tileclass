@@ -153,14 +153,17 @@ def list_problems(project_id: int | None = None) -> list[dict]:
     conn = connect()
     try:
         rows = conn.execute(
-            f"""SELECT t.id, t.project_id, t.name, t.problem_note,
+            f"""SELECT t.id, t.project_id, p.name AS project_name,
+                       t.name, t.problem_note,
                        (SELECT user_id FROM action_log
                           WHERE tile_id=t.id AND action='report_problem'
                           ORDER BY id DESC LIMIT 1) reporter_id,
                        (SELECT created_at FROM action_log
                           WHERE tile_id=t.id AND action='report_problem'
                           ORDER BY id DESC LIMIT 1) reported_at
-                FROM tiles t WHERE t.status='problem'{extra} ORDER BY t.id""",
+                FROM tiles t
+                LEFT JOIN projects p ON p.id=t.project_id
+                WHERE t.status='problem'{extra} ORDER BY t.id""",
             args,
         ).fetchall()
     finally:

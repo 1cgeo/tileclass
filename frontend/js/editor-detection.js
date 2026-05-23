@@ -359,6 +359,8 @@ function _commit(newFc) {
     _fc = newFc;
     _refreshLayers();
     _refreshMeta();
+    // Submit-state mirrors validity (box_required, class membership).
+    window.tcRefreshSubmit?.();
 }
 
 function _refreshSelForm() {

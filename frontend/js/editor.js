@@ -16,7 +16,8 @@ function expandBbox(bbox, factor) {
     const hw = (e - w) * factor / 2, hh = (n - s) * factor / 2;
     return [cx - hw, cy - hh, cx + hw, cy + hh];
 }
-import { hexToRgb, blobToImage, truncateName } from "./utils.js";
+import { hexToRgb, blobToImage, truncateName, kindLabel, withProjectParam } from "./utils.js";
+import { openModal } from "./admin/modals.js";
 import {
     paintAt as corePaintAt,
     paintLine as corePaintLine,
@@ -49,6 +50,10 @@ const DISPLAY = 768;
 let SCALE = DISPLAY / TILE;
 let PIXELS = TILE * TILE;
 const BRUSH_SIZES = [1, 3, 5, 7, 11];
+// How many class-selection number shortcuts are bound (1..6). Classes beyond
+// the 6th are clickable but don't get a key badge — the handler in onKeyDown
+// only matches keys "1"–"6".
+const MAX_NUMBER_SHORTCUTS = 6;
 
 // --- State ---
 let currentTile = null;
@@ -191,6 +196,10 @@ export async function initEditor(user) {
     buildColorLut();
     attachEvents();
     applySecondaryButtonLabels();
+    // Expose to non-raster editors so they can refresh the submit button
+    // after every state mutation without importing this module (avoids the
+    // circular import: editor.js already imports from editor-{vector,...}.js).
+    window.tcRefreshSubmit = refreshSubmitState;
     _editorInitialized = true;
     await enterEditor();
 }
@@ -201,9 +210,9 @@ export async function initEditor(user) {
 const LS_ACTIVE_PROJECT = "tileclass_active_project_id";
 
 async function refreshActiveProjectConfig() {
-    /** Fetch the project list, pick the active one (last-used → first), load
-     * its full config. Renders the header dropdown when the user has more
-     * than one project. */
+    /** Pick the active project (last-used → first), load its full config,
+     * paint the header chip. The "trocar" button + Ctrl+P open the picker
+     * modal when the user belongs to more than one project. */
     const projects = await apiGet("/api/projects");
     if (!projects || !projects.length) {
         showToast("Nenhum projeto disponível para o seu usuário.", "err", 8000);
@@ -214,41 +223,119 @@ async function refreshActiveProjectConfig() {
     const initial = projects.find(p => p.id === saved) || projects[0];
     activeProjectId = initial.id;
     try { localStorage.setItem(LS_ACTIVE_PROJECT, String(activeProjectId)); } catch {}
-    renderProjectPicker(projects);
     await loadProjectConfig(activeProjectId);
+    _renderProjectHeader(projects);
 }
 
-function renderProjectPicker(projects) {
-    const wrap = document.getElementById("project-picker-wrap");
-    const sel = document.getElementById("project-picker");
-    if (!wrap || !sel) return;
-    sel.innerHTML = "";
-    for (const p of projects) {
-        const opt = document.createElement("option");
-        opt.value = String(p.id);
-        opt.textContent = p.name;
-        if (p.id === activeProjectId) opt.selected = true;
-        sel.appendChild(opt);
+// Header chip: name + kind chip always visible; the "trocar" button only
+// surfaces when the user belongs to >1 project. Called whenever the active
+// project is set/loaded.
+function _renderProjectHeader(projects) {
+    const proj = window.tileclassActiveProject;
+    const nameEl = document.getElementById("editor-project-name");
+    const kindEl = document.getElementById("editor-project-kind");
+    if (nameEl) nameEl.textContent = proj?.name || "—";
+    if (kindEl) {
+        kindEl.textContent = kindLabel(proj?.kind);
+        kindEl.className = "chip info";
     }
-    if (projects.length > 1) {
-        wrap.classList.remove("hidden");
-        sel.onchange = async () => {
-            const newId = parseInt(sel.value, 10);
-            if (!Number.isFinite(newId) || newId === activeProjectId) return;
-            activeProjectId = newId;
-            try { localStorage.setItem(LS_ACTIVE_PROJECT, String(newId)); } catch {}
-            currentTile = null;
-            // Tear down the previous project's per-kind editor before swapping
-            // config (avoids a leaked MapLibre map / hidden raster canvas).
-            exitActiveKindEditor();
-            await loadProjectConfig(newId);
-            buildClassPanel();
-            buildColorLut();
-            await enterEditor();
-        };
-    } else {
-        wrap.classList.add("hidden");
+    const btn = document.getElementById("btn-switch-project");
+    if (btn) btn.classList.toggle("hidden", !projects || projects.length <= 1);
+}
+
+async function _switchProject(newId, { autoLoadNext = false } = {}) {
+    if (!Number.isFinite(newId) || newId === activeProjectId) return;
+    activeProjectId = newId;
+    try { localStorage.setItem(LS_ACTIVE_PROJECT, String(newId)); } catch {}
+    currentTile = null;
+    // Tear down the previous project's per-kind editor before swapping
+    // config (avoids a leaked MapLibre map / hidden raster canvas).
+    exitActiveKindEditor();
+    await loadProjectConfig(newId);
+    buildClassPanel();
+    buildColorLut();
+    // Reload the project list so the chip + "trocar" visibility stay in sync.
+    try {
+        const projects = await apiGet("/api/projects");
+        _renderProjectHeader(projects);
+    } catch {}
+    // `autoLoadNext` skips enterEditor's resume/idle flow and jumps straight
+    // to `loadNext` — used by the cross-project auto-fallback so the
+    // operator transitions seamlessly into the new queue.
+    if (autoLoadNext) await loadNext();
+    else await enterEditor();
+}
+
+async function openSwitchProjectModal() {
+    let workload;
+    try {
+        workload = await apiGet("/api/me/projects");
+    } catch (e) {
+        showToast(`Erro ao listar projetos: ${e.message}`, "err");
+        return;
     }
+    if (!workload.length) return;
+    const result = await openModal({
+        title: "Trocar projeto",
+        size: "md",
+        submitLabel: "Ir",
+        render: (host) => {
+            host.innerHTML = "";
+            const list = document.createElement("div");
+            list.className = "project-switcher-list";
+            host.appendChild(list);
+            for (const p of workload) {
+                const item = document.createElement("button");
+                item.type = "button";
+                item.className = "project-switcher-item";
+                if (p.id === activeProjectId) item.classList.add("active");
+                item.dataset.pid = String(p.id);
+                const top = document.createElement("div");
+                top.className = "project-switcher-top";
+                const name = document.createElement("span");
+                name.className = "project-switcher-name";
+                name.textContent = p.name;
+                const kind = document.createElement("span");
+                kind.className = "chip info";
+                kind.textContent = kindLabel(p.kind);
+                top.append(name, kind);
+                const bottom = document.createElement("div");
+                bottom.className = "project-switcher-bottom";
+                const count = document.createElement("span");
+                count.className = "project-switcher-count" + (p.available > 0 ? "" : " empty");
+                count.textContent = p.available > 0
+                    ? `${p.available} disponíve${p.available === 1 ? "l" : "is"}`
+                    : "sem trabalho";
+                bottom.appendChild(count);
+                // Surface the breakdown so the operator can see what's pending
+                // vs already assigned vs awaiting review.
+                if (p.available > 0) {
+                    const parts = [];
+                    if (p.assigned_to_me) parts.push(`${p.assigned_to_me} pra mim`);
+                    if (p.pending) parts.push(`${p.pending} pendentes`);
+                    if (p.review_queue) parts.push(`${p.review_queue} pra revisar`);
+                    const detail = document.createElement("span");
+                    detail.className = "project-switcher-detail";
+                    detail.textContent = parts.join(" · ");
+                    bottom.appendChild(detail);
+                }
+                item.append(top, bottom);
+                item.onclick = () => {
+                    list.querySelectorAll(".project-switcher-item.active")
+                        .forEach(el => el.classList.remove("active"));
+                    item.classList.add("active");
+                };
+                list.appendChild(item);
+            }
+        },
+        onSubmit: (host) => {
+            const sel = host.querySelector(".project-switcher-item.active");
+            const pid = sel ? parseInt(sel.dataset.pid, 10) : null;
+            return Number.isFinite(pid) ? { pid } : null;
+        },
+    });
+    if (!result.confirmed) return;
+    await _switchProject(result.payload.pid);
 }
 
 async function loadProjectConfig(projectId) {
@@ -274,6 +361,10 @@ async function loadProjectConfig(projectId) {
             ? { url: info.url, minZoom: info.min_zoom ?? 0, maxZoom: info.max_zoom ?? 22 }
             : null;
     }
+    // data-kind drives CSS: hides raster-only chrome (sidebars, undo/redo,
+    // pause-in-classification) when the project isn't raster.
+    const view = document.getElementById("view-editor");
+    if (view) view.dataset.kind = proj.kind || "raster";
     refreshShortcutsBadges();
 }
 
@@ -317,7 +408,7 @@ export async function enterEditor() {
         [, , resume] = await Promise.all([
             loadTodayCount(),
             loadQueueStats(),
-            apiGet(`/api/tiles/assigned?project_id=${activeProjectId}`).catch(() => null),
+            apiGet(withProjectParam("/api/tiles/assigned", activeProjectId)).catch(() => null),
         ]);
     } catch {}
     if (resume) {
@@ -334,7 +425,7 @@ export async function enterEditor() {
 
 async function loadTodayCount() {
     try {
-        const r = await apiGet(`/api/me/stats-today?project_id=${activeProjectId}`);
+        const r = await apiGet(withProjectParam("/api/me/stats-today", activeProjectId));
         todayCount = r.count || 0;
         document.getElementById("today-count").textContent = todayCount;
     } catch {}
@@ -342,7 +433,7 @@ async function loadTodayCount() {
 
 async function loadQueueStats() {
     try {
-        const q = await apiGet(`/api/tiles/queue-stats?project_id=${activeProjectId}`);
+        const q = await apiGet(withProjectParam("/api/tiles/queue-stats", activeProjectId));
         const el = document.getElementById("queue-progress");
         el.textContent = `${q.reviewed}/${q.total} revisados · ${q.classified}/${q.total} classificados`;
     } catch {}
@@ -376,12 +467,16 @@ function buildClassPanel() {
         const sw = document.createElement("span");
         sw.className = "swatch"; sw.style.backgroundColor = c.color;
         const name = document.createElement("span"); name.textContent = c.name;
-        const key = document.createElement("span"); key.className = "key"; key.textContent = String(i+1);
+        const key = document.createElement("span"); key.className = "key";
+        if (i < MAX_NUMBER_SHORTCUTS) key.textContent = String(i + 1);
         li.append(sw, name, key);
         li.addEventListener("click", () => setActiveClass(c.id));
         ul.appendChild(li);
     });
-    setActiveClass(classes[0].id);
+    // Vector projects expose no classes (their schema lives in
+    // project_attributes), so the panel is empty and there's no default to
+    // activate. Same guard covers any future kind that drops project_classes.
+    if (classes.length) setActiveClass(classes[0].id);
 }
 
 function setActiveClass(id) {
@@ -404,9 +499,10 @@ async function loadNext() {
         if (preloadedNext) {
             t = preloadedNext.tile;
             // We still must call /next to actually assign. Preloaded PNG may differ.
-            const real = await apiGet(`/api/tiles/next?project_id=${activeProjectId}`);
+            const real = await apiGet(withProjectParam("/api/tiles/next", activeProjectId));
             if (!real) {
                 preloadedNext = null;
+                if (await _tryFallbackToOtherProject()) return;
                 showNoTilesScreen();
                 return;
             }
@@ -417,8 +513,9 @@ async function loadNext() {
             }
             preloadedNext = null;
         } else {
-            t = await apiGet(`/api/tiles/next?project_id=${activeProjectId}`);
+            t = await apiGet(withProjectParam("/api/tiles/next", activeProjectId));
             if (!t) {
+                if (await _tryFallbackToOtherProject()) return;
                 showNoTilesScreen();
                 return;
             }
@@ -431,9 +528,37 @@ async function loadNext() {
     }
 }
 
+// Guard against re-entrant fallback: a single "no tiles" doesn't bounce us
+// around the portfolio in a tight loop. Reset on every successful load.
+let _fallbackInFlight = false;
+
+// When the active project runs out of work, check whether any other project
+// the user belongs to still has tiles waiting. Switch + load so the operator
+// keeps working without manually picking the next project. Returns true
+// when a switch happened (caller skips the "no tiles" screen).
+async function _tryFallbackToOtherProject() {
+    if (_fallbackInFlight) return false;
+    _fallbackInFlight = true;
+    try {
+        let workload;
+        try { workload = await apiGet("/api/me/projects"); } catch { return false; }
+        const next = (workload || []).find(p =>
+            p.id !== activeProjectId && (p.available || 0) > 0
+        );
+        if (!next) return false;
+        const fromName = window.tileclassActiveProject?.name || "este projeto";
+        showToast(`Sem tiles em "${fromName}". Indo para "${next.name}".`,
+                  "info", 4000);
+        await _switchProject(next.id, { autoLoadNext: true });
+        return true;
+    } finally {
+        _fallbackInFlight = false;
+    }
+}
+
 async function preloadNext() {
     try {
-        const peek = await apiGet(`/api/tiles/next-preview?project_id=${activeProjectId}`);
+        const peek = await apiGet(withProjectParam("/api/tiles/next-preview", activeProjectId));
         if (!peek) { preloadedNext = null; return; }
         const blob = await apiGetBlob(`/api/tiles/${peek.id}/image`, { retries: 2, timeout: 8_000 });
         const img = await blobToImage(blob);
@@ -483,6 +608,9 @@ async function loadTile(t, preloadedMask = null) {
     hideIdleScreen();
     hidePausedResumeScreen();
     document.getElementById("tile-name-label").textContent = `Tile: ${truncateName(t.name)} (#${t.id})`;
+    // Browser-tab title carries the tile id so the operator can find the right
+    // tab when they have several open (review queue, multiple projects).
+    document.title = `Tile #${t.id} — TileClass`;
     const reviewBanner = document.getElementById("review-banner");
     const modePill = document.getElementById("mode-pill");
     if (t.status === "in_review") {
@@ -507,6 +635,7 @@ async function loadTile(t, preloadedMask = null) {
         refreshRequestChangesButton(t);
         loadReviewNoteBanner(t.id);
         startHeartbeat(t.id);
+        refreshSubmitState();
         _tileReady = true;
         return;
     }
@@ -516,6 +645,7 @@ async function loadTile(t, preloadedMask = null) {
         refreshRequestChangesButton(t);
         loadReviewNoteBanner(t.id);
         startHeartbeat(t.id);
+        refreshSubmitState();
         _tileReady = true;
         return;
     }
@@ -525,6 +655,7 @@ async function loadTile(t, preloadedMask = null) {
         refreshRequestChangesButton(t);
         loadReviewNoteBanner(t.id);
         startHeartbeat(t.id);
+        refreshSubmitState();
         _tileReady = true;
         return;
     }
@@ -668,20 +799,62 @@ function updateProgress() {
     updateSubmitButton(missing);
 }
 
-function updateSubmitButton(missing) {
+// Single point that paints the footer submit button's state. Both the raster
+// path (driven by pixel counts) and the non-raster path (driven by validator
+// errors) end here so UX tweaks (label tone, classnames) only need editing
+// once.
+function _paintSubmit({ incomplete, label, title }) {
     const btn = document.getElementById("btn-submit");
-    const label = document.getElementById("submit-label");
-    if (!btn || !label) return;
-    const isReview = currentTile && currentTile.status === "in_review";
-    const baseLabel = isReview ? "Aprovar revisão" : "Submeter";
+    const labelEl = document.getElementById("submit-label");
+    if (!btn || !labelEl) return;
+    btn.classList.toggle("incomplete", incomplete);
+    labelEl.textContent = label;
+    btn.title = title;
+}
+
+function _baseSubmitLabel() {
+    return currentTile && currentTile.status === "in_review" ? "Aprovar revisão" : "Submeter";
+}
+
+function updateSubmitButton(missing) {
+    const base = _baseSubmitLabel();
     if (missing > 0 && maskCompleteRequired) {
-        btn.classList.add("incomplete");
-        label.textContent = `Faltam ${missing.toLocaleString("pt-BR")} px`;
-        btn.title = `Complete a máscara — faltam ${missing} pixels`;
+        _paintSubmit({
+            incomplete: true,
+            label: `Faltam ${missing.toLocaleString("pt-BR")} px`,
+            title: `Complete a máscara — faltam ${missing} pixels`,
+        });
     } else {
-        btn.classList.remove("incomplete");
-        label.textContent = baseLabel;
-        btn.title = isReview ? "Aprovar esta revisão (Ctrl+S)" : "Submeter classificação (Ctrl+S)";
+        const isReview = base === "Aprovar revisão";
+        _paintSubmit({
+            incomplete: false, label: base,
+            title: isReview ? "Aprovar esta revisão (Ctrl+S)" : "Submeter classificação (Ctrl+S)",
+        });
+    }
+}
+
+// Non-raster kinds drive their own state and don't go through updateProgress.
+// They call window.tcRefreshSubmit?.() after each mutation so the footer's
+// submit button mirrors the validity of the current state.
+function refreshSubmitState() {
+    if (!currentTile) return;
+    let issues = [];
+    try {
+        if (isVectorProject()) issues = validateVector();
+        else if (isClassificationProject()) issues = validateClassification();
+        else if (isDetectionProject()) issues = validateDetection();
+        else return;  // raster goes through updateSubmitButton
+    } catch { issues = []; }
+    const base = _baseSubmitLabel();
+    if (issues.length) {
+        const first = issues[0];
+        _paintSubmit({
+            incomplete: true,
+            label: first.length > 32 ? first.slice(0, 30) + "…" : first,
+            title: issues.join("\n"),
+        });
+    } else {
+        _paintSubmit({ incomplete: false, label: base, title: base });
     }
 }
 
@@ -966,6 +1139,8 @@ function attachEvents() {
         await apiLogout();
         location.reload();
     });
+    const btnSwitch = document.getElementById("btn-switch-project");
+    if (btnSwitch) btnSwitch.addEventListener("click", openSwitchProjectModal);
 
     const note = document.getElementById("problem-note");
     const noteCount = document.getElementById("problem-note-count");
@@ -1215,12 +1390,28 @@ function drawCursor(x, y) {
     // line bleeds into adjacent grid cells and hides which pixel will paint.
     const lw = 1 / zoom;
     const inset = lw / 2;
-    ctxCursor.strokeStyle = "rgba(0,0,0,0.8)";
+    // Cursor shows the active class color sandwiched between dark/light strokes
+    // so it stays visible over any background AND tells the operator at a
+    // glance which class is about to paint. Eraser falls back to the original
+    // black/white to signal "no class".
+    const cls = tool === "eraser" ? null : classesById[activeClass];
+    const cssRgb = cls ? `rgb(${colorLut[cls.id*4]},${colorLut[cls.id*4+1]},${colorLut[cls.id*4+2]})` : null;
+    ctxCursor.strokeStyle = "rgba(0,0,0,0.85)";
     ctxCursor.lineWidth = lw;
     ctxCursor.strokeRect(sx + inset, sy + inset, sz - lw, sz - lw);
-    ctxCursor.strokeStyle = "rgba(255,255,255,0.95)";
-    ctxCursor.lineWidth = lw;
-    ctxCursor.strokeRect(sx - inset, sy - inset, sz + lw, sz + lw);
+    if (cssRgb) {
+        ctxCursor.strokeStyle = cssRgb;
+        ctxCursor.lineWidth = lw;
+        ctxCursor.strokeRect(sx - inset, sy - inset, sz + lw, sz + lw);
+        // Outer halo (white) keeps the class color readable over light imagery.
+        ctxCursor.strokeStyle = "rgba(255,255,255,0.85)";
+        ctxCursor.lineWidth = lw;
+        ctxCursor.strokeRect(sx - inset - lw, sy - inset - lw, sz + 3*lw, sz + 3*lw);
+    } else {
+        ctxCursor.strokeStyle = "rgba(255,255,255,0.95)";
+        ctxCursor.lineWidth = lw;
+        ctxCursor.strokeRect(sx - inset, sy - inset, sz + lw, sz + lw);
+    }
 }
 
 function setTool(t) {
@@ -1234,6 +1425,17 @@ function onKeyDown(ev) {
     // Listeners stay attached when admin toggles to the panel — gate so editor
     // shortcuts (e.g. Z/X opacity) don't fire against a hidden canvas.
     if (document.getElementById("view-editor").classList.contains("hidden")) return;
+    // Ctrl+P opens the project switcher regardless of focus / kind — single
+    // shortcut for all project types. Skip when a modal is already open so
+    // it doesn't stack dialogs.
+    if (ev.ctrlKey && (ev.key === "p" || ev.key === "P") && !isModalOpen()) {
+        const btn = document.getElementById("btn-switch-project");
+        if (btn && !btn.classList.contains("hidden")) {
+            ev.preventDefault();
+            btn.click();
+            return;
+        }
+    }
     if (isTextFocused() || isModalOpen()) {
         if (ev.key === "Escape") {
             document.getElementById("modal-problem").classList.add("hidden");
@@ -1442,6 +1644,7 @@ function flashMissing() {
 function showIdleScreen(title, message, { previewNext = false } = {}) {
     hidePausedResumeScreen();
     stopHeartbeat();
+    document.title = "TileClass";
     _previewToken++;
     resetPreview("idle-preview", "idle-icon");
     document.getElementById("idle-title").textContent = title;
@@ -1525,7 +1728,7 @@ async function updateIdleNextHint() {
     if (!msg || !idle) return;
     const token = _previewToken;
     try {
-        const next = await apiGet(`/api/tiles/next-preview?project_id=${activeProjectId}`);
+        const next = await apiGet(withProjectParam("/api/tiles/next-preview", activeProjectId));
         // Avoid overwriting if the user already left the idle screen while the
         // preview was in flight (e.g. clicked "Iniciar tile" quickly).
         if (idle.classList.contains("hidden") || token !== _previewToken) return;
@@ -1566,6 +1769,18 @@ function flashSuccess() {
     const stack = document.getElementById("canvas-stack");
     stack.classList.add("canvas-flash-ok");
     setTimeout(() => stack.classList.remove("canvas-flash-ok"), 220);
+    // The idle-screen overlay (rgba 0.88) shows immediately after submit and
+    // would otherwise mask the canvas flash. Animate the idle box itself once
+    // it appears so the operator sees a clear success signal on top.
+    setTimeout(() => {
+        const box = document.querySelector("#idle-screen .no-tiles-box");
+        if (!box) return;
+        box.classList.remove("idle-flash-ok");
+        // Force reflow so the animation restarts even on back-to-back submits.
+        void box.offsetWidth;
+        box.classList.add("idle-flash-ok");
+        setTimeout(() => box.classList.remove("idle-flash-ok"), 700);
+    }, 50);
 }
 
 function clearCanvasFlash() {

@@ -39,24 +39,11 @@ def test_overview_requires_admin(client, admin_user, operators):
 
 
 def test_overview_shape(client, admin_user):
-    """Per-project layer status + overlay cache aggregate. Each layer slot
-    is either closed (minimal payload) or open (full reader metadata)."""
+    """Overview returns the overlay cache aggregate only. Per-project layer
+    info lives in /api/projects/* — never duplicated here."""
     tok = token(client, admin_user["username"], admin_user["password"])
     body = client.get("/api/admin/maintenance/overview", headers=h(tok)).json()
-    assert set(body.keys()) == {"projects", "overlay_cache"}
-    assert body["projects"], "default project must appear in the per-project map"
-    for pid, payload in body["projects"].items():
-        assert "name" in payload and "layers" in payload, pid
-        for layer, info in payload["layers"].items():
-            assert "open" in info and "configured" in info, (pid, layer)
-            if info.get("remote"):
-                # Remote tile-servers (incl. bingmaps://) aren't file-backed:
-                # no reader metadata, just the pass-through source.
-                assert set(info) >= {"open", "configured", "remote", "path"}, (pid, layer)
-            elif info["open"]:
-                assert set(info) >= {
-                    "open", "configured", "format", "min_zoom", "max_zoom", "path"
-                }, (pid, layer)
+    assert set(body.keys()) == {"overlay_cache"}
     cache = body["overlay_cache"]
     assert cache["rendered_tiles"] == 0
     assert cache["empty_tiles"] == 0

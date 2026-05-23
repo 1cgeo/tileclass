@@ -1,7 +1,7 @@
 """Coverage for the CLI scripts (agent/ops entry points) that had none:
 create_admin (interactive), import_points (geodesic insert + dedup + block),
-recolor_mbtiles (pure RGB remap), plus import smokes for the heavy build/import
-tools so a syntax/import regression is caught."""
+recolor_mbtiles (pure RGB remap), plus import smokes for the heavy build tools
+so a syntax/import regression is caught."""
 import io
 import sys
 
@@ -141,10 +141,6 @@ def test_recolor_no_match_passes_through_bytes():
 
 @pytest.mark.parametrize("mod", [
     "backend.scripts.build_mbtiles",
-    "backend.scripts.build_xyz_pyramid",
-    "backend.scripts.build_mask_mbtiles",
-    "backend.scripts.import_cq_tiles",
-    "backend.scripts.import_qc_tiles",
     "backend.scripts.recolor_mbtiles",
 ])
 def test_heavy_script_imports(mod):

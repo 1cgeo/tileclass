@@ -239,6 +239,135 @@ def tile_class_distribution(project_id: int | None = None) -> list[dict]:
     ]
 
 
+def detection_distribution(project_id: int | None = None) -> list[dict]:
+    """Detection counterpart: counts bounding boxes per class id by walking
+    each tile's data_geojson once (boxes are Polygon features with
+    `properties.class_id`).
+
+    Returned shape mirrors class_distribution but uses `count` (boxes). Empty
+    bodies, parse errors, and features missing a class id are silently
+    skipped — they don't contribute to any class total."""
+    import json
+    proj_clause, proj_args = _scope(project_id, prefix="t.")
+    conn = connect()
+    try:
+        tile_rows = conn.execute(
+            f"""SELECT t.project_id, t.data_geojson FROM tiles t
+                JOIN projects p ON p.id=t.project_id
+                WHERE p.kind='detection' AND t.data_geojson IS NOT NULL
+                  {proj_clause}""",
+            proj_args,
+        ).fetchall()
+        # Build counts in Python so the same schema (Polygon + class_id) works
+        # regardless of how the operator structured the feature collection.
+        counts: dict[tuple[int, int], int] = {}
+        for r in tile_rows:
+            try:
+                doc = json.loads(r["data_geojson"])
+            except (TypeError, ValueError):
+                continue
+            for f in doc.get("features", []) or []:
+                cid = (f.get("properties") or {}).get("class_id")
+                if cid is None:
+                    continue
+                key = (r["project_id"], int(cid))
+                counts[key] = counts.get(key, 0) + 1
+        if not counts:
+            return []
+        # Resolve names/colors with one query per distinct project.
+        names: dict[tuple[int, int], tuple[str, str]] = {}
+        for pid in {pid for (pid, _) in counts}:
+            for c in conn.execute(
+                "SELECT class_id, name, color FROM project_classes WHERE project_id=?",
+                (pid,),
+            ).fetchall():
+                names[(pid, c["class_id"])] = (c["name"], c["color"])
+    finally:
+        conn.close()
+    # Per-project percentages (different projects = different palettes).
+    project_totals: dict[int, int] = {}
+    for (pid, _cid), n in counts.items():
+        project_totals[pid] = project_totals.get(pid, 0) + n
+    out = []
+    for (pid, cid), n in sorted(counts.items(), key=lambda kv: -kv[1]):
+        name, color = names.get((pid, cid), (f"#{cid}", "#888888"))
+        out.append({
+            "project_id": pid,
+            "class_id": cid,
+            "name": name,
+            "color": color,
+            "count": n,
+            "pct": round(100.0 * n / (project_totals[pid] or 1), 2),
+        })
+    return out
+
+
+def projects_stats() -> list[dict]:
+    """One row per active project for the admin Projetos sidebar AND the
+    cross-project breakdown on the dashboard. Bundles five aggregates in a
+    single round-trip:
+      - total_tiles + classified_tiles + completion_percent
+      - member_count
+      - rate_per_day (tiles classified in the last 7 days / 7)
+      - eta_days (remaining / rate, when rate > 0)
+    Per-project rate/eta let the dashboard surface projects that are stalled
+    or progressing fast, instead of the misleading global average.
+    """
+    conn = connect()
+    try:
+        rows = conn.execute(
+            """SELECT p.id, p.name, p.description, p.kind, p.active, p.created_at,
+                      COALESCE(t.total, 0) AS total_tiles,
+                      COALESCE(t.classified, 0) AS classified_tiles,
+                      COALESCE(m.member_count, 0) AS member_count,
+                      COALESCE(r.recent, 0) AS recent_classified
+               FROM projects p
+               LEFT JOIN (
+                   SELECT project_id,
+                          COUNT(*) AS total,
+                          SUM(CASE WHEN status IN ('classified','in_review','reviewed')
+                                   THEN 1 ELSE 0 END) AS classified
+                   FROM tiles GROUP BY project_id
+               ) t ON t.project_id = p.id
+               LEFT JOIN (
+                   SELECT project_id, COUNT(*) AS member_count
+                   FROM project_members GROUP BY project_id
+               ) m ON m.project_id = p.id
+               LEFT JOIN (
+                   SELECT project_id, COUNT(*) AS recent FROM tiles
+                   WHERE status IN ('classified','in_review','reviewed')
+                     AND classified_at >= datetime('now','-7 days')
+                   GROUP BY project_id
+               ) r ON r.project_id = p.id
+               ORDER BY p.id"""
+        ).fetchall()
+    finally:
+        conn.close()
+    out = []
+    for r in rows:
+        total = r["total_tiles"] or 0
+        classified = r["classified_tiles"] or 0
+        pct = round(100.0 * classified / total, 1) if total else 0.0
+        rate = round((r["recent_classified"] or 0) / 7.0, 2)
+        remaining = total - classified
+        eta = round(remaining / rate, 1) if rate > 0 and remaining > 0 else None
+        out.append({
+            "id": r["id"],
+            "name": r["name"],
+            "description": r["description"] or "",
+            "kind": r["kind"],
+            "active": bool(r["active"]),
+            "created_at": r["created_at"],
+            "total_tiles": total,
+            "classified_tiles": classified,
+            "completion_percent": pct,
+            "member_count": r["member_count"] or 0,
+            "rate_per_day": rate,
+            "eta_days": eta,
+        })
+    return out
+
+
 def dashboard(project_id: int | None = None) -> dict:
     proj_clause, proj_args = _scope(project_id)
     where_proj = ("WHERE 1=1" + proj_clause) if proj_clause else ""
@@ -349,6 +478,33 @@ def dashboard(project_id: int | None = None) -> dict:
         rate_per_day = (rate_row["c"] or 0) / 7.0
         remaining = total - classified_total
         eta_days = round(remaining / rate_per_day, 1) if rate_per_day > 0 else None
+
+        # Project portfolio summary. Always lists across all active projects so
+        # the cross-project view shows "how many of each kind exist" — the
+        # project-scoped view also gets the figure, useful as global context.
+        kind_rows = conn.execute(
+            "SELECT kind, COUNT(*) c FROM projects WHERE active=1 GROUP BY kind"
+        ).fetchall()
+        projects_by_kind = {r["kind"]: r["c"] for r in kind_rows}
+        project_count = sum(projects_by_kind.values())
+
+        # Cross-project only: tile count per kind. With a single project picked
+        # the figure would just equal `total_tiles`, so we omit it to keep the
+        # payload honest about scope.
+        if project_id is None:
+            tile_kind_rows = conn.execute(
+                """SELECT p.kind, COUNT(t.id) c FROM projects p
+                   LEFT JOIN tiles t ON t.project_id=p.id
+                   WHERE p.active=1 GROUP BY p.kind"""
+            ).fetchall()
+            tiles_by_kind = {r["kind"]: r["c"] for r in tile_kind_rows}
+            project_kind = None
+        else:
+            tiles_by_kind = {}
+            project_kind_row = conn.execute(
+                "SELECT kind FROM projects WHERE id=?", (project_id,)
+            ).fetchone()
+            project_kind = project_kind_row["kind"] if project_kind_row else None
     finally:
         conn.close()
 
@@ -364,4 +520,8 @@ def dashboard(project_id: int | None = None) -> dict:
         "eta_days": eta_days,
         "paused_count": paused_count,
         "paused_by_status": paused_by_status,
+        "project_count": project_count,
+        "projects_by_kind": projects_by_kind,
+        "tiles_by_kind": tiles_by_kind,
+        "project_kind": project_kind,
     }

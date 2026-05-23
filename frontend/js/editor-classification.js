@@ -140,4 +140,6 @@ function _selectClass(cid) {
     if (status) {
         status.textContent = cls ? `Selecionado: ${cls.name}` : "Nenhuma classe selecionada.";
     }
+    // Footer submit button flips out of incomplete state when a class is chosen.
+    window.tcRefreshSubmit?.();
 }

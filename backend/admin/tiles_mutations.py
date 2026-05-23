@@ -153,22 +153,31 @@ def assign_many(tile_ids: list[int], user_id: int, admin_id: int,
     now = now_iso()
     with transaction("IMMEDIATE") as conn:
         user = conn.execute(
-            "SELECT id, active, role, can_review FROM users WHERE id=?", (user_id,)
+            "SELECT id, active, role FROM users WHERE id=?", (user_id,)
         ).fetchone()
         if not user:
             raise HTTPException(404, "user not found")
         if not user["active"]:
             raise HTTPException(409, "user is inactive")
-        # Admins also act as operators/reviewers — role==admin shortcuts can_review
-        # the same way `tile_service._user_can_review` does, so the queues stay
-        # consistent regardless of who's working the tile.
-        user_can_review = bool(user["can_review"]) or user["role"] == "admin"
+
+        # Review eligibility is per-project membership now, not a global flag.
+        # Cache the lookup keyed by project_id so a mixed batch (different
+        # projects) doesn't hit the DB N times.
+        review_eligibility_cache: dict[int, bool] = {}
+        def _can_review(project_id: int) -> bool:
+            if project_id not in review_eligibility_cache:
+                m = conn.execute(
+                    "SELECT role FROM project_members WHERE project_id=? AND user_id=?",
+                    (project_id, user_id),
+                ).fetchone()
+                review_eligibility_cache[project_id] = bool(m) and m["role"] == "reviewer"
+            return review_eligibility_cache[project_id]
 
         # Validate every tile up-front so a bad one doesn't half-assign the lot.
         plans: list[tuple[int, str, str]] = []  # (tile_id, new_status, assign_action)
         for tid in tile_ids:
             tile = conn.execute(
-                "SELECT id, status, classified_by FROM tiles WHERE id=?", (tid,)
+                "SELECT id, project_id, status, classified_by FROM tiles WHERE id=?", (tid,)
             ).fetchone()
             if not tile:
                 raise HTTPException(404, f"tile {tid} not found")
@@ -176,9 +185,9 @@ def assign_many(tile_ids: list[int], user_id: int, admin_id: int,
             if status == "pending":
                 plans.append((tid, "in_progress", "assign_classify"))
             elif status == "classified":
-                if not user_can_review:
+                if not _can_review(tile["project_id"]):
                     raise HTTPException(
-                        409, f"tile {tid} needs a reviewer (user lacks can_review)"
+                        409, f"tile {tid}: user is not a reviewer in this project"
                     )
                 if tile["classified_by"] is not None and tile["classified_by"] == user_id:
                     raise HTTPException(

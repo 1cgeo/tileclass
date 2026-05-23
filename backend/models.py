@@ -86,14 +86,18 @@ class DashboardOut(BaseModel):
     eta_days: Optional[float]
     paused_count: int = 0
     paused_by_status: dict = {}
+    # Portfolio context. `tiles_by_kind` is only populated when the dashboard
+    # is unscoped (project_id=None) — when filtered to a single project the
+    # figure would just duplicate `total_tiles`. `project_kind` is the inverse:
+    # only set when scoped, so the UI can label the breakdown by kind.
+    project_count: int = 0
+    projects_by_kind: dict = {}
+    tiles_by_kind: dict = {}
+    project_kind: Optional[str] = None
 
 
 class SetActiveIn(BaseModel):
     active: bool
-
-
-class SetCanReviewIn(BaseModel):
-    can_review: bool
 
 
 class SetRoleIn(BaseModel):

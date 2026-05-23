@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { hexToRgb, escapeHtml } from "../../frontend/js/utils.js";
+import { hexToRgb, escapeHtml, statusLabel } from "../../frontend/js/utils.js";
 
 describe("hexToRgb", () => {
     it("parses 6-digit hex with leading #", () => {
@@ -35,5 +35,29 @@ describe("escapeHtml", () => {
     });
     it("preserves unicode", () => {
         expect(escapeHtml("ação é tudo")).toBe("ação é tudo");
+    });
+});
+
+describe("statusLabel", () => {
+    it("translates every backend status to pt-BR", () => {
+        // Lock the table down so a backend rename forces a frontend change.
+        expect(statusLabel("pending")).toBe("Pendente");
+        expect(statusLabel("in_progress")).toBe("Em andamento");
+        expect(statusLabel("classified")).toBe("Classificado");
+        expect(statusLabel("in_review")).toBe("Em revisão");
+        expect(statusLabel("reviewed")).toBe("Revisado");
+        expect(statusLabel("problem")).toBe("Problema");
+        expect(statusLabel("blocked")).toBe("Bloqueado");
+        expect(statusLabel("paused")).toBe("Pausado");
+    });
+    it("flags paused tiles distinctly, with a review variant", () => {
+        // Paused is a virtual status (status=in_progress|in_review with
+        // paused_at != NULL). Reviews get an explicit suffix so admins can
+        // tell paused-classify from paused-review at a glance.
+        expect(statusLabel("in_progress", true)).toBe("Pausado");
+        expect(statusLabel("in_review", true)).toBe("Pausado (revisão)");
+    });
+    it("falls back to the raw value for unknown statuses", () => {
+        expect(statusLabel("future_state")).toBe("future_state");
     });
 });

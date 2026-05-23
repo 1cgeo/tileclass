@@ -5,9 +5,12 @@
 import { apiGet, apiGetBlob, apiGetWithHeaders, apiPostJson, apiPatchJson, apiJson, logout as apiLogout } from "./api.js";
 import { showToast } from "./toast.js";
 import { createLockedMap, disposeMap, tileTransformRequest } from "./maplib.js";
-import { hexToRgb, blobToImage, escapeHtml as escape, fmtDate, fmtBytes } from "./utils.js";
+import {
+    hexToRgb, blobToImage, escapeHtml as escape, fmtDate, fmtBytes,
+    withProjectParam, renderProjectPicker, statusLabel,
+} from "./utils.js";
 import { renderDashboard, fmtDuration } from "./admin/dashboard.js";
-import { wireConfirmModal, confirmDestructive, promptAssign } from "./admin/modals.js";
+import { wireConfirmModal, confirmDestructive, promptAssign, promptForm } from "./admin/modals.js";
 import { renderProjects } from "./admin/projects.js";
 
 let tileserverUrl = "";
@@ -15,9 +18,76 @@ let tileserverMaxZoom = 22;
 let classes = [];
 let classesById = {};
 let currentProjectId = null;
+let projectsById = {};   // id → { id, name, kind, ... } — populated by initAdmin
 let selectedIds = new Set();
 let currentTab = "dashboard";
 let listView = "table"; // "table" | "grid"
+
+// User list used by the tiles-tab filter dropdown. Lazily populated by
+// renderTiles via /api/admin/users; invalidated when a user is created or
+// toggled so the dropdown doesn't go stale across tab switches.
+let _usersCache = null;
+
+// Sync palette + tileserver to the current project so the map overlay (legend
+// colors) and thumbnails reflect the project being filtered. `null` resets
+// everything — cross-project view (e.g. Tiles filtered to "all") has no
+// single palette/tileserver to anchor to.
+async function _loadProjectPalette(projectId) {
+    if (projectId == null) {
+        tileserverUrl = "";
+        tileserverMaxZoom = 22;
+        classes = [];
+        classesById = {};
+        return;
+    }
+    const proj = await apiGet(`/api/projects/${projectId}`);
+    const primary = (proj.layers || {}).primary;
+    tileserverUrl = (primary && primary.url) || "";
+    tileserverMaxZoom = (primary && primary.max_zoom) ?? 22;
+    classes = proj.classes || [];
+    classesById = Object.fromEntries(classes.map(c => [c.id, c]));
+    projectsById[proj.id] = { ...projectsById[proj.id], ...proj };
+}
+
+// Public refresh hook called from projects.js after CRUD (create/delete/clone/
+// rename). Returns the up-to-date project list so callers don't refetch.
+export async function syncAdminProjects() {
+    const projects = (await apiGet("/api/projects")) || [];
+    projectsById = Object.fromEntries(projects.map(p => [p.id, p]));
+    if (currentProjectId != null && !projectsById[currentProjectId]) {
+        // Selected project was deleted → fall back to the first one (or null).
+        currentProjectId = projects.length ? projects[0].id : null;
+        if (currentProjectId != null) {
+            try { await _loadProjectPalette(currentProjectId); } catch {}
+        } else {
+            tileserverUrl = ""; tileserverMaxZoom = 22;
+            classes = []; classesById = {};
+        }
+    }
+    return projects;
+}
+
+// Single `onChange` shared by every per-tab project filter (Dashboard, Tiles,
+// Mapa, Problemas). Keeps `currentProjectId` + palette in sync wherever the
+// admin switches projects. The global header picker was removed once each
+// tab grew its own — duplicate scope controls were confusing.
+async function _onProjectFilterChange(newId) {
+    currentProjectId = newId;
+    await _loadProjectPalette(newId);
+    selectedIds.clear();
+    page = 0;
+    await selectTab(currentTab);
+}
+
+function _wireTabProjectFilter({ wrapId, selectId, allowAll = true, alwaysShow = false }) {
+    renderProjectPicker({
+        wrapId, selectId,
+        projects: Object.values(projectsById),
+        activeId: currentProjectId,
+        allowAll, alwaysShow,
+        onChange: _onProjectFilterChange,
+    });
+}
 
 // Map tab — rectangle-selection state. Lives outside renderMap so the click
 // handler on tile layers can suppress the viewer while the tool is active.
@@ -38,6 +108,11 @@ let totalTiles = 0;
 
 // Active MapLibre instance for the "Mapa" tab, disposed on tab change.
 let mapView = null;
+// AbortController scoped to the current map view. Owns the `mousemove`/
+// `mouseup` listeners attached to `window` for the rect-select gesture (the
+// container can't catch them because the drag may leave its bounds). Aborted
+// on tab change / re-render so listeners don't accumulate across sessions.
+let mapEventsAbort = null;
 // Active MapLibre instance for the tile viewer modal. Disposed on close
 // and before each re-open — otherwise WebGL contexts pile up until the
 // browser starts evicting them ("Too many active WebGL contexts").
@@ -65,18 +140,14 @@ export async function initAdmin(user) {
     document.querySelectorAll(".admin-nav button").forEach(btn => {
         btn.addEventListener("click", () => selectTab(btn.dataset.tab));
     });
-    // Admin uses the first available project's primary mbtiles + class palette
-    // for thumbnails/map renders. The Projetos tab is where multi-project
-    // management lives; per-project palette switching can come later.
+    // All admin endpoints (dashboard, tiles, map, problems, distributions,
+    // mask overlay) accept ?project_id=. The picker switches between projects;
+    // re-selecting the current tab re-issues every query with the new scope.
     const projects = await apiGet("/api/projects");
+    projectsById = Object.fromEntries((projects || []).map(p => [p.id, p]));
     if (projects && projects.length) {
         currentProjectId = projects[0].id;
-        const proj = await apiGet(`/api/projects/${currentProjectId}`);
-        const primary = (proj.layers || {}).primary;
-        tileserverUrl = (primary && primary.url) || "";
-        tileserverMaxZoom = (primary && primary.max_zoom) ?? 22;
-        classes = proj.classes || [];
-        classesById = Object.fromEntries(classes.map(c => [c.id, c]));
+        await _loadProjectPalette(currentProjectId);
     } else {
         currentProjectId = null;
         tileserverUrl = "";
@@ -110,10 +181,24 @@ export async function enterAdmin() {
     await selectTab(currentTab || "dashboard");
 }
 
+// Human labels for the browser tab title so admins switching between tabs
+// see the right context in their tab strip.
+const _TAB_LABELS = {
+    dashboard: "Dashboard",
+    projects: "Projetos",
+    tiles: "Tiles",
+    map: "Mapa",
+    problems: "Problemas",
+    users: "Usuários",
+    maintenance: "Manutenção",
+};
+
 async function selectTab(tab) {
     currentTab = tab;
     selectedIds.clear();
     page = 0;
+    document.title = `Admin · ${_TAB_LABELS[tab] || tab} — TileClass`;
+    if (mapEventsAbort) { mapEventsAbort.abort(); mapEventsAbort = null; }
     mapView = disposeMap(mapView);
     // Drop the GeoJSON references when leaving the map tab — these hold one
     // feature per tile and pin tile-row-sized objects in memory while admin
@@ -127,7 +212,20 @@ async function selectTab(tab) {
     const content = document.getElementById("admin-content");
     content.innerHTML = `<div class="loading-text"><span class="loading"></span> Carregando...</div>`;
     try {
-        if (tab === "dashboard") await renderDashboard(content);
+        if (tab === "dashboard") {
+            await renderDashboard(content, {
+                projectId: currentProjectId, projectsById,
+                onSelectProject: _onProjectFilterChange,
+            });
+            // Wire the per-tab project filter that renderDashboard injected at
+            // the top — kept here so dashboard.js stays admin.js-agnostic.
+            _wireTabProjectFilter({
+                wrapId: "dashboard-project-filter-wrap",
+                selectId: "dashboard-project-filter",
+                allowAll: true,
+                alwaysShow: true,
+            });
+        }
         else if (tab === "projects") await renderProjects(content);
         else if (tab === "tiles") await renderTiles(content);
         else if (tab === "map") await renderMap(content);
@@ -147,18 +245,46 @@ function renderError(target, e) {
     target.appendChild(p);
 }
 
+// Filter-status options. `value` stays as the API contract (English snake_case);
+// only the label is localized. `paused_review` is virtual — the backend uses
+// it to filter paused-in-review tiles via the `paused=true` query param.
+const _STATUS_FILTER_OPTIONS = [
+    { value: "",              label: "(todos)" },
+    { value: "pending",       label: statusLabel("pending") },
+    { value: "in_progress",   label: statusLabel("in_progress") },
+    { value: "paused",        label: statusLabel("paused") },
+    { value: "paused_review", label: "Pausado (revisão)" },
+    { value: "classified",    label: statusLabel("classified") },
+    { value: "in_review",     label: statusLabel("in_review") },
+    { value: "reviewed",      label: statusLabel("reviewed") },
+    { value: "problem",       label: statusLabel("problem") },
+    { value: "blocked",       label: statusLabel("blocked") },
+];
+
 async function renderTiles(root) {
+    // Load the user list once per session so the operator dropdown is ready
+    // before the first filter — the table itself doesn't need it.
+    if (_usersCache == null) {
+        try { _usersCache = await apiGet("/api/admin/users"); }
+        catch { _usersCache = []; }
+    }
+    const userOptions = _usersCache
+        .filter(u => u.active)
+        .map(u => `<option value="${u.id}">${escape(u.username)}</option>`)
+        .join("");
+    const statusOptions = _STATUS_FILTER_OPTIONS
+        .map(o => `<option value="${o.value}">${escape(o.label)}</option>`)
+        .join("");
     root.innerHTML = `
         <div class="filter-bar">
+            <label id="tiles-project-filter-wrap" class="hidden">Projeto
+                <select id="tiles-project-filter"></select>
+            </label>
             <label>Buscar <input type="search" id="filter-q" placeholder="ID ou nome (parcial)" autocomplete="off"></label>
-            <label>Status <select id="filter-status">
-                <option value="">(todos)</option>
-                <option>pending</option><option>in_progress</option>
-                <option value="paused">paused</option>
-                <option value="paused_review">paused (revisão)</option>
-                <option>classified</option>
-                <option>in_review</option><option>reviewed</option><option>problem</option>
-                <option>blocked</option>
+            <label>Status <select id="filter-status">${statusOptions}</select></label>
+            <label>Operador <select id="filter-user" title="Filtra tiles em que esse usuário classificou ou revisou">
+                <option value="">(qualquer)</option>
+                ${userOptions}
             </select></label>
             <label>De <input type="date" id="filter-from"></label>
             <label>Até <input type="date" id="filter-to"></label>
@@ -209,6 +335,13 @@ async function renderTiles(root) {
         target.querySelectorAll("input[type=checkbox]").forEach(cb => { cb.checked = false; });
         updateBulkBar();
     });
+    // Per-tab project filter (includes "(todos)" so admins can review tiles
+    // across projects without leaving the tab).
+    _wireTabProjectFilter({
+        wrapId: "tiles-project-filter-wrap",
+        selectId: "tiles-project-filter",
+        allowAll: true,
+    });
     await loadAndRender();
 }
 
@@ -239,6 +372,10 @@ async function loadAndRender() {
     if (df) params.set("date_from", df);
     if (dt) params.set("date_to", dt);
     if (q) params.set("q", q);
+    // Scope to the current admin project + optional operator filter.
+    if (currentProjectId != null) params.set("project_id", currentProjectId);
+    const userFilter = document.getElementById("filter-user")?.value;
+    if (userFilter) params.set("user_id", userFilter);
     params.set("sort_by", sortKey);
     params.set("sort_dir", sortDir);
     params.set("limit", PAGE_SIZE);
@@ -368,12 +505,14 @@ function buildTableRow(t) {
     const chip = document.createElement("span");
     if (t.paused_at) {
         chip.className = "chip paused";
-        chip.textContent = t.status === "in_review" ? "pausado (revisão)" : "pausado";
+        chip.textContent = statusLabel(t.status, true);
         chip.title = `Pausado em ${t.paused_at}`;
     } else {
         chip.className = `chip ${t.status}`;
-        chip.textContent = t.status;
-        if (t.status === "blocked" && t.blocked_from) chip.title = `Antes: ${t.blocked_from}`;
+        chip.textContent = statusLabel(t.status);
+        if (t.status === "blocked" && t.blocked_from) {
+            chip.title = `Antes: ${statusLabel(t.blocked_from)}`;
+        }
     }
     tdStatus.appendChild(chip);
     const tdAct = document.createElement("td");
@@ -463,7 +602,7 @@ function buildGridCard(t) {
         .catch(() => { img.alt = "?"; img.classList.remove("thumb-skeleton"); });
     const meta = document.createElement("div");
     meta.className = "meta";
-    meta.textContent = `#${t.id} · ${t.status}`;
+    meta.textContent = `#${t.id} · ${statusLabel(t.status, !!t.paused_at)}`;
     const whoText =
         t.reviewed_by_username ? `revisado por ${t.reviewed_by_username}` :
         t.classified_by_username ? `classificado por ${t.classified_by_username}` :
@@ -568,26 +707,58 @@ async function resetOne(id) {
     showToast("Resetado.", "success");
     refreshTileInPlace(id);
 }
-async function assignOne(tile) {
-    const users = await apiGet("/api/admin/users");
-    const isReview = tile.status === "classified";
-    // Admins are eligible too — they also classify/review. role==admin
-    // implicitly grants review rights (mirrors backend `_user_can_review`).
-    const eligible = users.filter(u =>
-        u.active &&
-        (!isReview || ((u.can_review || u.role === "admin") && u.id !== tile.classified_by))
+// Membership is per-project: eligibility for assigning a tile (single or
+// bulk) is computed from the project's member list — not from a global user
+// flag. For `classified` tiles we keep only reviewers and exclude the
+// classifiers of those tiles. Returns the `{id, username, project_role}[]`
+// shape `promptAssign` consumes.
+//
+// `tiles` may be 1+ rows; mixed-project batches must be rejected by callers
+// because they'd need different member lists.
+async function _eligibleAssignees(members, tiles) {
+    const hasReview = tiles.some(t => t.status === "classified");
+    const classifierIds = new Set(
+        tiles.filter(t => t.status === "classified" && t.classified_by)
+             .map(t => t.classified_by),
     );
+    return members
+        .filter(m => m.active)
+        .filter(m => !hasReview || (
+            m.project_role === "reviewer" && !classifierIds.has(m.id)
+        ))
+        .map(m => ({ id: m.id, username: m.username, project_role: m.project_role }));
+}
+
+// Strings for the assign modal: title varies by single vs bulk, description
+// changes when any tile in the batch needs a reviewer.
+function _assignPromptStrings({ hasReview, count, singleTileId }) {
+    const title = count === 1
+        ? (hasReview
+            ? `Atribuir revisão do tile #${singleTileId}`
+            : `Atribuir tile #${singleTileId}`)
+        : `Atribuir ${count} tile(s) a um usuário`;
+    const description = hasReview
+        ? (count === 1
+            ? "Apenas revisores do projeto aparecem na lista. O classificador não pode revisar a própria classificação."
+            : "Apenas revisores do projeto aparecem. Tiles vão para a fila pessoal como pausados; ao terminar o atual, o usuário recebe o próximo.")
+        : (count === 1
+            ? "Apenas membros do projeto aparecem na lista."
+            : "Apenas membros do projeto aparecem. Tiles vão para a fila pessoal como pausados.");
+    return { title, description };
+}
+
+async function assignOne(tile) {
+    const members = await apiGet(`/api/admin/projects/${tile.project_id}/members`);
+    const eligible = await _eligibleAssignees(members, [tile]);
+    const hasReview = tile.status === "classified";
     if (!eligible.length) {
-        showToast(isReview
-            ? "Sem revisores habilitados (ou todos classificaram este tile)."
-            : "Sem usuários ativos.", "error");
+        showToast(hasReview
+            ? "Sem revisores no projeto (ou todos classificaram este tile)."
+            : "Sem membros no projeto.", "error");
         return;
     }
     const r = await promptAssign({
-        title: isReview ? `Atribuir revisão do tile #${tile.id}` : `Atribuir tile #${tile.id}`,
-        description: isReview
-            ? "Escolha um revisor. Revisores precisam estar habilitados e não podem revisar a própria classificação."
-            : "Escolha um operador para classificar este tile.",
+        ..._assignPromptStrings({ hasReview, count: 1, singleTileId: tile.id }),
         users: eligible,
     });
     if (!r.confirmed) return;
@@ -733,12 +904,9 @@ async function bulkReportProblem() {
 async function bulkAssign() {
     if (selectedIds.size === 0) return;
     const ids = [...selectedIds];
-    const [users, tileRows] = await Promise.all([
-        apiGet("/api/admin/users"),
-        Promise.all(ids.map(id => apiGet(`/api/tiles/${id}`))),
-    ]);
+    const tileRows = await Promise.all(ids.map(id => apiGet(`/api/tiles/${id}`)));
     // Backend rejects any tile that isn't pending or classified — filter up
-    // front so we can build the eligible-reviewers list and give a clean error.
+    // front so we can build the eligible list and give a clean error.
     const bad = tileRows.filter(t => t.status !== "pending" && t.status !== "classified");
     if (bad.length) {
         showToast(
@@ -747,26 +915,25 @@ async function bulkAssign() {
         );
         return;
     }
+    // The batch must belong to a single project for the membership lookup —
+    // bulk-assigning across projects would mean mixing eligible lists.
+    const projectIds = new Set(tileRows.map(t => t.project_id));
+    if (projectIds.size > 1) {
+        showToast("Seleção mistura projetos. Filtre por projeto antes de atribuir.", "error");
+        return;
+    }
+    const pid = [...projectIds][0];
+    const members = await apiGet(`/api/admin/projects/${pid}/members`);
+    const eligible = await _eligibleAssignees(members, tileRows);
     const hasReview = tileRows.some(t => t.status === "classified");
-    const classifierIds = new Set(
-        tileRows.filter(t => t.status === "classified" && t.classified_by)
-                .map(t => t.classified_by),
-    );
-    const eligible = users.filter(u =>
-        u.active &&
-        (!hasReview || ((u.can_review || u.role === "admin") && !classifierIds.has(u.id)))
-    );
     if (!eligible.length) {
         showToast(hasReview
-            ? "Sem revisores habilitados (ou todos já classificaram algum tile do lote)."
-            : "Sem usuários ativos.", "error");
+            ? "Sem revisores no projeto (ou todos classificaram algum tile do lote)."
+            : "Sem membros ativos no projeto.", "error");
         return;
     }
     const r = await promptAssign({
-        title: `Atribuir ${ids.length} tile(s) a um usuário`,
-        description: hasReview
-            ? "Os tiles vão para a fila pessoal do usuário como pausados. Ao terminar o atual, ele recebe o próximo automaticamente. Tiles classified exigem revisor habilitado, e o revisor não pode ter classificado o tile."
-            : "Os tiles vão para a fila pessoal do usuário como pausados. Ao terminar o atual, ele recebe o próximo automaticamente.",
+        ..._assignPromptStrings({ hasReview, count: ids.length }),
         users: eligible,
     });
     if (!r.confirmed) return;
@@ -825,12 +992,21 @@ async function renderTileInfo(targetBody, tileId, reload) {
         <div class="loading-text"><span class="loading"></span> Carregando tile...</div>
         <div class="viewer-skeleton"></div>`;
     try {
-        const [t, history, blob] = await Promise.all([
-            apiGet(`/api/tiles/${tileId}`),
+        // Tile first so we can decide whether to fetch the raster mask: vector
+        // / classification / detection don't have a per-pixel PNG and the
+        // /image endpoint isn't meant for them.
+        const t = await apiGet(`/api/tiles/${tileId}`);
+        const kind = projectsById[t.project_id]?.kind || "raster";
+        // The mask exists only for raster projects, and only after the operator
+        // has painted something. `pending` and `problem` are wiped/empty —
+        // nothing to toggle in those states.
+        const hasMask = kind === "raster"
+            && t.status !== "pending" && t.status !== "problem";
+        const [history, blob] = await Promise.all([
             apiGet(`/api/tiles/${tileId}/history`),
-            apiGetBlob(`/api/tiles/${tileId}/image`),
+            hasMask ? apiGetBlob(`/api/tiles/${tileId}/image`) : Promise.resolve(null),
         ]);
-        const img = await blobToImage(blob);
+        const img = blob ? await blobToImage(blob) : null;
         targetBody.innerHTML = "";
         const meta = document.createElement("div");
         const statusLine = document.createElement("p");
@@ -838,15 +1014,15 @@ async function renderTileInfo(targetBody, tileId, reload) {
         const chip = document.createElement("span");
         if (t.paused_at) {
             chip.className = "chip paused";
-            chip.textContent = t.status === "in_review" ? "pausado (revisão)" : "pausado";
+            chip.textContent = statusLabel(t.status, true);
             chip.title = `Pausado em ${t.paused_at}`;
         } else {
             chip.className = `chip ${t.status}`;
-            chip.textContent = t.status;
+            chip.textContent = statusLabel(t.status);
         }
         statusLine.appendChild(chip);
         if (t.status === "blocked" && t.blocked_from) {
-            statusLine.append(document.createTextNode(` (antes: ${t.blocked_from})`));
+            statusLine.append(document.createTextNode(` (antes: ${statusLabel(t.blocked_from)})`));
         }
         if (t.classified_by_username) {
             statusLine.append(document.createTextNode(" · classificado por "));
@@ -902,14 +1078,59 @@ async function renderTileInfo(targetBody, tileId, reload) {
             h.appendChild(ul);
             targetBody.appendChild(h);
         }
+        // Mask toggle only appears for raster tiles with painted content —
+        // vector/classification/detection have no per-pixel mask to hide, and
+        // `pending`/`problem` raster tiles have nothing painted.
+        if (hasMask) {
+            const stackTools = document.createElement("div");
+            stackTools.className = "viewer-stack-tools";
+            const maskBtn = document.createElement("button");
+            maskBtn.type = "button";
+            maskBtn.className = "viewer-tool-btn active";
+            const maskIcon = document.createElement("span");
+            maskIcon.className = "viewer-tool-icon";
+            maskIcon.textContent = "🎨";
+            const maskLabel = document.createElement("span");
+            maskLabel.textContent = "Esconder máscara";
+            maskBtn.append(maskIcon, maskLabel);
+            maskBtn.setAttribute("aria-pressed", "true");
+            stackTools.appendChild(maskBtn);
+            targetBody.appendChild(stackTools);
+            // The click handler is wired after `stack` exists; capture a
+            // reference here and attach below.
+            targetBody._maskBtn = maskBtn;
+            targetBody._maskLabel = maskLabel;
+        }
+
         const stack = document.createElement("div");
         stack.className = "viewer-stack";
         const mapDiv = document.createElement("div");
         mapDiv.id = `viewer-map-${tileId}`;
-        const maskCnv = document.createElement("canvas");
-        maskCnv.width = 512; maskCnv.height = 512;
-        stack.append(mapDiv, maskCnv);
+        stack.appendChild(mapDiv);
+        // Mask canvas only when we actually have a mask to render. Otherwise
+        // the satellite map (below) fills the stack on its own.
+        let maskCnv = null;
+        if (hasMask) {
+            maskCnv = document.createElement("canvas");
+            maskCnv.width = 512; maskCnv.height = 512;
+            stack.appendChild(maskCnv);
+        }
         targetBody.appendChild(stack);
+
+        if (hasMask) {
+            const maskBtn = targetBody._maskBtn;
+            const maskLabel = targetBody._maskLabel;
+            maskBtn.addEventListener("click", () => {
+                // Toggle the canvas only — the underlying satellite map keeps
+                // rendering so admins can inspect the imagery beneath.
+                const hidden = stack.classList.toggle("mask-hidden");
+                maskBtn.classList.toggle("active", !hidden);
+                maskBtn.setAttribute("aria-pressed", String(!hidden));
+                maskLabel.textContent = hidden ? "Mostrar máscara" : "Esconder máscara";
+            });
+            delete targetBody._maskBtn;
+            delete targetBody._maskLabel;
+        }
         setTimeout(() => {
             // Bail if the host cleared this body (closed modal / panel, or
             // requested a different tile) before this tick fires — otherwise
@@ -919,25 +1140,27 @@ async function renderTileInfo(targetBody, tileId, reload) {
             viewerMap = createLockedMap(`viewer-map-${tileId}`, tileserverUrl,
                 [t.bbox_west, t.bbox_south, t.bbox_east, t.bbox_north], tileserverMaxZoom);
         }, 0);
-        const tmp = document.createElement("canvas");
-        tmp.width = 256; tmp.height = 256;
-        const tctx = tmp.getContext("2d");
-        tctx.drawImage(img, 0, 0, 256, 256);
-        const data = tctx.getImageData(0, 0, 256, 256);
-        const out = maskCnv.getContext("2d").createImageData(256, 256);
-        for (let i = 0; i < 256*256; i++) {
-            const v = data.data[i*4];
-            const c = classesById[v];
-            if (c) {
-                const [r,g,b] = hexToRgb(c.color);
-                out.data[i*4] = r; out.data[i*4+1] = g; out.data[i*4+2] = b; out.data[i*4+3] = 180;
-            } else { out.data[i*4+3] = 0; }
+        if (hasMask && img && maskCnv) {
+            const tmp = document.createElement("canvas");
+            tmp.width = 256; tmp.height = 256;
+            const tctx = tmp.getContext("2d");
+            tctx.drawImage(img, 0, 0, 256, 256);
+            const data = tctx.getImageData(0, 0, 256, 256);
+            const out = maskCnv.getContext("2d").createImageData(256, 256);
+            for (let i = 0; i < 256*256; i++) {
+                const v = data.data[i*4];
+                const c = classesById[v];
+                if (c) {
+                    const [r,g,b] = hexToRgb(c.color);
+                    out.data[i*4] = r; out.data[i*4+1] = g; out.data[i*4+2] = b; out.data[i*4+3] = 180;
+                } else { out.data[i*4+3] = 0; }
+            }
+            const off = document.createElement("canvas"); off.width = 256; off.height = 256;
+            off.getContext("2d").putImageData(out, 0, 0);
+            const mctx = maskCnv.getContext("2d");
+            mctx.imageSmoothingEnabled = false;
+            mctx.drawImage(off, 0, 0, 512, 512);
         }
-        const off = document.createElement("canvas"); off.width = 256; off.height = 256;
-        off.getContext("2d").putImageData(out, 0, 0);
-        const mctx = maskCnv.getContext("2d");
-        mctx.imageSmoothingEnabled = false;
-        mctx.drawImage(off, 0, 0, 512, 512);
     } catch (e) {
         renderError(targetBody, e);
     }
@@ -1043,7 +1266,7 @@ function refreshMapFeatureProps() {
 }
 
 async function renderMap(root) {
-    const tiles = await apiGet("/api/admin/tiles/map");
+    const tiles = await apiGet(withProjectParam("/api/admin/tiles/map", currentProjectId));
     mapSelectedIds = new Set();
     mapTilePropsById = new Map();
     mapRectSelectActive = false;
@@ -1051,16 +1274,8 @@ async function renderMap(root) {
         <div class="map-tab">
             <div class="map-tab-toolbar" id="map-toolbar">
                 <button id="map-tool-rect" class="map-tool-btn" type="button"
-                        title="Arrastar para selecionar. Shift = adicionar; Alt = remover; Esc = sair.">
+                        title="Ativa a seleção retangular. Arraste sobre o mapa: Shift soma à seleção, Alt remove. A ferramenta desliga sozinha após o gesto. Esc cancela.">
                     <span class="map-tool-icon">▭</span> Seleção retangular
-                </button>
-                <button id="map-tool-sat" class="map-tool-btn" type="button"
-                        title="Sobrepõe a imagem de satélite primária sobre o basemap.">
-                    <span class="map-tool-icon">🛰️</span> Imagem de satélite
-                </button>
-                <button id="map-tool-classifs" class="map-tool-btn" type="button"
-                        title="Sobrepõe as classificações (classified/in_review/reviewed) sobre o basemap.">
-                    <span class="map-tool-icon">🎨</span> Mostrar classificações
                 </button>
                 <span id="map-sel-info" class="map-sel-info hidden">
                     <b id="map-sel-count">0</b> tile(s) selecionado(s)
@@ -1092,6 +1307,26 @@ async function renderMap(root) {
                     <div class="map-panel-body" id="map-panel-body"></div>
                 </aside>
             </div>
+            <!-- Layer toggles + project picker sit BELOW the map: cosmetic
+                 (basemap+sat+classification overlays) and the project scope
+                 picker that swaps the whole rendering. Kept out of the top
+                 toolbar so selection/bulk actions don't compete for space. -->
+            <div class="map-tab-layers" id="map-layers">
+                <span class="map-layers-label">Camadas:</span>
+                <button id="map-tool-sat" class="map-tool-btn" type="button"
+                        title="Sobrepõe a imagem de satélite primária sobre o basemap.">
+                    <span class="map-tool-icon">🛰️</span> Imagem de satélite
+                </button>
+                <button id="map-tool-classifs" class="map-tool-btn" type="button"
+                        title="Sobrepõe as classificações dos tiles classificados, em revisão e revisados.">
+                    <span class="map-tool-icon">🎨</span> Mostrar classificações
+                </button>
+                <span class="map-layers-spacer"></span>
+                <label id="map-project-filter-wrap" class="map-project-filter hidden">
+                    <span class="map-layers-label">Projeto:</span>
+                    <select id="map-project-filter"></select>
+                </label>
+            </div>
         </div>
     `;
     document.getElementById("map-panel-close").addEventListener("click", closeMapPanel);
@@ -1110,7 +1345,7 @@ async function renderMap(root) {
         sw.className = "map-legend-swatch";
         sw.style.background = color;
         const lbl = document.createElement("span");
-        lbl.textContent = status;
+        lbl.textContent = statusLabel(status);
         item.append(sw, lbl);
         item.addEventListener("click", () => toggleStatus(status));
         legend.appendChild(item);
@@ -1135,6 +1370,14 @@ async function renderMap(root) {
     if (!tiles.length) {
         document.getElementById("admin-map").innerHTML =
             `<p class="empty-state">Nenhum tile cadastrado.</p>`;
+        // Still wire the picker so the admin can switch projects from here
+        // even when the current scope has no tiles to render.
+        _wireTabProjectFilter({
+            wrapId: "map-project-filter-wrap",
+            selectId: "map-project-filter",
+            allowAll: true,
+            alwaysShow: true,
+        });
         return;
     }
 
@@ -1291,15 +1534,41 @@ async function renderMap(root) {
         });
         mapView.on("click", layer, (ev) => {
             if (mapRectSelectActive) return;  // suppress viewer while selecting
+            // Any click ends the prior selection — admin's intent has moved
+            // on. Cleared before showTileInPanel so the side panel opens
+            // without leftover blue outlines.
+            if (mapSelectedIds.size) clearMapSelection();
             const f = ev.features && ev.features[0];
             if (!f) return;
             showTileInPanel(f.properties.id);
         });
     }
+    // Background click (no tile hit): also clears the selection. Without this,
+    // a user who selected a region by accident has to find the "Limpar seleção"
+    // button instead of just clicking the map.
+    mapView.on("click", (ev) => {
+        if (mapRectSelectActive) return;
+        const feats = mapView.queryRenderedFeatures(ev.point, {
+            layers: ["tiles-fill", "tiles-outline", "tiles-dot"],
+        });
+        if (feats.length) return;  // layer-scoped handler above takes over
+        if (mapSelectedIds.size) clearMapSelection();
+    });
 
     wireMapSelectionTools();
     wireSatLayerToggle();
     wireClassOverlayToggle();
+    // Project scope picker on the bottom strip. `allowAll=true` matches the
+    // header so the cross-project state is consistent across the app; the
+    // overlay layer (`addClassOverlayLayer`) already bails when projectId is
+    // null and we hide its toggle button below — so "(todos)" is safe to
+    // expose without breaking the layer.
+    _wireTabProjectFilter({
+        wrapId: "map-project-filter-wrap",
+        selectId: "map-project-filter",
+        allowAll: true,
+        alwaysShow: true,
+    });
 }
 
 // ---------- Map tab: primary satellite overlay ----------
@@ -1326,6 +1595,14 @@ function applySatLayerState(on) {
 function wireSatLayerToggle() {
     const btn = document.getElementById("map-tool-sat");
     if (!btn || !mapView) return;
+    // Projects without a primary mbtiles URL get the `data:,` source fallback,
+    // which 404s every tile request — there's nothing to toggle into. Hide
+    // the button instead of inviting clicks that produce noisy console errors.
+    if (!tileserverUrl) {
+        btn.classList.add("hidden");
+        return;
+    }
+    btn.classList.remove("hidden");
     btn.addEventListener("click", () => {
         const on = !satLayerEnabled();
         setSatLayerEnabled(on);
@@ -1388,6 +1665,18 @@ function removeClassOverlayLayer() {
     if (mapView.getSource("mask-overlay")) mapView.removeSource("mask-overlay");
 }
 
+// Force the overlay to re-fetch from the server after a mutation that the
+// per-tile invalidation hooks already cleared server-side. MapLibre keeps its
+// own in-memory tile cache and the browser may hold the response up to 60s
+// (`Cache-Control` from /mask-tiles), so without a remove+add the admin sees
+// stale colors until the source is rebuilt for some other reason (toggle,
+// project switch, tab change). Silent no-op when the overlay is off.
+function refreshClassOverlayIfActive() {
+    if (!mapView || !mapView.getSource("mask-overlay")) return;
+    removeClassOverlayLayer();
+    addClassOverlayLayer();
+}
+
 function renderClassLegend(visible) {
     const legend = document.getElementById("map-class-legend");
     if (!legend) return;
@@ -1417,18 +1706,27 @@ function applyClassOverlayState(on) {
     if (on) addClassOverlayLayer();
     else removeClassOverlayLayer();
     renderClassLegend(on);
-    // Polygons render outline-only when the overlay is on so the
-    // classification colors aren't covered. Use fill-opacity (instead of
-    // visibility=none) so the layer still receives clicks and shows up in
-    // queryRenderedFeatures for rectangle-select.
+    // Polygons fade — but don't disappear — when the overlay is on so the
+    // classification colors come through while the status cue stays visible
+    // (matters for vector/detection tiles that render transparent when they
+    // have no features yet). visibility=none would also drop the layer from
+    // queryRenderedFeatures, breaking rectangle-select.
     if (mapView && mapView.getLayer("tiles-fill")) {
-        mapView.setPaintProperty("tiles-fill", "fill-opacity", on ? 0 : 0.55);
+        mapView.setPaintProperty("tiles-fill", "fill-opacity", on ? 0.15 : 0.55);
     }
 }
 
 function wireClassOverlayToggle() {
     const btn = document.getElementById("map-tool-classifs");
     if (!btn || !mapView) return;
+    // The overlay is per-project (palette + MBTiles cache live under one id),
+    // so it can't render across projects — hide the toggle entirely in the
+    // cross-project view instead of letting clicks no-op silently.
+    if (!currentProjectId) {
+        btn.classList.add("hidden");
+        return;
+    }
+    btn.classList.remove("hidden");
     btn.addEventListener("click", () => {
         const on = !classOverlayEnabled();
         setClassOverlayEnabled(on);
@@ -1462,8 +1760,15 @@ function wireMapSelectionTools() {
     blockBtn.addEventListener("click", () => mapBulkBlock());
     unblockBtn.addEventListener("click", () => mapBulkUnblock());
 
-    // Esc clears tool/selection. Listener is attached to document but scoped:
-    // it bails if the map tab isn't active anymore.
+    // All listeners below share the same AbortSignal so a tab switch (which
+    // aborts the controller from selectTab) tears them down in one shot —
+    // previously they accumulated on `window`/`document` every time the map
+    // re-rendered.
+    if (mapEventsAbort) mapEventsAbort.abort();
+    mapEventsAbort = new AbortController();
+    const signal = mapEventsAbort.signal;
+
+    // Esc clears tool/selection.
     const onKey = (ev) => {
         if (currentTab !== "map") return;
         if (ev.key === "Escape") {
@@ -1471,9 +1776,7 @@ function wireMapSelectionTools() {
             else if (mapSelectedIds.size) clearMapSelection();
         }
     };
-    document.addEventListener("keydown", onKey);
-    // When mapView is replaced (tab switch), the old listener becomes a no-op
-    // via the currentTab guard, so no explicit cleanup is needed.
+    document.addEventListener("keydown", onKey, { signal });
 
     // Drag-to-select. We track on the container in pixel coords, then ask
     // MapLibre for features in the screen bbox at mouseup.
@@ -1497,7 +1800,7 @@ function wireMapSelectionTools() {
         overlay.style.top = `${start.y}px`;
         overlay.style.width = "0px";
         overlay.style.height = "0px";
-    });
+    }, { signal });
 
     window.addEventListener("mousemove", (ev) => {
         if (!start) return;
@@ -1510,7 +1813,7 @@ function wireMapSelectionTools() {
         overlay.style.top = `${y}px`;
         overlay.style.width = `${w}px`;
         overlay.style.height = `${h}px`;
-    });
+    }, { signal });
 
     window.addEventListener("mouseup", (ev) => {
         if (!start) return;
@@ -1539,7 +1842,12 @@ function wireMapSelectionTools() {
         else for (const id of hitIds) mapSelectedIds.delete(id);
 
         updateMapSelectionHighlight();
-    });
+        // One gesture = one selection. Auto-disable the tool so the next map
+        // interaction is pan/zoom by default; admins doing back-to-back
+        // selections can re-arm with the toolbar button or Shift+drag (handled
+        // inside containerPoint's modifier resolution).
+        setRectSelectActive(false);
+    }, { signal });
 }
 
 function setRectSelectActive(on) {
@@ -1653,6 +1961,7 @@ async function mapBulkReReview() {
         setMapTileProps(mapTilePropsById.get(id), { status: "classified", paused: false });
     }
     refreshMapFeatureProps();
+    refreshClassOverlayIfActive();
     clearMapSelection();
 }
 
@@ -1672,10 +1981,9 @@ async function mapBulkAssign() {
     const skipped = ids.length - eligibleIds.length;
     // Need fresh per-tile records: classified tiles carry classified_by which
     // determines reviewer eligibility (a reviewer can't review their own work).
-    const [users, tileRows] = await Promise.all([
-        apiGet("/api/admin/users"),
-        Promise.all(eligibleIds.map(id => apiGet(`/api/tiles/${id}`))),
-    ]);
+    const tileRows = await Promise.all(
+        eligibleIds.map(id => apiGet(`/api/tiles/${id}`))
+    );
     // Re-check status against fresh data — the cached props snapshot may be
     // stale after other admins acted concurrently.
     const fresh = tileRows.filter(t => t.status === "pending" || t.status === "classified");
@@ -1683,26 +1991,21 @@ async function mapBulkAssign() {
         showToast("Os tiles selecionados mudaram de status. Recarregue o mapa.", "error");
         return;
     }
+    // Map view is always scoped to one project — all rows share project_id.
+    const pid = fresh[0].project_id;
+    const members = await apiGet(`/api/admin/projects/${pid}/members`);
+    const eligibleUsers = await _eligibleAssignees(members, fresh);
     const hasReview = fresh.some(t => t.status === "classified");
-    const classifierIds = new Set(
-        fresh.filter(t => t.status === "classified" && t.classified_by)
-              .map(t => t.classified_by),
-    );
-    const eligibleUsers = users.filter(u =>
-        u.active &&
-        (!hasReview || ((u.can_review || u.role === "admin") && !classifierIds.has(u.id)))
-    );
     if (!eligibleUsers.length) {
         showToast(hasReview
-            ? "Sem revisores habilitados (ou todos já classificaram algum tile do lote)."
-            : "Sem usuários ativos.", "error");
+            ? "Sem revisores no projeto (ou todos classificaram algum tile do lote)."
+            : "Sem membros no projeto.", "error");
         return;
     }
+    const baseStrings = _assignPromptStrings({ hasReview, count: fresh.length });
     const r = await promptAssign({
-        title: `Atribuir ${fresh.length} tile(s) a um usuário`,
-        description: (hasReview
-            ? "Os tiles vão para a fila pessoal do usuário como pausados. Tiles 'classified' exigem revisor habilitado e o revisor não pode ter classificado o tile."
-            : "Os tiles vão para a fila pessoal do usuário como pausados. Ao terminar o atual, ele recebe o próximo automaticamente.")
+        title: baseStrings.title,
+        description: baseStrings.description
             + (skipped > 0 ? ` ${skipped} tile(s) selecionado(s) não estão em 'pending'/'classified' e foram ignorados.` : ""),
         users: eligibleUsers,
     });
@@ -1720,6 +2023,7 @@ async function mapBulkAssign() {
         setMapTileProps(mapTilePropsById.get(t.id), { status: newStatus, paused: true });
     }
     refreshMapFeatureProps();
+    refreshClassOverlayIfActive();
     clearMapSelection();
 }
 
@@ -1762,6 +2066,7 @@ async function mapBulkUnassign() {
         setMapTileProps(p, { status: newStatus, paused: false });
     }
     refreshMapFeatureProps();
+    refreshClassOverlayIfActive();
     clearMapSelection();
 }
 
@@ -1796,6 +2101,7 @@ async function mapBulkBlock() {
         if (p) setMapTileProps(p, { blocked_from: p.status, status: "blocked", paused: false });
     }
     refreshMapFeatureProps();
+    refreshClassOverlayIfActive();
     clearMapSelection();
 }
 
@@ -1831,24 +2137,44 @@ async function mapBulkUnblock() {
         if (p) setMapTileProps(p, { status: p.blocked_from || "pending", paused: false, blocked_from: null });
     }
     refreshMapFeatureProps();
+    refreshClassOverlayIfActive();
     clearMapSelection();
 }
 
 
 async function renderProblems(root) {
-    const problems = await apiGet("/api/admin/tiles/problems");
-    root.innerHTML = "<h3>Tiles com problema</h3>";
+    root.innerHTML = `
+        <div class="filter-bar">
+            <h3 style="margin:0 var(--space-3) 0 0;">Tiles com problema</h3>
+            <label id="problems-project-filter-wrap" class="hidden">Projeto
+                <select id="problems-project-filter"></select>
+            </label>
+        </div>
+        <div id="problems-list"></div>
+    `;
+    _wireTabProjectFilter({
+        wrapId: "problems-project-filter-wrap",
+        selectId: "problems-project-filter",
+        allowAll: true,
+    });
+    const list = document.getElementById("problems-list");
+    const problems = await apiGet(withProjectParam("/api/admin/tiles/problems", currentProjectId));
     if (!problems.length) {
         const p = document.createElement("p");
         p.className = "empty-state";
-        p.textContent = "Nenhum problema reportado. 🎉";
-        root.appendChild(p);
+        p.textContent = currentProjectId == null
+            ? "Nenhum problema reportado em nenhum projeto. 🎉"
+            : "Nenhum problema reportado neste projeto. 🎉";
+        list.appendChild(p);
         return;
     }
     const table = document.createElement("table");
     table.className = "admin-table";
     const thead = document.createElement("thead");
-    thead.innerHTML = "<tr><th>ID</th><th>Nome</th><th>Nota</th><th>Reportado em</th><th>Ações</th></tr>";
+    // Column "Projeto" surfaces the owning project — most useful in the
+    // cross-project view, but harmless when filtered (still tells the admin
+    // which project they're acting on).
+    thead.innerHTML = "<tr><th>ID</th><th>Projeto</th><th>Nome</th><th>Nota</th><th>Reportado em</th><th>Ações</th></tr>";
     table.appendChild(thead);
     const tbody = document.createElement("tbody");
     for (const p of problems) {
@@ -1859,85 +2185,176 @@ async function renderProblems(root) {
             btn("Resetar", () => resetOne(p.id)),
             btn("Excluir", () => deleteOne(p.id, p.name), "danger"),
         );
-        tr.append(td(p.id), td(p.name), td(p.problem_note || ""), td(fmtDate(p.reported_at)), tdAct);
+        const projectCell = p.project_name
+            || projectsById[p.project_id]?.name
+            || `#${p.project_id}`;
+        tr.append(
+            td(p.id),
+            td(projectCell),
+            td(p.name),
+            td(p.problem_note || ""),
+            td(fmtDate(p.reported_at)),
+            tdAct,
+        );
         tbody.appendChild(tr);
     }
     table.appendChild(tbody);
-    root.appendChild(table);
+    list.appendChild(table);
+}
+
+// User-level role labels (just two: regular user vs admin). "Revisor" is no
+// longer a property here — it lives in project membership.
+const _ROLE_LABELS = { operator: "Usuário", admin: "Administrador" };
+const _roleLabel = (r) => _ROLE_LABELS[r] || r;
+
+// Sort state survives re-renders so toggling active / changing role keeps the
+// admin's chosen ordering. Default: id ascending (creation order).
+let _usersSortKey = "id";
+let _usersSortDir = "asc";
+
+// Each entry maps a column key → (user → comparable value). Localized labels
+// stay in `_USER_COLUMNS` to keep header markup and sort logic in sync.
+const _USER_COLUMNS = [
+    { key: "id",         label: "ID",        accessor: u => u.id,                    type: "num" },
+    { key: "username",   label: "Usuário",   accessor: u => u.username,              type: "str" },
+    { key: "role",       label: "Papel",     accessor: u => _roleLabel(u.role),      type: "str" },
+    { key: "active",     label: "Ativo",     accessor: u => (u.active ? 1 : 0),      type: "num" },
+    { key: "created_at", label: "Criado em", accessor: u => u.created_at || "",      type: "str" },
+];
+
+function _sortUsers(rows) {
+    const col = _USER_COLUMNS.find(c => c.key === _usersSortKey);
+    if (!col) return rows;
+    const dir = _usersSortDir === "asc" ? 1 : -1;
+    return [...rows].sort((a, b) => {
+        const va = col.accessor(a);
+        const vb = col.accessor(b);
+        if (col.type === "num") return ((va || 0) - (vb || 0)) * dir;
+        return String(va).localeCompare(String(vb), "pt-BR") * dir;
+    });
 }
 
 async function renderUsers(root) {
     const users = await apiGet("/api/admin/users");
     root.innerHTML = `
-        <h3>Criar usuário</h3>
-        <form id="form-user" style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;">
-            <input type="text" id="nu-username" placeholder="username" autocomplete="username" required>
-            <input type="password" id="nu-password" placeholder="senha (>= 6)" autocomplete="new-password" required minlength="6">
-            <select id="nu-role"><option value="operator">operator</option><option value="admin">admin</option></select>
-            <button type="submit" class="primary">Criar</button>
-        </form>
-        <h3>Usuários</h3>
+        <div class="users-header">
+            <h3>Usuários</h3>
+            <button id="btn-new-user" class="primary" type="button">+ Novo usuário</button>
+        </div>
+        <div id="users-table-host"></div>
     `;
-    document.getElementById("form-user").addEventListener("submit", async (ev) => {
-        ev.preventDefault();
-        const btn = ev.target.querySelector("button[type=submit]");
-        if (btn.disabled) return;
-        btn.disabled = true;
-        try {
-            await apiPostJson("/api/admin/users", {
-                username: document.getElementById("nu-username").value,
-                password: document.getElementById("nu-password").value,
-                role: document.getElementById("nu-role").value,
-            });
-            showToast("Usuário criado.", "success");
-            selectTab("users");
-        } catch (e) { showToast(`Erro: ${e.message}`, "error"); btn.disabled = false; }
-    });
+    document.getElementById("btn-new-user").addEventListener("click", openCreateUserModal);
+    _drawUsersTable(users);
+}
+
+function _drawUsersTable(users) {
+    const host = document.getElementById("users-table-host");
+    if (!host) return;
+    host.innerHTML = "";
     const table = document.createElement("table");
-    table.className = "admin-table";
+    table.className = "admin-table sortable";
     const thead = document.createElement("thead");
-    thead.innerHTML = "<tr><th>ID</th><th>Usuário</th><th>Role</th><th>Ativo</th><th>Revisor</th><th>Criado em</th><th>Ações</th></tr>";
+    const trh = document.createElement("tr");
+    for (const col of _USER_COLUMNS) {
+        const th = document.createElement("th");
+        th.textContent = col.label
+            + (_usersSortKey === col.key ? (_usersSortDir === "asc" ? " ▲" : " ▼") : "");
+        th.style.cursor = "pointer";
+        th.title = "Clique para ordenar";
+        th.setAttribute("role", "button");
+        th.tabIndex = 0;
+        const flip = () => {
+            if (_usersSortKey === col.key) {
+                _usersSortDir = _usersSortDir === "asc" ? "desc" : "asc";
+            } else {
+                _usersSortKey = col.key;
+                _usersSortDir = col.type === "num" ? "desc" : "asc";
+            }
+            _drawUsersTable(users);
+        };
+        th.addEventListener("click", flip);
+        th.addEventListener("keydown", (ev) => {
+            if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); flip(); }
+        });
+        trh.appendChild(th);
+    }
+    // Final non-sortable "Ações" column.
+    const thAct = document.createElement("th");
+    thAct.textContent = "Ações";
+    trh.appendChild(thAct);
+    thead.appendChild(trh);
     table.appendChild(thead);
+
     const tbody = document.createElement("tbody");
-    for (const u of users) {
+    for (const u of _sortUsers(users)) {
         const tr = document.createElement("tr");
         const tdAct = document.createElement("td");
+        // Admins can never be deactivated directly — they have to be demoted
+        // to "Usuário" first. We disable + explain instead of letting the
+        // backend 409 silently after a click.
         const actLabel = u.active ? "Desativar" : "Ativar";
-        tdAct.append(btn(actLabel, () => toggleActive(u.id, !u.active)));
-        if (u.role !== "admin") {
-            const rvLabel = u.can_review ? "Revogar revisão" : "Permitir revisão";
-            tdAct.append(btn(rvLabel, () => toggleCanReview(u.id, !u.can_review)));
+        const actBtn = btn(actLabel, () => toggleActive(u.id, !u.active));
+        if (u.role === "admin" && u.active) {
+            actBtn.disabled = true;
+            actBtn.title = "Administradores não podem ser desativados. Use \"Tornar usuário\" primeiro.";
         }
+        tdAct.append(actBtn);
         const newRole = u.role === "admin" ? "operator" : "admin";
-        const roleLabel = u.role === "admin" ? "Tornar operador" : "Tornar admin";
+        const roleLabel = u.role === "admin" ? "Tornar usuário" : "Tornar administrador";
         tdAct.append(btn(roleLabel, () => changeRole(u.id, u.username, newRole)));
-        // Admins are always reviewers (role check shortcuts can_review on the
-        // backend), so display "sim" regardless of the column value.
-        const isReviewer = u.role === "admin" || !!u.can_review;
-        tr.append(td(u.id), td(u.username), td(u.role),
-                  td(u.active ? "sim" : "não"), td(isReviewer ? "sim" : "não"),
+        tr.append(td(u.id), td(u.username), td(_roleLabel(u.role)),
+                  td(u.active ? "sim" : "não"),
                   td(fmtDate(u.created_at)), tdAct);
         tbody.appendChild(tr);
     }
     table.appendChild(tbody);
-    root.appendChild(table);
+    host.appendChild(table);
 }
 
-async function toggleCanReview(userId, canReview) {
+async function openCreateUserModal() {
+    const r = await promptForm({
+        title: "Criar usuário",
+        description: "O usuário pode entrar no sistema assim que for criado. Senhas têm no mínimo 6 caracteres.",
+        submitLabel: "Criar",
+        fields: [
+            { key: "username", label: "Nome de usuário", type: "text",
+              required: true, autocomplete: "username",
+              placeholder: "Ex: joao.silva", maxLength: 80 },
+            { key: "password", label: "Senha", type: "password",
+              required: true, minLength: 6, autocomplete: "new-password",
+              placeholder: "Mínimo 6 caracteres", maxLength: 200,
+              help: "Você poderá redefinir depois pela linha de comando." },
+            { key: "role", label: "Papel", type: "select",
+              required: true, defaultValue: "operator",
+              options: [
+                  { value: "operator", label: "Usuário" },
+                  { value: "admin", label: "Administrador" },
+              ],
+              help: "Administradores gerenciam projetos e usuários. \"Revisor\" é definido por projeto, não aqui." },
+        ],
+    });
+    if (!r.confirmed) return;
     try {
-        await apiPatchJson(`/api/admin/users/${userId}/can-review`, { can_review: canReview });
-        showToast(canReview ? "Revisor habilitado." : "Revisor revogado.", "success");
+        await apiPostJson("/api/admin/users", {
+            username: r.values.username.trim(),
+            password: r.values.password,
+            role: r.values.role,
+        });
+        _usersCache = null;  // tiles-tab dropdown must show the new user
+        showToast("Usuário criado.", "success");
         selectTab("users");
-    } catch (e) { showToast(`Erro: ${e.message}`, "error"); }
+    } catch (e) {
+        showToast(`Erro ao criar usuário: ${e.message}`, "error");
+    }
 }
 
 async function changeRole(userId, username, newRole) {
     const promoting = newRole === "admin";
     const r = await confirmDestructive({
-        title: promoting ? `Promover ${username} a admin?` : `Rebaixar ${username} a operador?`,
+        title: promoting ? `Promover ${username} a administrador?` : `Rebaixar ${username} a usuário?`,
         description: promoting
-            ? "O usuário ganhará acesso total ao painel administrativo (incluindo gerenciar usuários, resetar tiles e mudar roles)."
-            : "O usuário perderá o acesso ao painel administrativo. As atribuições de tiles em andamento são preservadas.",
+            ? "O usuário ganhará acesso ao painel administrativo (gerenciar projetos, usuários, exports). Não vira revisor automaticamente — isso é configurado por projeto."
+            : "O usuário perderá o acesso ao painel administrativo. As participações em projetos e tiles atribuídos são preservados.",
         ids: [userId],
         confirmLabel: promoting ? "Promover" : "Rebaixar",
         danger: !promoting,
@@ -1945,7 +2362,8 @@ async function changeRole(userId, username, newRole) {
     if (!r.confirmed) return;
     try {
         await apiPatchJson(`/api/admin/users/${userId}/role`, { role: newRole });
-        showToast(promoting ? "Usuário promovido a admin." : "Usuário rebaixado a operador.", "success");
+        _usersCache = null;  // role label changed; tiles-tab dropdown reads it
+        showToast(promoting ? "Promovido a administrador." : "Rebaixado a usuário.", "success");
         selectTab("users");
     } catch (e) { showToast(`Erro: ${e.message}`, "error"); }
 }
@@ -1953,6 +2371,7 @@ async function changeRole(userId, username, newRole) {
 async function toggleActive(userId, active) {
     try {
         await apiPatchJson(`/api/admin/users/${userId}/active`, { active });
+        _usersCache = null;  // tiles-tab dropdown filters out inactive users
         showToast(active ? "Usuário ativado." : "Usuário desativado.", "success");
         selectTab("users");
     } catch (e) { showToast(`Erro: ${e.message}`, "error"); }
@@ -1960,51 +2379,15 @@ async function toggleActive(userId, active) {
 
 
 // ---------- Maintenance ----------
-// Operational read-only view of MBTiles state + on-disk overlay cache, with a
-// single destructive action (wipe overlay cache). Editing config.yaml itself
-// stays out of band — class palette / mbtiles paths are restart-only and the
-// invariants aren't hot-reload safe.
-
-const _MBTILES_LABELS = {
-    primary: "Imagem principal (satélite)",
-    dsg: "Overlay DSG",
-    mapbiomas: "Overlay MapBiomas",
-};
-
-function _mbtilesCard(key, info) {
-    const title = _MBTILES_LABELS[key] || key;
-    if (!info.open) {
-        return `<div class="maint-card">
-            <h4>${escape(title)}</h4>
-            <p class="muted">Não configurado ou arquivo ausente.</p>
-        </div>`;
-    }
-    return `<div class="maint-card">
-        <h4>${escape(title)}</h4>
-        <dl class="maint-kv">
-            <dt>Status</dt><dd>aberto</dd>
-            <dt>Formato</dt><dd>${escape(info.format)}</dd>
-            <dt>Zooms</dt><dd>${info.min_zoom ?? "?"}–${info.max_zoom ?? "?"}</dd>
-            <dt>Arquivo</dt><dd><code>${escape(info.path || "")}</code></dd>
-        </dl>
-    </div>`;
-}
+// Operational view of the on-disk overlay cache. Domain config (layers,
+// palette, members) lives in /api/projects/* and is edited on the Projetos
+// tab — never duplicate it here. Heavier DB chores (recompute counts, verify,
+// backup) are CLI-only and documented in docs/funcionalidades.md.
 
 async function renderMaintenance(root) {
     root.innerHTML = `<div class="loading-text"><span class="loading"></span> Carregando…</div>`;
-    const data = await apiGet("/api/admin/maintenance/overview");
-    const cache = data.overlay_cache;
+    const { overlay_cache: cache } = await apiGet("/api/admin/maintenance/overview");
     root.innerHTML = `
-        <div class="maint-section">
-            <h3>Imagens (MBTiles)</h3>
-            <p class="muted">Configurado em <code>backend/config.yaml</code>; alterações exigem reiniciar o servidor.</p>
-            <div class="maint-grid">
-                ${_mbtilesCard("primary", data.mbtiles.primary)}
-                ${_mbtilesCard("dsg", data.mbtiles.dsg)}
-                ${_mbtilesCard("mapbiomas", data.mbtiles.mapbiomas)}
-            </div>
-        </div>
-
         <div class="maint-section">
             <h3>Cache do overlay administrativo</h3>
             <p class="muted">Tiles do mapa do admin são rasterizados sob demanda e armazenados aqui. A cache é invalidada automaticamente a cada mutação de máscara — limpe manualmente apenas após mudança de paleta ou importação em massa.</p>

@@ -4,6 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TileClass</title>
+    <!-- Inline SVG favicon: blue T on the slate background tone — keeps the
+         identity recognizable at 16px without shipping a binary asset. -->
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%231b2230'/%3E%3Cpath d='M7 9h18v4h-7v14h-4V13H7z' fill='%232563eb'/%3E%3C/svg%3E">
     <link rel="stylesheet" href="/static/vendor/maplibre/maplibre-gl.css">
     <link rel="stylesheet" href="/static/css/style.css">
     <script src="/static/vendor/maplibre/maplibre-gl.js"></script>
@@ -21,20 +24,26 @@
     </div>
 
     <!-- Editor view (operator) -->
-    <div id="view-editor" class="view hidden">
+    <div id="view-editor" class="view hidden" data-kind="raster">
         <header class="header">
             <div class="header-left">
                 <strong>TileClass</strong>
+                <!-- Active project chip is always visible so the operator can
+                     never wonder "which project is this tile from" — it's
+                     right next to the brand. The picker only appears when
+                     the user has more than one project to switch between. -->
+                <span id="editor-project-chip" class="editor-project-chip" title="Projeto ativo">
+                    <span id="editor-project-name">—</span>
+                    <span id="editor-project-kind" class="chip info"></span>
+                </span>
+                <button id="btn-switch-project" class="btn-link hidden" type="button"
+                        title="Trocar de projeto (Ctrl+P)">trocar</button>
                 <span id="mode-pill" class="mode-pill mode-classify">CLASSIFICAR</span>
                 <span id="tile-name-label"></span>
                 <span id="queue-progress" class="queue-progress"></span>
                 <span id="review-banner" class="review-banner hidden"></span>
             </div>
             <div class="header-right">
-                <label class="project-picker hidden" id="project-picker-wrap">
-                    Projeto
-                    <select id="project-picker" title="Trocar de projeto"></select>
-                </label>
                 <span>Hoje: <span id="today-count">0</span></span>
                 <span id="user-label"></span>
                 <button id="btn-go-admin" class="btn-view-toggle hidden" title="Voltar ao painel administrativo">→ Admin</button>
@@ -82,10 +91,10 @@
                     </div>
                 </div>
                 <div id="zoom-controls" class="zoom-controls">
-                    <button id="btn-zoom-in" title="Ampliar">+</button>
-                    <button id="btn-zoom-reset" title="Resetar zoom">⟲</button>
-                    <button id="btn-zoom-out" title="Reduzir">−</button>
-                    <span id="zoom-label" class="zoom-label">100%</span>
+                    <button id="btn-zoom-in" title="Ampliar" aria-label="Ampliar">+</button>
+                    <button id="btn-zoom-reset" title="Resetar zoom" aria-label="Resetar zoom">⟲</button>
+                    <button id="btn-zoom-out" title="Reduzir" aria-label="Reduzir">−</button>
+                    <span id="zoom-label" class="zoom-label" aria-live="polite">100%</span>
                 </div>
                 <div id="map-warning" class="map-warning hidden" role="alert">
                     ⚠ Satélite indisponível — classifique com cuidado.
@@ -97,7 +106,7 @@
                         <h2 id="idle-title">Pronto para começar</h2>
                         <p id="idle-message">Clique para receber um tile.</p>
                         <div class="no-tiles-actions">
-                            <button id="idle-start" class="primary" type="button" autofocus>Iniciar tile</button>
+                            <button id="idle-start" class="primary" type="button">Iniciar tile</button>
                             <button id="idle-logout" type="button">Sair</button>
                         </div>
                     </div>
@@ -109,7 +118,7 @@
                         <h2>Você tem um tile pausado</h2>
                         <p id="paused-resume-message">Deseja continuar?</p>
                         <div class="no-tiles-actions">
-                            <button id="paused-resume-continue" class="primary" type="button" autofocus>Continuar tile pausado</button>
+                            <button id="paused-resume-continue" class="primary" type="button">Continuar tile pausado</button>
                             <button id="paused-resume-logout" type="button">Sair</button>
                         </div>
                     </div>
@@ -164,7 +173,7 @@
         </footer>
 
         <!-- Operator action confirmation modal (submit/pause) -->
-        <div id="modal-action-confirm" class="modal hidden">
+        <div id="modal-action-confirm" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="action-confirm-title">
             <div class="modal-box">
                 <h2 id="action-confirm-title">Confirmar</h2>
                 <p id="action-confirm-message"></p>
@@ -176,7 +185,7 @@
         </div>
 
         <!-- Problem modal -->
-        <div id="modal-problem" class="modal hidden">
+        <div id="modal-problem" class="modal hidden" role="dialog" aria-modal="true" aria-label="Reportar problema">
             <div class="modal-box">
                 <h2>Reportar Problema</h2>
                 <textarea id="problem-note" rows="5" maxlength="2000"
@@ -193,7 +202,7 @@
         </div>
 
         <!-- Reviewer "request changes" modal -->
-        <div id="modal-request-changes" class="modal hidden">
+        <div id="modal-request-changes" class="modal hidden" role="dialog" aria-modal="true" aria-label="Pedir ajustes">
             <div class="modal-box">
                 <h2>Pedir ajustes</h2>
                 <p class="hint">A máscara é preservada e o tile volta para a fila de classificação com sua nota.</p>
@@ -232,7 +241,7 @@
         </nav>
         <main id="admin-content"></main>
 
-        <div id="modal-confirm" class="modal hidden">
+        <div id="modal-confirm" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
             <div class="modal-box">
                 <h2 id="confirm-title">Confirmar</h2>
                 <p id="confirm-description"></p>
@@ -249,7 +258,7 @@
             </div>
         </div>
 
-        <div id="modal-assign" class="modal hidden">
+        <div id="modal-assign" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="assign-title">
             <div class="modal-box">
                 <h2 id="assign-title">Atribuir tile</h2>
                 <p id="assign-description" class="hint"></p>
@@ -268,7 +277,39 @@
             </div>
         </div>
 
-        <div id="modal-view-tile" class="modal hidden">
+        <!-- Generic shell modal. Used by editors that need to render their
+             own DOM (table-based class/attribute editors, project forms with
+             kind-switching, etc.). promptForm covers flat field lists; this
+             covers everything else. -->
+        <div id="modal-shell" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="shell-title">
+            <div class="modal-box modal-box-md">
+                <h2 id="shell-title"></h2>
+                <div id="shell-body" class="modal-shell-body"></div>
+                <div class="modal-actions">
+                    <button id="shell-cancel">Cancelar</button>
+                    <button id="shell-ok" class="primary">Salvar</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Generic form modal. Fields are injected by promptForm() — keep
+             only the title/description/actions chrome here. Reused across
+             admin tabs (Usuários, Projetos, …) so adding a new entity dialog
+             stays a one-call change. -->
+        <div id="modal-form" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="form-title">
+            <div class="modal-box">
+                <h2 id="form-title"></h2>
+                <p id="form-description" class="hint"></p>
+                <div id="form-fields" class="modal-form-fields"></div>
+                <div class="hint">Ctrl+Enter para confirmar</div>
+                <div class="modal-actions">
+                    <button id="form-cancel">Cancelar</button>
+                    <button id="form-ok" class="primary">Salvar</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="modal-view-tile" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="view-tile-title">
             <div class="modal-box" style="min-width:800px">
                 <h2 id="view-tile-title">Tile</h2>
                 <div id="view-tile-body"></div>
@@ -279,7 +320,21 @@
         </div>
     </div>
 
-    <div id="toast" class="toast hidden"></div>
+    <!-- Toast: SR-announced non-disruptive feedback. `polite` lets it queue
+         after the current sentence; `atomic` re-reads the full message on
+         changes so a chained success/error isn't truncated. -->
+    <div id="toast" class="toast hidden" role="status" aria-live="polite" aria-atomic="true"></div>
+
+    <!-- Mobile block: editor + admin are desktop-only (canvas 768×768, dense
+         tables). CSS toggles this via :has() when viewport < 960px AND a
+         non-login view is active. Login itself still works on phones.
+         role=status (polite) so resize crossings don't keep interrupting SR. -->
+    <div class="viewport-too-narrow" role="status">
+        <div class="vtn-box">
+            <h2>Tela muito pequena</h2>
+            <p>O TileClass precisa de pelo menos 960&nbsp;px de largura para classificar tiles ou usar o painel administrativo. Use um desktop ou laptop.</p>
+        </div>
+    </div>
 
     <script type="module" src="/static/js/app.js"></script>
 </body>

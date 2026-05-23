@@ -144,6 +144,18 @@ def next_tile_preview(
     return t
 
 
+@router.get("/me/projects")
+def my_projects_workload(user: auth.CurrentUser = Depends(auth.get_current_user)):
+    """Project picker payload for the operator UI: every project the user
+    has access to, plus per-project counts of work available right now
+    (pending + assigned-to-me + review queue). Frontend renders the count
+    next to the project name and falls back to the next non-empty project
+    when /tiles/next returns 204."""
+    return tile_service.projects_with_user_workload(
+        user.id, is_admin=user.role == "admin",
+    )
+
+
 @router.get("/me/stats-today")
 def my_stats_today(
     project_id: int | None = Query(default=None),

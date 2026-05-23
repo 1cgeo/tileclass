@@ -5,11 +5,10 @@ from enum import Enum
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response
 from fastapi.responses import JSONResponse, FileResponse
 
-from .. import auth, admin_service, export_service, mask_tile_service, mbtiles_service, project_service
+from .. import auth, admin_service, export_service, mask_tile_service, project_service
 from ..models import (
     AssignTileIn, BulkAssignIn, BulkReportProblemIn, BulkTileIdsIn,
-    CreateUserIn, DashboardOut, ResetReasonIn, SetActiveIn, SetCanReviewIn,
-    SetRoleIn,
+    CreateUserIn, DashboardOut, ResetReasonIn, SetActiveIn, SetRoleIn,
 )
 
 router = APIRouter(prefix="/api/admin", tags=["admin"],
@@ -60,6 +59,19 @@ def admin_feature_distribution(project_id: int | None = Query(default=None, ge=1
 def admin_tile_class_distribution(project_id: int | None = Query(default=None, ge=1)):
     """Classification counterpart: tile counts per assigned class id."""
     return admin_service.tile_class_distribution(project_id=project_id)
+
+
+@router.get("/detection-distribution")
+def admin_detection_distribution(project_id: int | None = Query(default=None, ge=1)):
+    """Detection counterpart: bounding-box counts per assigned class id."""
+    return admin_service.detection_distribution(project_id=project_id)
+
+
+@router.get("/projects-stats")
+def admin_projects_stats():
+    """One row per project for the admin Projetos sidebar: kind, active flag,
+    tile/member counts, completion %. Built in a single query to avoid N+1."""
+    return admin_service.projects_stats()
 
 
 _TILE_SORT_KEYS = {
@@ -146,6 +158,11 @@ def admin_mask_tile(
     n = 1 << z
     if x >= n or y >= n:
         raise HTTPException(404, "tile out of range")
+    # Validate the project before rendering — otherwise a missing id silently
+    # gets a transparent PNG (the raster branch returns None for "no rows"),
+    # making "deleted project" indistinguishable from "empty project" client-side.
+    if project_service.get_project(project_id) is None:
+        raise HTTPException(404, detail={"error": "project_not_found"})
     png = mask_tile_service.get_tile(project_id, z, x, y)
     return Response(
         content=png,
@@ -287,12 +304,6 @@ def admin_set_user_active(body: SetActiveIn, user_id: int = Path(ge=1),
     return admin_service.set_user_active(user_id, body.active, u.id)
 
 
-@router.patch("/users/{user_id}/can-review")
-def admin_set_user_can_review(body: SetCanReviewIn, user_id: int = Path(ge=1),
-                              u: auth.CurrentUser = Depends(auth.require_admin)):
-    return admin_service.set_user_can_review(user_id, body.can_review, u.id)
-
-
 @router.patch("/users/{user_id}/role")
 def admin_set_user_role(body: SetRoleIn, user_id: int = Path(ge=1),
                         u: auth.CurrentUser = Depends(auth.require_admin)):
@@ -301,57 +312,12 @@ def admin_set_user_role(body: SetRoleIn, user_id: int = Path(ge=1),
 
 # ---------- Maintenance ----------
 
-def _layer_info(project_id: int, layer: str) -> dict:
-    """Per-layer status for the maintenance overview: not-configured,
-    remote (Martin / TileServer-GL URL), configured-but-broken, or open
-    with reader metadata."""
-    proj = project_service.get_project(project_id)
-    if not proj:
-        return {"open": False, "configured": False}
-    src = project_service.layer_path(proj, layer)
-    if not src:
-        return {"open": False, "configured": False}
-    if project_service.is_remote_layer(src):
-        return {"open": True, "configured": True, "remote": True, "path": src}
-    reader = mbtiles_service.get_reader(project_id, layer)
-    if reader is None or not reader.is_open():
-        return {"open": False, "configured": True, "path": src}
-    lo, hi = reader.zoom_range()
-    p = reader.path()
-    return {
-        "open": True,
-        "configured": True,
-        "format": reader.tile_format(),
-        "min_zoom": lo,
-        "max_zoom": hi,
-        "path": str(p) if p else None,
-    }
-
-
 @router.get("/maintenance/overview")
 def admin_maintenance_overview():
-    """State of mbtiles readers (per project × layer) + size/contents of the
-    on-disk overlay cache. Powers the admin Manutenção tab; safe to poll."""
-    from ..database import connect
-    conn = connect()
-    try:
-        rows = conn.execute(
-            "SELECT id, name FROM projects WHERE active=1 ORDER BY id"
-        ).fetchall()
-    finally:
-        conn.close()
-    projects_layers = {
-        r["id"]: {
-            "name": r["name"],
-            "layers": {layer: _layer_info(r["id"], layer)
-                       for layer in project_service.LAYER_KEYS},
-        }
-        for r in rows
-    }
-    return {
-        "projects": projects_layers,
-        "overlay_cache": mask_tile_service.cache_stats(),
-    }
+    """Size/contents of the on-disk overlay cache. Powers the admin Manutenção
+    tab; safe to poll. Per-project layer state lives in /api/projects/* (and
+    is edited on the Projetos tab) — don't surface it here."""
+    return {"overlay_cache": mask_tile_service.cache_stats()}
 
 
 @router.post("/maintenance/overlay-cache/clear")

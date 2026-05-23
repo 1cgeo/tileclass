@@ -321,3 +321,160 @@ def test_cache_is_isolated_per_project(app_env):
     assert ((op2[:, 0] > 200) & (op2[:, 1] < 80) & (op2[:, 2] > 200)).any()  # magenta in p2
     # The two cache files are distinct.
     assert mts.cache_path(1) != mts.cache_path(2)
+
+
+# ---- Per-project clear / delete cache ---------------------------------------
+
+def _cache_row_count(pid):
+    import sqlite3
+    path = mts.cache_path(pid)
+    if not path.exists():
+        return 0
+    conn = sqlite3.connect(str(path))
+    try:
+        return conn.execute("SELECT COUNT(*) FROM tiles").fetchone()[0]
+    finally:
+        conn.close()
+
+
+def test_clear_cache_for_project_isolated(app_env):
+    """clear_cache_for_project wipes only the target project; other projects
+    keep their cached rows. Mirrors the cross-project isolation that already
+    exists at render time."""
+    from tests.conftest import _seed_test_project
+    conn = connect()
+    try:
+        _seed_test_project(conn)
+        conn.execute(
+            "INSERT INTO projects(id,name,kind,tile_px,meters_per_pixel,"
+            "mask_complete_required,primary_mbtiles,active,created_at) "
+            "VALUES (2,'p2','raster',256,2.5,1,'',1,'2026-01-01T00:00:00+00:00')"
+        )
+        conn.execute(
+            "INSERT INTO project_classes(project_id,class_id,name,color,ordering) "
+            "VALUES (2,1,'alvo','#ff00ff',0)"
+        )
+    finally:
+        conn.close()
+    # Populate both caches (one empty-region row each is enough).
+    mts.get_tile(1, 14, 100, 100)
+    mts.get_tile(2, 14, 100, 100)
+    assert _cache_row_count(1) == 1
+    assert _cache_row_count(2) == 1
+
+    deleted = mts.clear_cache_for_project(1)
+    assert deleted == 1
+    assert _cache_row_count(1) == 0
+    assert _cache_row_count(2) == 1, "sibling project's cache must survive"
+
+
+def test_clear_cache_for_project_noop_when_missing(app_env):
+    """A project with no cache file yet returns 0 — silent no-op."""
+    assert mts.clear_cache_for_project(999) == 0
+
+
+def test_delete_cache_for_project_removes_file(app_env):
+    """delete_cache_for_project nukes the .mbtiles file (and WAL siblings) so
+    a deleted project doesn't leak disk."""
+    mts.get_tile(_PID, 14, 100, 100)
+    path = mts.cache_path(_PID)
+    assert path.exists()
+    mts.delete_cache_for_project(_PID)
+    assert not path.exists()
+
+
+# ---- Project mutation → overlay invalidation --------------------------------
+
+def _seed_project_then_populate_cache():
+    """Common arrange: seed default project + cache one rendered row + one
+    empty row. Returns (pid, z, x_classified, y_classified, x_empty, y_empty)."""
+    _insert_classified("t1", _BBOX, fill_class=1)
+    z, x, y = _wm_tile_for(_BBOX, 14)
+    mts.get_tile(_PID, z, x, y)            # populated row
+    mts.get_tile(_PID, 14, 100, 100)       # empty row
+    return _PID, z, x, y, 100, 100
+
+
+def test_set_classes_clears_overlay_cache(app_env, admin_user):
+    """Recoloring/renaming classes must drop cached PNGs — they bake the LUT
+    into the bytes, so without invalidation the admin keeps seeing the old
+    colors. (Class IDs can't be removed while tiles exist; we test rename.)"""
+    from backend import project_service
+    pid, *_ = _seed_project_then_populate_cache()
+    assert _cache_row_count(pid) >= 1
+    new_classes = [
+        {"id": 1, "name": "Água renomeada", "color": "#377eb8"},
+        {"id": 2, "name": "Área edificada", "color": "#e41a1c"},
+        {"id": 3, "name": "Floresta", "color": "#4daf4a"},
+        {"id": 4, "name": "Campo", "color": "#ffff33"},
+        {"id": 5, "name": "Cultivo", "color": "#984ea3"},
+        {"id": 6, "name": "Terreno exposto", "color": "#ff7f00"},
+    ]
+    project_service.set_classes(pid, new_classes, updated_by=admin_user["id"])
+    assert _cache_row_count(pid) == 0
+
+
+def test_set_attributes_clears_overlay_cache(app_env, admin_user):
+    """Vector overlays color by attribute schema (direction → preset, else
+    first enum → palette). Schema change ⇒ stale overlay colors."""
+    from backend import project_service
+    conn = connect()
+    try:
+        conn.execute(
+            "INSERT INTO projects(id,name,kind,tile_px,meters_per_pixel,"
+            "mask_complete_required,primary_mbtiles,active,created_at) "
+            "VALUES (3,'v1','vector',256,2.5,0,'',1,'2026-01-01T00:00:00+00:00')"
+        )
+        conn.execute(
+            "INSERT INTO project_attributes(project_id,key,label,type,required,options_json,ordering) "
+            "VALUES (3,'kind','Tipo','enum',0,'[\"a\",\"b\"]',0)"
+        )
+    finally:
+        conn.close()
+    mts.get_tile(3, 14, 100, 100)
+    assert _cache_row_count(3) == 1
+    project_service.set_attributes(3, [
+        {"key": "kind", "label": "Tipo", "type": "enum",
+         "required": False, "options": ["a", "b", "c"]},
+    ], updated_by=admin_user["id"])
+    assert _cache_row_count(3) == 0
+
+
+def test_update_project_layer_change_clears_cache(app_env, admin_user):
+    """Swapping primary_mbtiles or geometry flips the raster pipeline output —
+    cached PNGs are no longer faithful renders."""
+    from backend import project_service
+    pid, *_ = _seed_project_then_populate_cache()
+    assert _cache_row_count(pid) >= 1
+    # Use a remote-URL value to skip mbtiles-on-disk validation; any swap is
+    # enough to prove the invalidation fires.
+    project_service.update_project(
+        pid,
+        fields={"primary_mbtiles": "https://example.com/{z}/{x}/{y}.png"},
+        updated_by=admin_user["id"],
+    )
+    assert _cache_row_count(pid) == 0
+
+
+def test_update_project_non_layer_field_keeps_cache(app_env, admin_user):
+    """Renaming the project (or any field that doesn't affect rendering) must
+    NOT bust the overlay cache — that would re-render needlessly on every
+    cosmetic edit."""
+    from backend import project_service
+    pid, *_ = _seed_project_then_populate_cache()
+    before = _cache_row_count(pid)
+    assert before >= 1
+    project_service.update_project(
+        pid,
+        fields={"description": "novo texto"},
+        updated_by=admin_user["id"],
+    )
+    assert _cache_row_count(pid) == before
+
+
+def test_endpoint_404_for_missing_project(client, admin_user):
+    """Endpoint must distinguish a deleted/inexistent project from an empty
+    project — otherwise a typo in the URL silently gets a transparent PNG."""
+    t = token(client, admin_user["username"], admin_user["password"])
+    r = client.get("/api/admin/mask-tiles/999/14/100/100.png", headers=h(t))
+    assert r.status_code == 404
