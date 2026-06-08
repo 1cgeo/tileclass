@@ -110,6 +110,11 @@ const ctxCursor = canvasCursor.getContext("2d");
 // via setTileGeometry — the editor handles operators with multiple projects
 // at different sizes.
 let maskImageData = ctxMask.createImageData(TILE, TILE);
+// Uint32 view over maskImageData's pixel buffer for fast per-pixel writes in
+// writeMaskPixels. MUST be rebuilt whenever maskImageData is reallocated
+// (setTileGeometry) — a stale view writes to an orphaned buffer and the mask
+// silently stops rendering on screen (the underlying `mask` array stays valid).
+let maskData32 = new Uint32Array(maskImageData.data.buffer);
 const offCanvas = document.createElement("canvas");
 offCanvas.width = TILE; offCanvas.height = TILE;
 const offCtx = offCanvas.getContext("2d");
@@ -119,6 +124,7 @@ function setTileGeometry(px) {
     PIXELS = TILE * TILE;
     SCALE = DISPLAY / TILE;
     maskImageData = ctxMask.createImageData(TILE, TILE);
+    maskData32 = new Uint32Array(maskImageData.data.buffer);
     offCanvas.width = TILE; offCanvas.height = TILE;
     mask = new Uint8Array(PIXELS);
     filledCount = 0;
@@ -915,7 +921,6 @@ function renderMaskFull() {
     blitMask();
 }
 
-const maskData32 = new Uint32Array(maskImageData.data.buffer);
 function writeMaskPixels(x0, y0, x1, y1) {
     for (let y = y0; y < y1; y++) {
         const row = y * TILE;

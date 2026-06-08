@@ -538,12 +538,13 @@ input[type="range"] {
     touch-action: none;
 }
 #canvas-viewport.space-held #canvas-cursor { pointer-events: none; }
-/* T-hold (DSG) / Y-hold (MapBiomas): hide user mask/grid so the categorical
-   overlay (rendered by MapLibre) shows clean. */
-#canvas-viewport.dsg-held #canvas-mask,
-#canvas-viewport.mb-held #canvas-mask,
-#canvas-viewport.dsg-held #canvas-grid,
-#canvas-viewport.mb-held #canvas-grid { visibility: hidden; }
+/* T-hold (ref_primary) / Y-hold (ref_secondary): hide user mask/grid so the
+   reference-mask overlay (rendered by MapLibre) shows clean. Class names must
+   match `${key}-held` toggled in editor.js setOverlayHold(). */
+#canvas-viewport.ref_primary-held #canvas-mask,
+#canvas-viewport.ref_secondary-held #canvas-mask,
+#canvas-viewport.ref_primary-held #canvas-grid,
+#canvas-viewport.ref_secondary-held #canvas-grid { visibility: hidden; }
 /* Paint area highlight — bright border on the 256x256 area, plus an outer
    dim wash so the context imagery is visibly "read-only". */
 #paint-bounds {
