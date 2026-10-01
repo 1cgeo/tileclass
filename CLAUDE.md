@@ -70,13 +70,13 @@ Mapa completo em [`docs/sistema.md` §3](docs/sistema.md). Pontos de entrada que
 ## Invariantes do domínio
 
 - **Geometria do tile (per-projeto):** `projects.tile_px` (qualquer inteiro 1..4096) × `projects.meters_per_pixel > 0`; `tile_meters = tile_px × meters_per_pixel`. Default seed = 256 × 2.5 = 640 m. Admin escolhe livre. Cada tile é definido **pelo centro geodésico**; `geo.bbox_from_center(lat, lon, tile_meters)` usa `pyproj.Geod` (WGS84). Schema de `tiles` tem apenas `bbox_*`. **Imutável após o primeiro tile** — `update_project` rejeita com 409 `tile_geometry_locked`.
-- **Adjacência sem gap:** `offset_center(lat, lon, dx, dy, tile_meters)` caminha `dx*tile_meters`/`dy*tile_meters` por geodésica, garantindo que tiles vizinhos do `--block NxN` compartilhem arestas (gap < 1 mm, validado por teste).
+- **Adjacência sem gap:** `offset_center(lat, lon, dx, dy, tile_meters)` caminha `dx*tile_meters`/`dy*tile_meters` por geodésica, garantindo que tiles vizinhos do `--block NxN` compartilhem arestas (conferido em `test_cli_scripts.py` e `test_tile_ingest.py`).
 - **Fonte de verdade da máscara:** `Uint8Array(tile_px²)` no cliente (re-alocado em `setTileGeometry()`). Valores válidos: IDs em `project_classes[project_id]` + `255` (não preenchido). `mask_utils.validate_partial(raw, allowed_ids, tile_px=...)` recebe os IDs e o tamanho explicitamente; `validate_submission(...)` usa o `mask_complete_required` do projeto.
 - **PNG do backend:** banda única (grayscale "L"), 8 bits, `tile_px × tile_px`. `encode_mask`/`decode_mask` recebem `tile_px` explicitamente.
 - **Protocolo wire:** frontend envia **raw bytes** (Uint8Array, `tile_px²` bytes) no body do classify/review; nunca PNG. Backend resolve `tile_px` via `project_for_tile()` antes de validar tamanho.
 - **Submissão raster:** rejeitar se houver `255` no array (quando `mask_complete_required`). Resposta de erro traz a contagem.
 - **Máquina de estados de tile:** `pending → in_progress → classified → in_review → reviewed`; qualquer estado `→ problem`; `problem → pending` e `reviewed → in_review` são admin. Admin pode bloquear via `pending|classified|reviewed → blocked` (guarda original em `blocked_from`) e desbloquear. `in_progress`/`in_review`/`problem` **não** podem ser bloqueados.
-- **Export GeoTIFF:** `rasterio.transform.from_bounds(west, south, east, north, tile_px, tile_px)` com `crs=EPSG:4326`. Pixel = `meters_per_pixel` na latitude do centro (validado para 20 pontos mundiais em `test_raster_worldwide.py`).
+- **Export GeoTIFF:** `rasterio.transform.from_bounds(west, south, east, north, tile_px, tile_px)` com `crs=EPSG:4326`. Pixel = `meters_per_pixel` na latitude do centro.
 
 ## Regras críticas de backend
 
@@ -168,9 +168,8 @@ Três camadas. Todas devem passar antes de commitar:
 - Rate limit entre logins: `auth.reset_rate_limits()` antes de cada login quando >5 no mesmo teste.
 - Concorrência crítica: `test_concurrent_10_operators_no_duplicates` (10 threads pending), `test_10_reviewers_race_on_classified_queue` (9 reviewers simultâneos na fila de revisão).
 - Invariantes de domínio com teste próprio: `test_auth_invariants` (bcrypt cost≥12, JWT TTL 8h/24h, forgery, typ access↔refresh, escalação via claim), `test_authz_crossuser` (bypass de `/next`, POST cross-user, gate admin), `test_state_machine` (todas transições + ilegais), `test_rate_limit_real` (sem reset), `test_dashboard_real` (atua antes de conferir — não-tautológico, inclui pareamento assign→classify/review), `test_mask_roundtrip_strong` (padrões não-uniformes).
-- **Invariantes geométricas (`test_geo.py`):** tile sempre 640m×640m em qualquer latitude (equador → -70°), pixel = 2.5m em ambos eixos, bbox simétrica, adjacência sem gap, bloco 3x3 cobre exatamente 1920m, `from_bounds` do rasterio bate com 2.5m.
-- **Rasters mundiais (`test_raster_worldwide.py`):** 20 pontos (equador, trópicos, NY, Tóquio, Moscou, Tromsø, McMurdo/Antártica) geram GeoTIFF real pela mesma pipeline do `export_tiles._write_geotiff`, reabrem com `rasterio` e validam CRS=EPSG:4326, bounds, transform, pixel em metros, e `dataset.xy()` retornando ao centro. Um teste reverso prova que **span em graus encolhe com a latitude**.
-- **PROJ no Windows:** existem 3 instalações concorrentes (PostgreSQL/PostGIS, pyproj, rasterio) com versões diferentes de `proj.db`. `test_raster_worldwide.py` força `PROJ_LIB=PROJ_DATA=<rasterio>/proj_data` no topo do arquivo **antes** de qualquer op que toque CRS.
+- **Geometria do tile (`test_tile_geometry.py`):** colunas `tile_px`/`meters_per_pixel`, validação no POST, trava após o 1º tile, round-trip da máscara em `tile_px` arbitrário, `bbox_from_center` escalando com `tile_meters`. Adjacência do bloco NxN em `test_cli_scripts.py` e `test_tile_ingest.py`.
+- **PROJ no Windows:** existem 3 instalações concorrentes (PostgreSQL/PostGIS, pyproj, rasterio) com versões diferentes de `proj.db`. `mask_tile_service.py`, `scripts/build_mbtiles.py` e `scripts/export_tiles.py` apontam `PROJ_DATA`/`PROJ_LIB` para `<rasterio>/proj_data` no topo do módulo, **antes** de importar o rasterio.
 
 ### Frontend unit (`tests/frontend/*.test.js`, Vitest + jsdom)
 - `mask-core.test.js` testa `frontend/js/mask-core.js` (paint, Bresenham sem gaps, floodFill com fronteira, undo/redo byte-exato com Uint32Array, `screenToLogical` com rect deslocado/esticado, `validateSubmission` espelhando backend).

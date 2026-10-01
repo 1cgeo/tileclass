@@ -60,7 +60,7 @@
 - **bcrypt** cost = 12.
 - **Rate limit:** 5 tentativas / 60 s por IP, **persistido em SQLite** (`rate_limit`); cleanup amortizado (2%); desligável com `TILECLASS_DISABLE_RATE_LIMIT=1` (só E2E). `reset_rate_limits()` para testes.
 - **Blacklist/revogação:** tabela `token_blacklist` (jti, user_id, expires_at) + cache em processo; `logout` insere o jti; `get_current_user` rejeita jti blacklistado (`401 token revoked`).
-- **Papel global** (`users.role`): `operator` | `admin`. Flag global `users.can_review` (veto temporário de revisão). **Papel por projeto** (`project_members.role`): `operator` | `reviewer` | `admin` (tiers 0/1/2).
+- **Papel global** (`users.role`): `operator` | `admin`. A coluna `users.can_review` está morta (sempre 0, mantida só para não exigir ALTER destrutivo). **Papel por projeto** (`project_members.role`): `operator` | `reviewer` | `admin` (tiers 0/1/2).
 - **`get_current_user`** valida em ordem: token presente → assinatura/exp → `typ=="access"` → não-blacklistado → usuário existe e `active=1` → **role efetiva vem do DB** (token com role adulterado é ignorado — guard de escalação).
 - **`require_admin`** → 403 `admin only`. **`require_membership(project_id, user, min_role)`**: admin global sempre passa; não-membro → 403 `not_project_member`; abaixo do tier → 403 `insufficient_project_role`.
 
@@ -142,7 +142,7 @@ Transação `BEGIN IMMEDIATE` única, ordem:
 4. **Fila pending (prioridade 3):** `status='pending'` FIFO por id → `in_progress`, log `assign_classify`.
 5. Nada → `204`.
 
-Atomicidade garante que dois operadores nunca recebem o mesmo tile. **Pode revisar** sse admin global, OU `can_review=1` E membro com role reviewer/admin.
+Atomicidade garante que dois operadores nunca recebem o mesmo tile. **Pode revisar** sse membro do projeto com role `reviewer` (`_user_can_review_project`); admin global não revisa por ser admin.
 
 ### 5.2 Endpoints de fila/leitura
 
@@ -267,7 +267,7 @@ Lista tiles `problem` (id, nome, nota, reportado em). Ações: Ver, Resetar, Exc
 
 ### 8.4 Aba Usuários
 
-- Form criar usuário (username, senha ≥6, role). Tabela com toggles: Ativar/Desativar, Permitir/Revogar revisão (não-admin), Tornar admin/operador. **Guard do último admin** (não demover o último admin ativo via mudança de role).
+- Form criar usuário (username, senha ≥6, role). Tabela com toggles: Ativar/Desativar, Tornar admin/operador. **Guard do último admin** (não demover o último admin ativo via mudança de role).
 
 ### 8.5 Aba Projetos
 
@@ -364,13 +364,13 @@ Rodar como módulo (`python -m backend.scripts.X`). Helpers em `_common.py` (`re
 
 **Health:** `GET /api/health`.
 
-**Operador** (`/api`): `GET /tiles/next`, `/tiles/next-preview`, `/tiles/assigned`, `/tiles/queue-stats`, `/me/stats-today`, `/tiles/{id}`, `/tiles/{id}/history`, `/tiles/{id}/review-note`, `/tiles/{id}/image`, `/tiles/{id}/features`, `/tiles/{id}/classification`, `/tiles/{id}/satellite-thumbnail`; `POST /tiles/{id}/classify`, `/review`, `/report-problem`, `/request-changes`, `/pause`, `/resume`, `/heartbeat`.
+**Operador** (`/api`): `GET /tiles/next`, `/tiles/next-preview`, `/tiles/assigned`, `/tiles/queue-stats`, `/me/projects`, `/me/stats-today`, `/tiles/{id}`, `/tiles/{id}/history`, `/tiles/{id}/review-note`, `/tiles/{id}/image`, `/tiles/{id}/features`, `/tiles/{id}/classification`, `/tiles/{id}/satellite-thumbnail`; `POST /tiles/{id}/classify`, `/review`, `/report-problem`, `/request-changes`, `/pause`, `/resume`, `/heartbeat`.
 
 **Projetos** (`/api/projects`): `GET ""`, `GET /{id}`, `GET /{id}/xyz/{layer}/{z}/{x}/{y}.{ext}`.
 
-**Admin projetos** (`/api/admin/projects`): `POST ""`, `PATCH /{id}`, `DELETE /{id}`, `GET /{id}/export`, `POST /{id}/clone`, `PUT /{id}/classes`, `PUT /{id}/attributes`, `GET/POST /{id}/members`, `DELETE /{id}/members/{uid}`.
+**Admin projetos** (`/api/admin/projects`): `POST ""`, `PATCH /{id}`, `DELETE /{id}`, `GET /{id}/export`, `POST /{id}/export-jobs`, `POST /{id}/clone`, `POST /{id}/tiles`, `PUT /{id}/classes`, `PUT /{id}/attributes`, `GET/POST /{id}/members`, `DELETE /{id}/members/{uid}`.
 
-**Admin geral** (`/api/admin`, todos require_admin): `GET /dashboard`, `/class-distribution`, `/feature-distribution`, `/tile-class-distribution`, `/tiles` (+ `X-Total-Count`), `/tiles/{id}/thumbnail`, `/tiles/{id}/satellite-thumbnail`, `/tiles/problems`, `/tiles/map`, `/mask-tiles/{project_id}/{z}/{x}/{y}.png`; `POST /tiles/bulk/{reset,re-review,report-problem,unassign,block,unblock}`, `/tiles/assign`, `/tiles/{id}/{reset,assign,unassign,admin-pause,re-review,block,unblock}`, `DELETE /tiles/{id}`; `GET/POST /users`, `PATCH /users/{id}/{active,can-review,role}`; `GET /maintenance/overview`, `POST /maintenance/overlay-cache/clear`.
+**Admin geral** (`/api/admin`, todos require_admin): `GET /dashboard`, `/class-distribution`, `/feature-distribution`, `/tile-class-distribution`, `/detection-distribution`, `/projects-stats`, `/tiles` (+ `X-Total-Count`), `/tiles/{id}/thumbnail`, `/tiles/{id}/satellite-thumbnail`, `/tiles/problems`, `/tiles/map`, `/mask-tiles/{project_id}/{z}/{x}/{y}.png`; `POST /tiles/bulk/{reset,re-review,report-problem,unassign,block,unblock}`, `/tiles/assign`, `/tiles/{id}/{reset,assign,unassign,admin-pause,re-review,block,unblock}`, `DELETE /tiles/{id}`; `GET/POST /users`, `PATCH /users/{id}/{active,role}`; `GET /maintenance/overview`, `POST /maintenance/overlay-cache/clear`; `GET /export-jobs/{job_id}`, `GET /export-jobs/{job_id}/download`.
 
 ---
 

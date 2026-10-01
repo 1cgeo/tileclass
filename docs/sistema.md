@@ -50,7 +50,7 @@ tileclass/
 │   ├── mask_tile_service.py    # Cache mbtiles do overlay admin (rasteriza máscaras → XYZ)
 │   ├── mbtiles_service.py      # Pool LRU de readers por (project_id, layer)
 │   ├── geo.py                  # bbox_from_center, offset_center (pyproj.Geod WGS84)
-│   ├── tile_grid.py            # Helpers Web Mercator (build_mbtiles, import_cq)
+│   ├── tile_grid.py            # Helpers Web Mercator (build_mbtiles)
 │   ├── vector_utils.py         # parse/validate de GeoJSON + topologia (vector)
 │   ├── detection_utils.py      # parse/validate de bboxes (detection)
 │   └── scripts/                # create_admin, import_points, export_*, build_mbtiles, merge_db, verify_db, backup_db, recolor_mbtiles, recompute_class_counts
@@ -85,7 +85,7 @@ tileclass/
 └── requirements.txt
 ```
 
-**Convenção de paths grandes:** `.mbtiles` (GBs) ficam em `data_external/` na raiz; o `config.yaml` aponta com `../data_external/<arquivo>.mbtiles` (relativo a `backend/` por convenção do `_open_optional` no `main.py`). Mantém o pacote `backend/` enxuto.
+**Convenção de paths grandes:** `.mbtiles` (GBs) ficam em `data_external/` na raiz; os layers do projeto (configurados pela UI admin, gravados no banco) apontam com `../data_external/<arquivo>.mbtiles` (relativo a `backend/`). Mantém o pacote `backend/` enxuto.
 
 ## 4. O modelo de projetos
 
@@ -114,7 +114,7 @@ Cada campo aceita três formatos:
 ### 4.2 Membership e bloqueio
 
 - Operador só vê tiles do projeto onde é membro. Admins globais veem todos.
-- `users.can_review` virou um veto temporário: `False` impede review queue mesmo se a membership for `reviewer`. Será removido quando a UI completar a migração para roles por projeto.
+- **Quem revisa:** só o membro do projeto com role `reviewer` (`tile_service._user_can_review_project`). Admin global não revisa por ser admin — precisa ser adicionado ao projeto como revisor. A coluna `users.can_review` está morta (sempre 0), mantida no schema só para evitar um ALTER destrutivo em bancos existentes.
 - **Soft-disable:** `PATCH /api/admin/projects/{id}` com `active=False` mantém todos os dados mas `/next` e `/next-preview` retornam 409 `project_inactive`. Stats/dashboard continuam respondendo. Operador termina o tile que já tem antes do bloqueio.
 - **Hard-delete:** `DELETE /api/admin/projects/{id}` só funciona se o projeto não tem tiles. Caso contrário 409 `project_has_tiles` — desative em vez de excluir.
 
@@ -230,7 +230,7 @@ Cada tile é definido **pelo centro geodésico**; `geo.bbox_from_center(lat, lon
 
 **Imutável após o primeiro tile** — `update_project` rejeita mudanças com 409 `tile_geometry_locked`. Backend e scripts (import/export) lêem da row do projeto via `project_service.get_project()`.
 
-**Adjacência sem gap:** `offset_center(lat, lon, dx, dy, tile_meters)` caminha `dx*tile_meters` e `dy*tile_meters` por geodésica, garantindo que tiles vizinhos do `--block NxN` compartilhem arestas exatamente (gap < 1 mm, validado por teste em `test_geo.py`).
+**Adjacência sem gap:** `offset_center(lat, lon, dx, dy, tile_meters)` caminha `dx*tile_meters` e `dy*tile_meters` por geodésica, garantindo que tiles vizinhos do `--block NxN` compartilhem arestas (conferido em `test_cli_scripts.py` e `test_tile_ingest.py`).
 
 ## 7. Máquina de estados do tile
 
@@ -333,6 +333,6 @@ Atalhos não disparam quando há input/modal em foco. Vector/classification/dete
 ## 13. Notas operacionais
 
 - **`venv` no Windows:** sempre ative antes de rodar `uvicorn`/`pytest`/scripts. Alternativa sem ativar: `.\.venv\Scripts\python -m uvicorn ...`. Se o PowerShell bloquear `Activate.ps1`: `Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned`.
-- **PROJ no Windows:** existem 3 instalações concorrentes (PostgreSQL/PostGIS, pyproj, rasterio) com versões diferentes de `proj.db`. `test_raster_worldwide.py` força `PROJ_LIB=PROJ_DATA=<rasterio>/proj_data` no topo do arquivo **antes** de qualquer op que toque CRS.
+- **PROJ no Windows:** existem 3 instalações concorrentes (PostgreSQL/PostGIS, pyproj, rasterio) com versões diferentes de `proj.db`. `mask_tile_service.py`, `scripts/build_mbtiles.py` e `scripts/export_tiles.py` apontam `PROJ_DATA`/`PROJ_LIB` para `<rasterio>/proj_data` no topo do módulo, **antes** de importar o rasterio.
 - **404 de `maplibre-gl.js.map` é benigno.** O vendor inclui apenas `.js` e `.css`, não o `.map`. A diretiva `sourceMappingURL` no fim do `.js` faz o Chrome DevTools buscar o source map automaticamente (só com DevTools aberto). Ignorar no log.
-- **Onde colocar mbtiles grandes:** `data_external/` na raiz, apontado pelo `config.yaml` como `../data_external/<nome>.mbtiles`.
+- **Onde colocar mbtiles grandes:** `data_external/` na raiz, apontado pelos layers do projeto (UI admin) como `../data_external/<nome>.mbtiles`.
