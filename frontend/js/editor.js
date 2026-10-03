@@ -16,7 +16,7 @@ function expandBbox(bbox, factor) {
     const hw = (e - w) * factor / 2, hh = (n - s) * factor / 2;
     return [cx - hw, cy - hh, cx + hw, cy + hh];
 }
-import { hexToRgb, blobToImage, truncateName, kindLabel, withProjectParam } from "./utils.js";
+import { hexToRgb, blobToImage, truncateName, kindLabel, withProjectParam, icon, ICON_SPRITE, statusLabel } from "./utils.js";
 import { openModal } from "./admin/modals.js";
 import {
     paintAt as corePaintAt,
@@ -31,6 +31,7 @@ import {
     resolveShortcut, gridGeometry, canReusePreload, heartbeatNeedsResume,
     topmostOpenModal, isAnyModalOpen, modalCancelControl,
     KEY_TO_OVERLAY, MAX_NUMBER_SHORTCUTS,
+    fitZoom, queueSummary, initials, rasterSubmitState, readCanvasPalette, tileFacts,
 } from "./editor-core.js";
 import {
     enterClassificationTile, exitClassificationTile,
@@ -170,10 +171,26 @@ const ctxGrid = canvasGrid.getContext("2d");
 
 let _editorInitialized = false;
 
+// Theme-dependent canvas colors (see CANVAS_PALETTE_VARS in editor-core).
+let palette = {};
+function refreshCanvasPalette() {
+    const cs = getComputedStyle(document.getElementById("view-editor"));
+    palette = readCanvasPalette((name) => cs.getPropertyValue(name));
+}
+
+function renderUserBadge(user) {
+    document.getElementById("user-label").textContent = user.username;
+    const av = document.getElementById("user-avatar");
+    if (av) {
+        av.textContent = initials(user.username);
+        av.title = user.username;
+    }
+}
+
 export async function initEditor(user) {
     currentUser = user;
     if (_editorInitialized) {
-        document.getElementById("user-label").textContent = user.username;
+        renderUserBadge(user);
         await enterEditor();
         return;
     }
@@ -211,7 +228,8 @@ export async function initEditor(user) {
             },
         };
     }
-    document.getElementById("user-label").textContent = user.username;
+    renderUserBadge(user);
+    refreshCanvasPalette();
     // Drive #map-satellite size/offset from CONTEXT_FACTOR — keeps CSS in sync
     // when the constant is bumped without editing both files.
     document.getElementById("map-satellite").style.setProperty("--ctx", CONTEXT_FACTOR);
@@ -227,6 +245,21 @@ export async function initEditor(user) {
     // after every state mutation without importing this module (avoids the
     // circular import: editor.js already imports editor-classification.js).
     window.tcRefreshSubmit = refreshSubmitState;
+    // Canvas colors are token-driven: re-read and repaint on theme switch.
+    window.addEventListener("tc-themechange", () => {
+        refreshCanvasPalette();
+        blitMask();
+        drawGrid();
+    });
+    // Keep the paint area fitted to the stage while the operator hasn't
+    // zoomed/panned away from the fitted view.
+    let resizeRaf = 0;
+    window.addEventListener("resize", () => {
+        cancelAnimationFrame(resizeRaf);
+        resizeRaf = requestAnimationFrame(() => {
+            if (zoom === _fittedZoom && panX === 0 && panY === 0) resetView();
+        });
+    });
     _editorInitialized = true;
     await enterEditor();
 }
@@ -264,10 +297,17 @@ function _renderProjectHeader(projects) {
     if (nameEl) nameEl.textContent = proj?.name || "—";
     if (kindEl) {
         kindEl.textContent = kindLabel(proj?.kind);
-        kindEl.className = "chip info";
+        kindEl.className = "chip project-kind-chip";
+        kindEl.dataset.kind = proj?.kind || "";
     }
+    // Single project: the control stays as a read-only label (no chevron).
     const btn = document.getElementById("btn-switch-project");
-    if (btn) btn.classList.toggle("hidden", !projects || projects.length <= 1);
+    if (btn) {
+        const single = !projects || projects.length <= 1;
+        btn.disabled = single;
+        btn.classList.toggle("single", single);
+        btn.title = single ? "Projeto ativo" : "Trocar de projeto (Ctrl+P)";
+    }
 }
 
 async function _switchProject(newId, { autoLoadNext = false } = {}) {
@@ -295,6 +335,92 @@ async function _switchProject(newId, { autoLoadNext = false } = {}) {
     else await enterEditor();
 }
 
+// The generic shell modal (#modal-shell) lives inside #view-admin, which is
+// display:none while the editor is shown — a modal there would be invisible.
+// While the switcher is open it is hosted at <body> level, then put back.
+async function withVisibleShell(fn) {
+    const shell = document.getElementById("modal-shell");
+    if (!shell) return fn();
+    const parent = shell.parentNode, next = shell.nextSibling;
+    document.body.appendChild(shell);
+    shell.classList.add("editor-shell");
+    try {
+        return await fn();
+    } finally {
+        shell.classList.remove("editor-shell");
+        parent.insertBefore(shell, next);
+    }
+}
+
+function _switcherItem(p, list) {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = "project-switcher-item";
+    if (p.id === activeProjectId) item.classList.add("active", "current");
+    item.dataset.pid = String(p.id);
+    item.setAttribute("aria-pressed", String(p.id === activeProjectId));
+
+    const ic = document.createElement("span");
+    ic.className = "project-switcher-icon";
+    ic.appendChild(icon(p.kind === "classification" ? "tag" : "layers"));
+
+    const body = document.createElement("span");
+    body.className = "project-switcher-body";
+    const top = document.createElement("span");
+    top.className = "project-switcher-top";
+    const name = document.createElement("span");
+    name.className = "project-switcher-name";
+    name.textContent = p.name;
+    const kind = document.createElement("span");
+    kind.className = "chip project-kind-chip";
+    kind.dataset.kind = p.kind || "";
+    kind.textContent = kindLabel(p.kind);
+    top.append(name, kind);
+    if (p.id === activeProjectId) {
+        const cur = document.createElement("span");
+        cur.className = "project-switcher-current";
+        cur.textContent = "atual";
+        top.appendChild(cur);
+    }
+    const bottom = document.createElement("span");
+    bottom.className = "project-switcher-bottom";
+    const count = document.createElement("span");
+    count.className = "project-switcher-count" + (p.available > 0 ? "" : " empty");
+    count.textContent = p.available > 0
+        ? `${p.available} disponíve${p.available === 1 ? "l" : "is"}`
+        : "Sem trabalho no momento";
+    bottom.appendChild(count);
+    // Breakdown: what's pending vs already assigned vs awaiting review.
+    if (p.available > 0) {
+        const parts = [];
+        if (p.assigned_to_me) parts.push(`${p.assigned_to_me} atribuído${p.assigned_to_me === 1 ? "" : "s"} a você`);
+        if (p.pending) parts.push(`${p.pending} pendente${p.pending === 1 ? "" : "s"}`);
+        if (p.review_queue) parts.push(`${p.review_queue} para revisar`);
+        const detail = document.createElement("span");
+        detail.className = "project-switcher-detail";
+        detail.textContent = parts.join(" · ");
+        bottom.appendChild(detail);
+    }
+    body.append(top, bottom);
+
+    const check = document.createElement("span");
+    check.className = "project-switcher-check";
+    check.appendChild(icon("check"));
+
+    item.append(ic, body, check);
+    item.onclick = () => {
+        list.querySelectorAll(".project-switcher-item.active").forEach(el => {
+            el.classList.remove("active");
+            el.setAttribute("aria-pressed", "false");
+        });
+        item.classList.add("active");
+        item.setAttribute("aria-pressed", "true");
+    };
+    // Double-click picks and confirms in one go.
+    item.ondblclick = () => document.getElementById("shell-ok")?.click();
+    return item;
+}
+
 async function openSwitchProjectModal() {
     let workload;
     try {
@@ -304,65 +430,27 @@ async function openSwitchProjectModal() {
         return;
     }
     if (!workload.length) return;
-    const result = await openModal({
-        title: "Trocar projeto",
+    const result = await withVisibleShell(() => openModal({
+        title: "Trocar de projeto",
         size: "md",
-        submitLabel: "Ir",
+        submitLabel: "Abrir projeto",
         render: (host) => {
-            host.innerHTML = "";
+            host.replaceChildren();
+            const hint = document.createElement("p");
+            hint.className = "hint project-switcher-hint";
+            hint.textContent = "Escolha o projeto em que vai trabalhar. A fila e as classes mudam junto.";
             const list = document.createElement("div");
             list.className = "project-switcher-list";
-            host.appendChild(list);
-            for (const p of workload) {
-                const item = document.createElement("button");
-                item.type = "button";
-                item.className = "project-switcher-item";
-                if (p.id === activeProjectId) item.classList.add("active");
-                item.dataset.pid = String(p.id);
-                const top = document.createElement("div");
-                top.className = "project-switcher-top";
-                const name = document.createElement("span");
-                name.className = "project-switcher-name";
-                name.textContent = p.name;
-                const kind = document.createElement("span");
-                kind.className = "chip info";
-                kind.textContent = kindLabel(p.kind);
-                top.append(name, kind);
-                const bottom = document.createElement("div");
-                bottom.className = "project-switcher-bottom";
-                const count = document.createElement("span");
-                count.className = "project-switcher-count" + (p.available > 0 ? "" : " empty");
-                count.textContent = p.available > 0
-                    ? `${p.available} disponíve${p.available === 1 ? "l" : "is"}`
-                    : "sem trabalho";
-                bottom.appendChild(count);
-                // Surface the breakdown so the operator can see what's pending
-                // vs already assigned vs awaiting review.
-                if (p.available > 0) {
-                    const parts = [];
-                    if (p.assigned_to_me) parts.push(`${p.assigned_to_me} pra mim`);
-                    if (p.pending) parts.push(`${p.pending} pendentes`);
-                    if (p.review_queue) parts.push(`${p.review_queue} pra revisar`);
-                    const detail = document.createElement("span");
-                    detail.className = "project-switcher-detail";
-                    detail.textContent = parts.join(" · ");
-                    bottom.appendChild(detail);
-                }
-                item.append(top, bottom);
-                item.onclick = () => {
-                    list.querySelectorAll(".project-switcher-item.active")
-                        .forEach(el => el.classList.remove("active"));
-                    item.classList.add("active");
-                };
-                list.appendChild(item);
-            }
+            list.setAttribute("role", "list");
+            host.append(hint, list);
+            for (const p of workload) list.appendChild(_switcherItem(p, list));
         },
         onSubmit: (host) => {
             const sel = host.querySelector(".project-switcher-item.active");
             const pid = sel ? parseInt(sel.dataset.pid, 10) : null;
             return Number.isFinite(pid) ? { pid } : null;
         },
-    });
+    }));
     if (!result.confirmed) return;
     await _switchProject(result.payload.pid);
 }
@@ -471,8 +559,13 @@ async function loadTodayCount() {
 async function loadQueueStats() {
     try {
         const q = await apiGet(withProjectParam("/api/tiles/queue-stats", activeProjectId));
+        const s = queueSummary(q);
         const el = document.getElementById("queue-progress");
-        el.textContent = `${q.reviewed}/${q.total} revisados · ${q.classified}/${q.total} classificados`;
+        el.title = s.title;
+        el.classList.toggle("hidden", s.total === 0);
+        document.getElementById("queue-bar-reviewed").style.width = `${s.reviewedPct}%`;
+        document.getElementById("queue-bar-classified").style.width = `${s.classifiedOnlyPct}%`;
+        document.getElementById("queue-text").textContent = s.text;
     } catch {}
 }
 
@@ -497,31 +590,42 @@ function buildColorLut() {
 
 function buildClassPanel() {
     const ul = document.getElementById("class-list");
-    ul.innerHTML = "";
+    ul.replaceChildren();
     classes.forEach((c, i) => {
         const li = document.createElement("li");
         li.dataset.id = c.id;
+        li.setAttribute("role", "option");
+        li.setAttribute("aria-selected", "false");
+        li.title = i < MAX_NUMBER_SHORTCUTS ? `${c.name} (${i + 1})` : c.name;
         const sw = document.createElement("span");
         sw.className = "swatch"; sw.style.backgroundColor = c.color;
-        const name = document.createElement("span"); name.textContent = c.name;
-        const key = document.createElement("span"); key.className = "key";
-        if (i < MAX_NUMBER_SHORTCUTS) key.textContent = String(i + 1);
-        li.append(sw, name, key);
+        const name = document.createElement("span");
+        name.className = "name"; name.textContent = c.name;
+        li.append(sw, name);
+        if (i < MAX_NUMBER_SHORTCUTS) {
+            const key = document.createElement("span");
+            key.className = "kbd key"; key.textContent = String(i + 1);
+            li.appendChild(key);
+        }
         li.addEventListener("click", () => setActiveClass(c.id));
         ul.appendChild(li);
     });
+    const count = document.getElementById("class-count");
+    if (count) count.textContent = String(classes.length);
     if (classes.length) setActiveClass(classes[0].id);
 }
 
 function setActiveClass(id) {
     activeClass = id;
     document.querySelectorAll("#class-list li").forEach(li => {
-        li.classList.toggle("active", Number(li.dataset.id) === id);
+        const on = Number(li.dataset.id) === id;
+        li.classList.toggle("active", on);
+        li.setAttribute("aria-selected", String(on));
     });
-    // feedback: brief border flash on canvas stack
+    // feedback: brief border flash on canvas stack (class color is data)
     const stack = document.getElementById("canvas-stack");
     stack.style.transition = "box-shadow 80ms";
-    stack.style.boxShadow = `0 0 0 3px ${classesById[id]?.color || "#fff"} inset`;
+    stack.style.boxShadow = `0 0 0 3px ${classesById[id]?.color || "var(--accent)"} inset`;
     setTimeout(() => { stack.style.boxShadow = ""; }, 120);
 }
 
@@ -639,6 +743,41 @@ function exitActiveKindEditor() {
     exitClassificationTile();
 }
 
+// data-tile="open|none" on #view-editor: CSS quiets tile-bound chrome (review
+// callouts, footer actions, stage HUD) while no tile is open.
+function setTileOpen(open) {
+    document.getElementById("view-editor").dataset.tile = open ? "open" : "none";
+}
+
+// Right-panel "Detalhes do tile": status chip + center / footprint facts.
+function renderTileDetails(t) {
+    const facts = tileFacts(t, window.tileclassActiveProject);
+    const chip = document.getElementById("tile-status-chip");
+    if (chip) {
+        chip.className = t ? `chip ${t.status}` : "chip hidden";
+        chip.textContent = t ? statusLabel(t.status) : "";
+    }
+    for (const k of ["lat", "lon", "footprint", "resolution"]) {
+        const el = document.getElementById(`tile-fact-${k}`);
+        if (el) el.textContent = facts ? facts[k] : "—";
+    }
+}
+
+// Header tile identity: "#id" + name (mono). Cleared with null.
+function renderTileLabel(t) {
+    const el = document.getElementById("tile-name-label");
+    el.replaceChildren();
+    if (!t) { el.removeAttribute("title"); return; }
+    const id = document.createElement("span");
+    id.className = "tile-id";
+    id.textContent = `#${t.id}`;
+    const name = document.createElement("span");
+    name.className = "tile-name";
+    name.textContent = truncateName(t.name);
+    el.append(id, name);
+    el.title = `Tile ${t.name} (#${t.id})`;
+}
+
 async function loadTile(t, preloadedMask = null) {
     _tileReady = false;
     exitActiveKindEditor();
@@ -648,14 +787,17 @@ async function loadTile(t, preloadedMask = null) {
     hideNoTilesScreen();
     hideIdleScreen();
     hidePausedResumeScreen();
-    document.getElementById("tile-name-label").textContent = `Tile: ${truncateName(t.name)} (#${t.id})`;
+    renderTileLabel(t);
+    renderTileDetails(t);
+    setTileOpen(true);
     // Browser-tab title carries the tile id so the operator can find the right
     // tab when they have several open (review queue, multiple projects).
     document.title = `Tile #${t.id} — TileClass`;
     const reviewBanner = document.getElementById("review-banner");
     const modePill = document.getElementById("mode-pill");
     if (t.status === "in_review") {
-        reviewBanner.textContent = `Classificado por ${t.classified_by_username || "?"}`;
+        document.getElementById("review-banner-text").textContent =
+            `Classificado por ${t.classified_by_username || "?"}`;
         reviewBanner.classList.remove("hidden");
         if (modePill) {
             modePill.textContent = "REVISAR";
@@ -846,14 +988,19 @@ function recountFilled() {
     updateProgress();
 }
 
+const _pctFmt = new Intl.NumberFormat("pt-BR", { maximumFractionDigits: 1 });
 function updateProgress() {
-    document.getElementById("pixel-count").textContent = filledCount;
-    const pct = (100 * filledCount / PIXELS).toFixed(1);
-    document.getElementById("pixel-pct").textContent = pct;
+    document.getElementById("pixel-count").textContent = filledCount.toLocaleString("pt-BR");
+    const total = document.getElementById("pixel-total");
+    if (total) total.textContent = PIXELS.toLocaleString("pt-BR");
+    const pct = 100 * filledCount / PIXELS;
+    // Never round a nearly-complete mask up to "100".
+    const shown = filledCount < PIXELS ? Math.min(pct, 99.9) : 100;
+    document.getElementById("pixel-pct").textContent = _pctFmt.format(shown);
     const line = document.getElementById("progress-line");
     line.classList.toggle("complete", filledCount === PIXELS);
     const bar = document.getElementById("progress-bar-fill");
-    if (bar) bar.style.width = pct + "%";
+    if (bar) bar.style.width = pct.toFixed(2) + "%";
     const missing = PIXELS - filledCount;
     const missLine = document.getElementById("missing-line");
     const missCount = document.getElementById("missing-count");
@@ -872,11 +1019,12 @@ function updateProgress() {
 // path (driven by pixel counts) and the non-raster path (driven by validator
 // errors) end here so UX tweaks (label tone, classnames) only need editing
 // once.
-function _paintSubmit({ incomplete, label, title }) {
+function _paintSubmit({ incomplete, label, title, mode }) {
     const btn = document.getElementById("btn-submit");
     const labelEl = document.getElementById("submit-label");
     if (!btn || !labelEl) return;
     btn.classList.toggle("incomplete", incomplete);
+    btn.classList.toggle("is-review", mode === "review");
     labelEl.textContent = label;
     btn.title = title;
 }
@@ -886,20 +1034,10 @@ function _baseSubmitLabel() {
 }
 
 function updateSubmitButton(missing) {
-    const base = _baseSubmitLabel();
-    if (missing > 0 && maskCompleteRequired) {
-        _paintSubmit({
-            incomplete: true,
-            label: `Faltam ${missing.toLocaleString("pt-BR")} px`,
-            title: `Complete a máscara — faltam ${missing} pixels`,
-        });
-    } else {
-        const isReview = base === "Aprovar revisão";
-        _paintSubmit({
-            incomplete: false, label: base,
-            title: isReview ? "Aprovar esta revisão (Ctrl+S)" : "Submeter classificação (Ctrl+S)",
-        });
-    }
+    _paintSubmit(rasterSubmitState({
+        missing, maskCompleteRequired,
+        isReview: currentTile?.status === "in_review",
+    }));
 }
 
 // Classification drives their own state and don't go through updateProgress.
@@ -916,12 +1054,15 @@ function refreshSubmitState() {
     if (issues.length) {
         const first = issues[0];
         _paintSubmit({
-            incomplete: true,
+            incomplete: true, mode: "incomplete",
             label: first.length > 32 ? first.slice(0, 30) + "…" : first,
             title: issues.join("\n"),
         });
     } else {
-        _paintSubmit({ incomplete: false, label: base, title: base });
+        _paintSubmit({
+            incomplete: false, label: base, title: `${base} (Ctrl+S)`,
+            mode: base === "Aprovar revisão" ? "review" : "submit",
+        });
     }
 }
 
@@ -1012,13 +1153,15 @@ function blitMask() {
 }
 
 function drawMissingOverlay() {
-    ctxMask.fillStyle = "rgba(255, 0, 255, 0.85)";
+    ctxMask.fillStyle = palette.missing;
+    ctxMask.globalAlpha = 0.85;
     for (let y = 0; y < TILE; y++) {
         const row = y * TILE;
         for (let x = 0; x < TILE; x++) {
             if (mask[row + x] === 255) ctxMask.fillRect(x*SCALE, y*SCALE, SCALE, SCALE);
         }
     }
+    ctxMask.globalAlpha = 1;
 }
 
 function drawOutlines(overlay) {
@@ -1136,7 +1279,7 @@ function attachEvents() {
     window.addEventListener("mouseup", onMouseUp);
     canvasCursor.addEventListener("mouseleave", () => {
         ctxCursor.clearRect(0, 0, DISPLAY, DISPLAY);
-        document.getElementById("hover-class").textContent = "—";
+        clearHoverClass();
     });
     const viewport = document.getElementById("canvas-viewport");
     viewport.addEventListener("wheel", onWheel, { passive: false });
@@ -1163,15 +1306,19 @@ function attachEvents() {
     bs.addEventListener("input", () => {
         brushSizeIdx = Number(bs.value);
         document.getElementById("brush-size-label").textContent = BRUSH_SIZES[brushSizeIdx];
+        syncRangeFill(bs);
     });
     document.getElementById("brush-size-label").textContent = BRUSH_SIZES[brushSizeIdx];
+    syncRangeFill(bs);
 
     const op = document.getElementById("mask-opacity");
     op.addEventListener("input", () => {
         maskOpacity = Number(op.value) / 100;
         document.getElementById("opacity-label").textContent = `${op.value}%`;
+        syncRangeFill(op);
         blitMask();
     });
+    syncRangeFill(op);
 
     document.getElementById("btn-undo").addEventListener("click", undo);
     document.getElementById("btn-redo").addEventListener("click", redo);
@@ -1181,6 +1328,16 @@ function attachEvents() {
     if (btnRC) btnRC.addEventListener("click", openRequestChangesModal);
     const btnPause = document.getElementById("btn-pause");
     if (btnPause) btnPause.addEventListener("click", pauseTile);
+    document.getElementById("btn-next-missing")?.addEventListener("click", jumpToNextMissing);
+    document.getElementById("btn-shortcuts")?.addEventListener("click", openShortcutsModal);
+    document.getElementById("shortcuts-close")?.addEventListener("click", closeShortcutsModal);
+    // Clicking the dimmed backdrop of an editor modal cancels it.
+    for (const id of ["modal-problem", "modal-request-changes", "modal-shortcuts"]) {
+        const m = document.getElementById(id);
+        m?.addEventListener("mousedown", (ev) => {
+            if (ev.target === m) modalCancelControl(m)?.click();
+        });
+    }
     const btnGmaps = document.getElementById("btn-gmaps");
     if (btnGmaps) btnGmaps.addEventListener("click", openInGoogleMaps);
     const btnGearth = document.getElementById("btn-gearth");
@@ -1263,8 +1420,14 @@ function closeTopmostModal() {
     return true;
 }
 
-function confirmAction({ title = "Confirmar", message, okLabel = "Confirmar", cancelLabel = "Cancelar" }) {
+function confirmAction({
+    title = "Confirmar", message, okLabel = "Confirmar", cancelLabel = "Cancelar",
+    iconName = "send", tone = "accent",
+}) {
     const modal = document.getElementById("modal-action-confirm");
+    const iconWrap = document.getElementById("action-confirm-icon");
+    iconWrap.className = `modal-icon tone-${tone}`;
+    document.getElementById("action-confirm-icon-use").setAttribute("href", `${ICON_SPRITE}#i-${iconName}`);
     document.getElementById("action-confirm-title").textContent = title;
     document.getElementById("action-confirm-message").textContent = message;
     const okBtn = document.getElementById("action-confirm-ok");
@@ -1320,8 +1483,19 @@ function onMouseMove(ev) {
 function updateHoverClass(x, y) {
     const v = mask[y * TILE + x];
     const el = document.getElementById("hover-class");
+    const sw = document.getElementById("hover-swatch");
+    const cls = classesById[v];
     if (v === 255) el.textContent = "(não preenchido)";
-    else el.textContent = classesById[v]?.name || `classe ${v}`;
+    else el.textContent = cls?.name || `classe ${v}`;
+    if (sw) {
+        sw.classList.toggle("hidden", v === 255);
+        sw.style.backgroundColor = cls?.color || "";
+    }
+}
+
+function clearHoverClass() {
+    document.getElementById("hover-class").textContent = "—";
+    document.getElementById("hover-swatch")?.classList.add("hidden");
 }
 
 function onMouseUp() {
@@ -1441,8 +1615,15 @@ function jumpToNextMissing() {
     }
 }
 
+// Zoom applied by the last resetView(); the resize handler refits only while
+// the operator is still on that fitted view.
+let _fittedZoom = 1;
 function resetView() {
-    zoom = 1; panX = 0; panY = 0;
+    const vp = document.getElementById("canvas-viewport");
+    // padY leaves the bottom HUD / zoom cluster (12 px inset + 38 px) off the
+    // paint area; the paint area stays centered, so the top gets the same room.
+    _fittedZoom = fitZoom(vp.clientWidth, vp.clientHeight, DISPLAY, { padX: 16, padY: 56 });
+    zoom = _fittedZoom; panX = 0; panY = 0;
     applyTransform();
     drawGrid();
 }
@@ -1462,7 +1643,8 @@ function drawGrid() {
     if (!g.visible) return;
     ctxGrid.save();
     ctxGrid.lineWidth = g.lineWidth;
-    ctxGrid.strokeStyle = "rgba(0, 0, 0, 0.85)";
+    ctxGrid.strokeStyle = palette.ink;
+    ctxGrid.globalAlpha = 0.6;
     ctxGrid.beginPath();
     for (let i = 0; i <= TILE; i++) {
         const p = i * g.cell;
@@ -1490,22 +1672,27 @@ function drawCursor(x, y) {
     // black/white to signal "no class".
     const cls = tool === "eraser" ? null : classesById[activeClass];
     const cssRgb = cls ? `rgb(${colorLut[cls.id*4]},${colorLut[cls.id*4+1]},${colorLut[cls.id*4+2]})` : null;
-    ctxCursor.strokeStyle = "rgba(0,0,0,0.85)";
+    ctxCursor.globalAlpha = 0.85;
+    ctxCursor.strokeStyle = palette.ink;
     ctxCursor.lineWidth = lw;
     ctxCursor.strokeRect(sx + inset, sy + inset, sz - lw, sz - lw);
     if (cssRgb) {
+        ctxCursor.globalAlpha = 1;
         ctxCursor.strokeStyle = cssRgb;
         ctxCursor.lineWidth = lw;
         ctxCursor.strokeRect(sx - inset, sy - inset, sz + lw, sz + lw);
-        // Outer halo (white) keeps the class color readable over light imagery.
-        ctxCursor.strokeStyle = "rgba(255,255,255,0.85)";
+        // Outer light halo keeps the class color readable over light imagery.
+        ctxCursor.globalAlpha = 0.85;
+        ctxCursor.strokeStyle = palette.halo;
         ctxCursor.lineWidth = lw;
         ctxCursor.strokeRect(sx - inset - lw, sy - inset - lw, sz + 3*lw, sz + 3*lw);
     } else {
-        ctxCursor.strokeStyle = "rgba(255,255,255,0.95)";
+        ctxCursor.globalAlpha = 0.95;
+        ctxCursor.strokeStyle = palette.halo;
         ctxCursor.lineWidth = lw;
         ctxCursor.strokeRect(sx - inset, sy - inset, sz + lw, sz + lw);
     }
+    ctxCursor.globalAlpha = 1;
 }
 
 function setTool(t) {
@@ -1527,11 +1714,17 @@ function onKeyDown(ev) {
     // it doesn't stack dialogs.
     if (sc?.action === "switch-project" && !isModalOpen()) {
         const btn = document.getElementById("btn-switch-project");
-        if (btn && !btn.classList.contains("hidden")) {
+        if (btn && !btn.disabled) {
             ev.preventDefault();
             btn.click();
             return;
         }
+    }
+    // "?" toggles the shortcut reference (any kind, never over another modal).
+    if (sc?.action === "help" && !isTextFocused()) {
+        const open = !document.getElementById("modal-shortcuts").classList.contains("hidden");
+        if (open) { ev.preventDefault(); closeShortcutsModal(); return; }
+        if (!isModalOpen()) { ev.preventDefault(); openShortcutsModal(); return; }
     }
     if (isModalOpen()) {
         if (ev.key === "Escape") {
@@ -1616,6 +1809,14 @@ function adjustBrushSize(delta) {
     const bs = document.getElementById("brush-size");
     bs.value = String(brushSizeIdx);
     document.getElementById("brush-size-label").textContent = BRUSH_SIZES[brushSizeIdx];
+    syncRangeFill(bs);
+}
+
+// Filled portion of a styled range track (CSS reads --fill).
+function syncRangeFill(input) {
+    const min = Number(input.min) || 0, max = Number(input.max) || 100;
+    const pct = max > min ? (100 * (Number(input.value) - min)) / (max - min) : 0;
+    input.style.setProperty("--fill", `${pct}%`);
 }
 
 function adjustOpacity(delta) {
@@ -1623,6 +1824,7 @@ function adjustOpacity(delta) {
     const op = document.getElementById("mask-opacity");
     op.value = String(Math.round(maskOpacity * 100));
     document.getElementById("opacity-label").textContent = `${op.value}%`;
+    syncRangeFill(op);
     blitMask();
 }
 
@@ -1655,6 +1857,8 @@ async function submit() {
             ? "A revisão será aprovada e o tile marcado como revisado."
             : "A classificação será enviada e o tile passará para a fila de revisão.",
         okLabel: isReview ? "Aprovar" : "Submeter",
+        iconName: isReview ? "circle-check" : "send",
+        tone: isReview ? "ok" : "accent",
     });
     if (!ok) { _submitting = false; return; }
     const btn = document.getElementById("btn-submit");
@@ -1684,7 +1888,7 @@ async function submit() {
         // while they decide whether to pull the next one.
         if (isClassificationProject()) exitClassificationTile();
         flashSuccess();
-        showIdleScreen("Tile enviado ✓", "Verificando próximo tile...", { previewNext: true });
+        showIdleScreen("Tile enviado ✓", "Verificando próximo tile...", { previewNext: true, variant: "done" });
     } catch (e) {
         const err = e.body?.detail?.error;
         if (err === "unfilled_pixels") {
@@ -1709,12 +1913,14 @@ function flashMissing() {
     const step = () => {
         ctxCursor.clearRect(0, 0, DISPLAY, DISPLAY);
         if (visible) {
-            ctxCursor.fillStyle = "rgba(255,0,0,0.7)";
+            ctxCursor.fillStyle = palette.error;
+            ctxCursor.globalAlpha = 0.7;
             for (let y = 0; y < TILE; y++) {
                 for (let x = 0; x < TILE; x++) {
                     if (mask[y*TILE+x] === 255) ctxCursor.fillRect(x*SCALE, y*SCALE, SCALE, SCALE);
                 }
             }
+            ctxCursor.globalAlpha = 1;
         }
         visible = !visible;
         if (Date.now() - start < 2000) setTimeout(step, 200);
@@ -1723,8 +1929,20 @@ function flashMissing() {
     step();
 }
 
-function showIdleScreen(title, message, { previewNext = false } = {}) {
+// Idle card icon per situation (shown until/unless a preview thumbnail loads).
+const IDLE_ICONS = {
+    start: { name: "play", tone: "accent" },
+    done: { name: "circle-check", tone: "ok" },
+    paused: { name: "circle-pause", tone: "paused" },
+};
+
+function showIdleScreen(title, message, { previewNext = false, variant = "start" } = {}) {
     hidePausedResumeScreen();
+    const ic = IDLE_ICONS[variant] || IDLE_ICONS.start;
+    document.getElementById("idle-icon").className = `no-tiles-icon tone-${ic.tone}`;
+    document.getElementById("idle-icon-use").setAttribute("href", `${ICON_SPRITE}#i-${ic.name}`);
+    document.getElementById("idle-screen").dataset.variant = variant;
+    setTileOpen(false);
     stopHeartbeat();
     document.title = "TileClass";
     _previewToken++;
@@ -1738,7 +1956,7 @@ function showIdleScreen(title, message, { previewNext = false } = {}) {
     document.getElementById("idle-screen").classList.remove("hidden");
     setTimeout(() => document.getElementById("idle-start").focus(), 0);
     currentTile = null;
-    document.getElementById("tile-name-label").textContent = "";
+    renderTileLabel(null);
     mask.fill(255);
     filledCount = 0;
     writeMaskPixels(0, 0, TILE, TILE);
@@ -1766,6 +1984,7 @@ function resetPreview(imgId, iconId) {
         if (prev && prev.startsWith("blob:")) URL.revokeObjectURL(prev);
         img.classList.add("hidden");
         img.removeAttribute("src");
+        img.closest(".state-visual")?.classList.remove("has-preview");
     }
     if (icon) icon.classList.remove("hidden");
 }
@@ -1788,7 +2007,8 @@ async function loadTilePreview(tileId, imgId, iconId, token) {
     const url = URL.createObjectURL(blob);
     img.src = url;
     img.classList.remove("hidden");
-    if (icon) icon.classList.add("hidden");
+    // The state icon stays, re-styled by CSS as a badge over the thumbnail.
+    img.closest(".state-visual")?.classList.add("has-preview");
 }
 
 function describeNextPreview(t) {
@@ -1832,8 +2052,9 @@ function hideIdleScreen() {
 function showNoTilesScreen() {
     const el = document.getElementById("no-tiles-screen");
     if (el) el.classList.remove("hidden");
+    setTileOpen(false);
     currentTile = null;
-    document.getElementById("tile-name-label").textContent = "";
+    renderTileLabel(null);
     // Wipe the canvas so the operator can't keep painting on a stale tile.
     mask.fill(255);
     filledCount = 0;
@@ -1869,9 +2090,20 @@ function clearCanvasFlash() {
     document.getElementById("canvas-stack").classList.remove("canvas-flash-ok");
 }
 
+function openShortcutsModal() {
+    document.getElementById("modal-shortcuts").classList.remove("hidden");
+    document.getElementById("shortcuts-close").focus();
+}
+function closeShortcutsModal() {
+    document.getElementById("modal-shortcuts").classList.add("hidden");
+}
+
 function openProblemModal() {
-    document.getElementById("problem-note").value = "";
+    const note = document.getElementById("problem-note");
+    note.value = "";
+    note.dispatchEvent(new Event("input"));
     document.getElementById("modal-problem").classList.remove("hidden");
+    note.focus();
 }
 function closeProblemModal() {
     document.getElementById("modal-problem").classList.add("hidden");
@@ -1909,7 +2141,7 @@ async function confirmRequestChanges() {
         clearPreload();
         closeRequestChangesModal();
         showToast("Tile devolvido ao classificador.", "success");
-        showIdleScreen("Ajuste solicitado ✓", "Verificando próximo tile...", { previewNext: true });
+        showIdleScreen("Ajuste solicitado ✓", "Verificando próximo tile...", { previewNext: true, variant: "done" });
     } catch (e) {
         showToast(`Erro: ${e.message}`, "error");
     }
@@ -1956,6 +2188,8 @@ async function pauseTile() {
         title: "Pausar tile?",
         message: "Seu progresso será salvo no servidor e o tempo será congelado. Você poderá retomar mais tarde.",
         okLabel: "Pausar",
+        iconName: "circle-pause",
+        tone: "paused",
     });
     if (!ok) return;
     if (btn) btn.disabled = true;
@@ -1971,7 +2205,7 @@ async function pauseTile() {
         clearPreload();
         if (isClassificationProject()) exitClassificationTile();
         showToast("Tile pausado. Suas alterações foram salvas no servidor.", "success");
-        showIdleScreen("Tile pausado ⏸", "Faça login depois para continuar de onde parou.");
+        showIdleScreen("Tile pausado", "Faça login depois para continuar de onde parou.", { variant: "paused" });
     } catch (e) {
         const detail = e.body?.detail;
         const err = detail?.error;
@@ -1993,6 +2227,7 @@ async function pauseTile() {
 }
 
 function showPausedResumeScreen(tile) {
+    setTileOpen(false);
     _previewToken++;
     resetPreview("paused-preview", "paused-icon");
     const msg = document.getElementById("paused-resume-message");

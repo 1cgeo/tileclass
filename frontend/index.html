@@ -60,63 +60,123 @@
     </div>
 
     <!-- Editor view (operator) -->
-    <div id="view-editor" class="view hidden" data-kind="raster">
-        <header class="header">
+    <div id="view-editor" class="view hidden" data-kind="raster" data-tile="none">
+        <header class="header editor-header">
             <div class="header-left">
-                <strong>TileClass</strong>
-                <!-- Active project chip is always visible so the operator can
-                     never wonder "which project is this tile from" — it's
-                     right next to the brand. The picker only appears when
-                     the user has more than one project to switch between. -->
-                <span id="editor-project-chip" class="editor-project-chip" title="Projeto ativo">
-                    <span id="editor-project-name">—</span>
-                    <span id="editor-project-kind" class="chip info"></span>
-                </span>
-                <button id="btn-switch-project" class="btn-link hidden" type="button"
-                        title="Trocar de projeto (Ctrl+P)">trocar</button>
+                <div class="brand" aria-label="TileClass">
+                    <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" class="bm-bg"/><rect x="8" y="8" width="7" height="7" rx="1.5" class="bm-cell bm-on"/><rect x="17" y="8" width="7" height="7" rx="1.5" class="bm-cell"/><rect x="8" y="17" width="7" height="7" rx="1.5" class="bm-cell"/><rect x="17" y="17" width="7" height="7" rx="1.5" class="bm-cell bm-on2"/></svg>
+                    <span class="brand-name">TileClass</span>
+                </div>
+                <span class="header-sep" aria-hidden="true"></span>
+                <!-- Active project, always visible. The same control opens the
+                     switcher (Ctrl+P) when the user belongs to >1 project;
+                     with a single project it is disabled and drops the chevron. -->
+                <button id="btn-switch-project" class="project-switch" type="button"
+                        title="Trocar de projeto (Ctrl+P)" aria-haspopup="dialog">
+                    <span class="project-switch-icon" aria-hidden="true"><svg class="icon icon-sm"><use href="/static/vendor/lucide/icons.svg#i-folder"/></svg></span>
+                    <span id="editor-project-chip" class="editor-project-chip">
+                        <span id="editor-project-name">—</span>
+                        <span id="editor-project-kind" class="chip"></span>
+                    </span>
+                    <svg class="icon icon-sm project-switch-chevron" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-chevron-down"/></svg>
+                </button>
                 <span id="mode-pill" class="mode-pill mode-classify">CLASSIFICAR</span>
-                <span id="tile-name-label"></span>
-                <span id="queue-progress" class="queue-progress"></span>
-                <span id="review-banner" class="review-banner hidden"></span>
+                <span id="tile-name-label" class="tile-name-label"></span>
             </div>
             <div class="header-right">
-                <span>Hoje: <span id="today-count">0</span></span>
-                <span id="user-label"></span>
-                <button id="btn-go-admin" class="btn-view-toggle hidden" title="Voltar ao painel administrativo">→ Admin</button>
-                <button id="btn-logout">Sair</button>
+                <div id="queue-progress" class="queue-progress hidden" role="group" aria-label="Progresso da fila do projeto">
+                    <div class="queue-bar" aria-hidden="true">
+                        <span id="queue-bar-reviewed" class="queue-seg reviewed"></span>
+                        <span id="queue-bar-classified" class="queue-seg classified"></span>
+                    </div>
+                    <span id="queue-text" class="queue-text"></span>
+                </div>
+                <div class="header-stat" title="Tiles enviados hoje neste projeto">
+                    <svg class="icon icon-sm" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-circle-check"/></svg>
+                    <span class="header-stat-label">Hoje</span>
+                    <strong id="today-count">0</strong>
+                </div>
+                <span class="header-sep" aria-hidden="true"></span>
+                <button id="btn-go-admin" class="btn-sm btn-go-admin hidden" type="button" title="Voltar ao painel administrativo">
+                    <svg class="icon icon-sm" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-layout-dashboard"/></svg><span class="btn-label">Painel</span>
+                </button>
+                <button type="button" class="ghost icon-btn btn-sm theme-toggle" data-theme-toggle title="Alternar tema" aria-label="Alternar tema"><svg class="icon icon-sm" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-moon"/></svg></button>
+                <div class="user-menu">
+                    <span id="user-avatar" class="avatar" aria-hidden="true"></span>
+                    <span id="user-label" class="user-label"></span>
+                </div>
+                <button id="btn-logout" class="ghost icon-btn btn-sm" type="button" title="Sair" aria-label="Sair">
+                    <svg class="icon icon-sm" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-log-out"/></svg>
+                </button>
             </div>
         </header>
 
         <main class="editor-main">
-            <aside class="sidebar sidebar-left">
-                <section class="classes">
-                    <h3>Classes</h3>
-                    <ul id="class-list"></ul>
+            <!-- Left panel (raster only): classes, tools, view controls. -->
+            <aside class="sidebar sidebar-left" aria-label="Classes e ferramentas">
+                <section class="panel-section classes">
+                    <div class="panel-heading">
+                        <h3 class="eyebrow">Classes</h3>
+                        <span id="class-count" class="panel-heading-meta"></span>
+                    </div>
+                    <ul id="class-list" class="class-list" role="listbox" aria-label="Classe ativa"></ul>
                 </section>
-                <section class="tools">
-                    <h3>Ferramentas</h3>
-                    <button id="tool-brush" class="tool active" title="Pincel (Q)">Pincel <span class="kbd">Q</span></button>
-                    <button id="tool-eraser" class="tool" title="Borracha (W)">Borracha <span class="kbd">W</span></button>
-                    <button id="tool-fill" class="tool" title="Balde (E)">Balde <span class="kbd">E</span></button>
-                    <label>Tamanho: <span id="brush-size-label">3</span>
+                <section class="panel-section tools">
+                    <div class="panel-heading"><h3 class="eyebrow">Ferramentas</h3></div>
+                    <div class="segmented tool-seg" role="group" aria-label="Ferramenta">
+                        <button id="tool-brush" class="tool active" type="button" title="Pincel (Q)" aria-label="Pincel (Q)">
+                            <svg class="icon icon-lg" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-paintbrush"/></svg>
+                            <span class="tool-name">Pincel</span><span class="tool-key">Q</span>
+                        </button>
+                        <button id="tool-eraser" class="tool" type="button" title="Borracha (W)" aria-label="Borracha (W)">
+                            <svg class="icon icon-lg" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-eraser"/></svg>
+                            <span class="tool-name">Borracha</span><span class="tool-key">W</span>
+                        </button>
+                        <button id="tool-fill" class="tool" type="button" title="Balde de preenchimento (E)" aria-label="Balde (E)">
+                            <svg class="icon icon-lg" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-paint-bucket"/></svg>
+                            <span class="tool-name">Balde</span><span class="tool-key">E</span>
+                        </button>
+                    </div>
+                    <label class="slider-field" for="brush-size">
+                        <span class="slider-head">
+                            <span class="slider-label">Tamanho do pincel</span>
+                            <span class="slider-keys"><span class="kbd">A</span><span class="kbd">S</span></span>
+                            <span class="slider-value"><span id="brush-size-label">3</span> px</span>
+                        </span>
                         <input type="range" id="brush-size" min="1" max="5" value="2">
                     </label>
                 </section>
-                <section class="opacity">
-                    <h3>Opacidade <span id="opacity-label" style="float:right;color:var(--text-muted);font-weight:400;text-transform:none;letter-spacing:0;">50%</span></h3>
-                    <input type="range" id="mask-opacity" min="0" max="100" value="50"
-                           title="0% esconde a máscara; 100% a deixa totalmente opaca sobre o satélite. Atalhos: Z / X">
-                    <button id="btn-gmaps" class="sidebar-action" title="Abre esta região no Google Maps (satélite) em nova aba — útil quando há dúvida grande sobre a classe">Ver no Google Maps</button>
-                    <button id="btn-gearth" class="sidebar-action" title="Abre esta região no Google Earth (3D/imagens históricas disponíveis no menu de relógio) em nova aba">Ver no Google Earth</button>
+                <section class="panel-section opacity">
+                    <div class="panel-heading"><h3 class="eyebrow">Visualização</h3></div>
+                    <label class="slider-field" for="mask-opacity">
+                        <span class="slider-head">
+                            <span class="slider-label">Opacidade</span>
+                            <span class="slider-keys"><span class="kbd">Z</span><span class="kbd">X</span></span>
+                            <span id="opacity-label" class="slider-value">50%</span>
+                        </span>
+                        <input type="range" id="mask-opacity" min="0" max="100" value="50"
+                               title="0% esconde a máscara; 100% a deixa totalmente opaca sobre o satélite. Atalhos: Z / X">
+                    </label>
+                    <p class="panel-tip"><span class="kbd">Space</span> segurado esconde a máscara.</p>
+                </section>
+                <section class="panel-section external-refs">
+                    <div class="panel-heading"><h3 class="eyebrow">Referência externa</h3></div>
+                    <button id="btn-gmaps" class="ghost btn-sm sidebar-action" type="button" title="Abre esta região no Google Maps (satélite) em nova aba — útil quando há dúvida grande sobre a classe">
+                        <svg class="icon icon-sm" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-map"/></svg>
+                        <span>Google Maps</span>
+                        <svg class="icon icon-sm sidebar-action-ext" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-external-link"/></svg>
+                    </button>
+                    <button id="btn-gearth" class="ghost btn-sm sidebar-action" type="button" title="Abre esta região no Google Earth (3D/imagens históricas disponíveis no menu de relógio) em nova aba">
+                        <svg class="icon icon-sm" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-globe"/></svg>
+                        <span>Google Earth</span>
+                        <svg class="icon icon-sm sidebar-action-ext" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-external-link"/></svg>
+                    </button>
                 </section>
             </aside>
 
-            <div class="canvas-wrap">
-                <div id="review-note-banner" class="review-note-banner hidden">
-                    <strong>Pedido de ajuste:</strong>
-                    <span id="review-note-text"></span>
-                    <span class="muted" id="review-note-meta"></span>
-                </div>
+            <!-- Stage: satellite + mask canvases, floating controls and the
+                 idle / paused / no-tiles takeover cards. -->
+            <div class="canvas-wrap stage">
                 <div id="canvas-viewport">
                     <div id="canvas-stack" class="canvas-stack">
                         <div id="map-satellite"></div>
@@ -126,130 +186,316 @@
                         <div id="paint-bounds"></div>
                     </div>
                 </div>
-                <div id="zoom-controls" class="zoom-controls">
-                    <button id="btn-zoom-in" title="Ampliar" aria-label="Ampliar">+</button>
-                    <button id="btn-zoom-reset" title="Resetar zoom" aria-label="Resetar zoom">⟲</button>
-                    <button id="btn-zoom-out" title="Reduzir" aria-label="Reduzir">−</button>
+                <div class="stage-top">
+                    <div id="map-warning" class="map-warning hidden" role="alert">
+                        <svg class="icon icon-sm" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-triangle-alert"/></svg>
+                        <span>Satélite indisponível — classifique com cuidado.</span>
+                    </div>
+                </div>
+                <div class="stage-hud" aria-live="off">
+                    <svg class="icon icon-sm" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-crosshair"/></svg>
+                    <span id="hover-swatch" class="hover-swatch hidden" aria-hidden="true"></span>
+                    <span id="hover-class" class="hover-class">—</span>
+                </div>
+                <div id="zoom-controls" class="zoom-controls" role="group" aria-label="Zoom">
+                    <button id="btn-zoom-out" class="ghost icon-btn btn-sm" type="button" title="Reduzir (roda do mouse)" aria-label="Reduzir">
+                        <svg class="icon icon-sm" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-zoom-out"/></svg>
+                    </button>
                     <span id="zoom-label" class="zoom-label" aria-live="polite">100%</span>
+                    <button id="btn-zoom-in" class="ghost icon-btn btn-sm" type="button" title="Ampliar (roda do mouse)" aria-label="Ampliar">
+                        <svg class="icon icon-sm" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-zoom-in"/></svg>
+                    </button>
+                    <span class="zoom-sep" aria-hidden="true"></span>
+                    <button id="btn-zoom-reset" class="ghost icon-btn btn-sm" type="button" title="Ajustar à tela" aria-label="Ajustar à tela">
+                        <svg class="icon icon-sm" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-maximize-2"/></svg>
+                    </button>
                 </div>
-                <div id="map-warning" class="map-warning hidden" role="alert">
-                    ⚠ Satélite indisponível — classifique com cuidado.
-                </div>
+
                 <div id="idle-screen" class="no-tiles-screen hidden" role="status">
                     <div class="no-tiles-box">
-                        <div id="idle-icon" class="no-tiles-icon">▶</div>
-                        <img id="idle-preview" class="tile-preview hidden" alt="Pré-visualização do próximo tile">
+                        <div class="state-visual">
+                            <div id="idle-icon" class="no-tiles-icon tone-accent">
+                                <svg class="icon icon-xl" aria-hidden="true"><use id="idle-icon-use" href="/static/vendor/lucide/icons.svg#i-play"/></svg>
+                            </div>
+                            <img id="idle-preview" class="tile-preview hidden" alt="Pré-visualização do próximo tile">
+                        </div>
                         <h2 id="idle-title">Pronto para começar</h2>
                         <p id="idle-message">Clique para receber um tile.</p>
                         <div class="no-tiles-actions">
-                            <button id="idle-start" class="primary" type="button">Iniciar tile</button>
-                            <button id="idle-logout" type="button">Sair</button>
+                            <button id="idle-start" class="primary btn-lg" type="button">
+                                <svg class="icon" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-play"/></svg>
+                                Iniciar tile <span class="kbd">Enter</span>
+                            </button>
+                            <button id="idle-logout" class="ghost btn-lg" type="button">Sair</button>
                         </div>
                     </div>
                 </div>
                 <div id="paused-resume-screen" class="no-tiles-screen hidden" role="status">
                     <div class="no-tiles-box">
-                        <div id="paused-icon" class="no-tiles-icon">⏸</div>
-                        <img id="paused-preview" class="tile-preview hidden" alt="Pré-visualização do tile pausado">
+                        <div class="state-visual">
+                            <div id="paused-icon" class="no-tiles-icon tone-paused">
+                                <svg class="icon icon-xl" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-circle-pause"/></svg>
+                            </div>
+                            <img id="paused-preview" class="tile-preview hidden" alt="Pré-visualização do tile pausado">
+                        </div>
                         <h2>Você tem um tile pausado</h2>
                         <p id="paused-resume-message">Deseja continuar?</p>
                         <div class="no-tiles-actions">
-                            <button id="paused-resume-continue" class="primary" type="button">Continuar tile pausado</button>
-                            <button id="paused-resume-logout" type="button">Sair</button>
+                            <button id="paused-resume-continue" class="primary btn-lg" type="button">
+                                <svg class="icon" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-circle-play"/></svg>
+                                Continuar tile pausado
+                            </button>
+                            <button id="paused-resume-logout" class="ghost btn-lg" type="button">Sair</button>
                         </div>
                     </div>
                 </div>
                 <div id="no-tiles-screen" class="no-tiles-screen hidden" role="status">
                     <div class="no-tiles-box">
-                        <div class="no-tiles-icon">✓</div>
+                        <div class="state-visual state-visual-compact">
+                            <div class="no-tiles-icon tone-ok">
+                                <svg class="icon icon-xl" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-party-popper"/></svg>
+                            </div>
+                        </div>
                         <h2>Todos os tiles foram processados</h2>
                         <p>Não há mais tiles disponíveis para você no momento. Obrigado pelo trabalho!</p>
                         <div class="no-tiles-actions">
-                            <button id="no-tiles-refresh" class="primary" type="button">Verificar novamente</button>
-                            <button id="no-tiles-logout" type="button">Sair</button>
+                            <button id="no-tiles-refresh" class="primary btn-lg" type="button">
+                                <svg class="icon" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-refresh-cw"/></svg>
+                                Verificar novamente
+                            </button>
+                            <button id="no-tiles-logout" class="ghost btn-lg" type="button">Sair</button>
                         </div>
                     </div>
                 </div>
             </div>
 
-            <aside class="sidebar sidebar-right">
-                <section class="progress">
-                    <h3>Progresso</h3>
-                    <div id="progress-line">Pixels: <span id="pixel-count">0</span>/65536 (<span id="pixel-pct">0</span>%)</div>
-                    <div class="progress-bar"><div id="progress-bar-fill"></div></div>
-                    <div id="missing-line" class="missing-line hidden">Faltam <span id="missing-count">0</span> pixels</div>
-                    <div id="hover-class" class="hover-class">—</div>
+            <!-- Right panel: review callouts (both kinds), mask progress +
+                 shortcuts (raster), class picker (classification). -->
+            <aside class="sidebar sidebar-right" aria-label="Progresso e revisão">
+                <div id="review-banner" class="ed-callout ed-callout-warn hidden">
+                    <svg class="icon ed-callout-icon" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-user-check"/></svg>
+                    <div class="ed-callout-body">
+                        <strong>Revisão</strong>
+                        <span id="review-banner-text"></span>
+                    </div>
+                </div>
+                <div id="review-note-banner" class="ed-callout ed-callout-info review-note-banner hidden">
+                    <svg class="icon ed-callout-icon" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-message-square-text"/></svg>
+                    <div class="ed-callout-body">
+                        <strong>Pedido de ajuste</strong>
+                        <span id="review-note-text"></span>
+                        <span class="ed-callout-meta" id="review-note-meta"></span>
+                    </div>
+                </div>
+
+                <section class="panel-section mask-progress raster-only">
+                    <div class="panel-heading"><h3 class="eyebrow">Progresso da máscara</h3></div>
+                    <div id="progress-line" class="progress-line">
+                        <div class="progress-big">
+                            <span class="progress-pct"><span id="pixel-pct">0</span><span class="progress-pct-unit">%</span></span>
+                            <span class="progress-done-badge"><svg class="icon icon-sm" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-circle-check"/></svg>Completa</span>
+                        </div>
+                        <div class="progress-bar"><div id="progress-bar-fill"></div></div>
+                        <div class="progress-counts">
+                            <span><span id="pixel-count">0</span> / <span id="pixel-total">65.536</span> px</span>
+                        </div>
+                    </div>
+                    <div id="missing-line" class="missing-line hidden" role="status">
+                        <svg class="icon icon-sm" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-triangle-alert"/></svg>
+                        <span class="missing-text">Faltam <span id="missing-count">0</span> pixels</span>
+                        <button id="btn-next-missing" class="ghost icon-btn btn-sm" type="button" title="Ir ao próximo pixel faltante (C) — F destaca todos" aria-label="Ir ao próximo pixel faltante">
+                            <svg class="icon icon-sm" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-target"/></svg>
+                        </button>
+                    </div>
                 </section>
-                <section class="shortcuts-quick">
-                    <h3>Atalhos</h3>
-                    <div class="sc-row"><span class="kbd">1</span>–<span class="kbd">6</span><span>Classe</span></div>
-                    <div class="sc-row"><span class="kbd">Q</span><span class="kbd">W</span><span class="kbd">E</span><span>Pincel/Borracha/Balde</span></div>
-                    <div class="sc-row"><span class="kbd">A</span><span class="kbd">S</span><span>Tamanho − / +</span></div>
-                    <div class="sc-row"><span class="kbd">Z</span><span class="kbd">X</span><span>Opacidade − / +</span></div>
-                    <div class="sc-row"><span class="kbd">F</span><span class="kbd">C</span><span>Destacar / próximo faltante</span></div>
-                    <div class="sc-row" data-overlay-key="d"><span class="kbd">D</span><span>Imagem 2ª (segurando)</span></div>
-                    <div class="sc-row" data-overlay-key="r"><span class="kbd">R</span><span>Imagem 3ª (segurando)</span></div>
-                    <div class="sc-row" data-overlay-key="t"><span class="kbd">T</span><span>Máscara ref. 1ª (segurando)</span></div>
-                    <div class="sc-row" data-overlay-key="y"><span class="kbd">Y</span><span>Máscara ref. 2ª (segurando)</span></div>
-                    <div class="sc-row"><span class="kbd">Space</span><span>Esconder máscara (segurando)</span></div>
-                    <div class="sc-row"><span class="kbd">⌃Z</span><span class="kbd">⌃Y</span><span>Desfazer/Refazer</span></div>
-                    <div class="sc-row"><span class="kbd">Roda</span><span>Zoom</span></div>
-                    <div class="sc-row">Botão direito + arrastar<span>Mover</span></div>
+
+                <section id="classification-panel" class="panel-section classification-panel hidden" aria-label="Escolha a classe"></section>
+
+                <section id="tile-details" class="panel-section tile-details" aria-label="Detalhes do tile">
+                    <div class="panel-heading"><h3 class="eyebrow">Detalhes do tile</h3><span id="tile-status-chip" class="chip"></span></div>
+                    <dl class="facts">
+                        <div><dt>Latitude</dt><dd id="tile-fact-lat">—</dd></div>
+                        <div><dt>Longitude</dt><dd id="tile-fact-lon">—</dd></div>
+                        <div><dt>Cobertura</dt><dd id="tile-fact-footprint">—</dd></div>
+                        <div><dt>Resolução</dt><dd id="tile-fact-resolution">—</dd></div>
+                    </dl>
+                </section>
+
+                <section class="panel-section shortcuts-quick raster-only">
+                    <div class="panel-heading"><h3 class="eyebrow">Atalhos</h3></div>
+                    <div class="sc-list">
+                        <div class="sc-row"><span class="sc-desc">Classe</span><span class="sc-keys"><span class="kbd">1</span>–<span class="kbd">6</span></span></div>
+                        <div class="sc-row"><span class="sc-desc">Pincel · Borracha · Balde</span><span class="sc-keys"><span class="kbd">Q</span><span class="kbd">W</span><span class="kbd">E</span></span></div>
+                        <div class="sc-row"><span class="sc-desc">Esconder máscara</span><span class="sc-keys"><span class="kbd">Space</span></span></div>
+                        <div class="sc-row"><span class="sc-desc">Destacar / próximo faltante</span><span class="sc-keys"><span class="kbd">F</span><span class="kbd">C</span></span></div>
+                        <div class="sc-row"><span class="sc-desc">Desfazer / Refazer</span><span class="sc-keys"><span class="kbd">Ctrl Z</span><span class="kbd">Ctrl Y</span></span></div>
+                        <div class="sc-row" data-overlay-key="d"><span class="sc-desc">Imagem 2ª (segurar)</span><span class="sc-keys"><span class="kbd">D</span></span></div>
+                        <div class="sc-row" data-overlay-key="r"><span class="sc-desc">Imagem 3ª (segurar)</span><span class="sc-keys"><span class="kbd">R</span></span></div>
+                        <div class="sc-row" data-overlay-key="t"><span class="sc-desc">Máscara ref. 1ª (segurar)</span><span class="sc-keys"><span class="kbd">T</span></span></div>
+                        <div class="sc-row" data-overlay-key="y"><span class="sc-desc">Máscara ref. 2ª (segurar)</span><span class="sc-keys"><span class="kbd">Y</span></span></div>
+                    </div>
+                    <button id="btn-shortcuts" class="ghost btn-sm btn-block shortcuts-more" type="button" title="Ver todos os atalhos (?)">
+                        <svg class="icon icon-sm" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-keyboard"/></svg>
+                        Ver todos os atalhos <span class="kbd">?</span>
+                    </button>
                 </section>
             </aside>
         </main>
 
-        <footer class="footer">
-            <button id="btn-undo" title="Ctrl+Z">Desfazer <span class="kbd">⌃Z</span></button>
-            <button id="btn-redo" title="Ctrl+Shift+Z">Refazer <span class="kbd">⌃⇧Z</span></button>
-            <button id="btn-problem">Reportar Problema</button>
-            <button id="btn-request-changes" class="hidden" title="Devolver ao classificador com nota (mantém máscara)">Pedir ajustes</button>
-            <button id="btn-pause" class="footer-pause" title="Pausa salva o trabalho parcial no servidor e congela o tempo">Pausar</button>
-            <button id="btn-submit" class="primary"><span id="submit-label">Submeter</span></button>
+        <footer class="footer action-bar">
+            <div class="action-group">
+                <div class="btn-pair raster-only" role="group" aria-label="Histórico">
+                    <button id="btn-undo" class="icon-btn" type="button" title="Desfazer (Ctrl+Z)" aria-label="Desfazer">
+                        <svg class="icon" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-undo-2"/></svg>
+                    </button>
+                    <button id="btn-redo" class="icon-btn" type="button" title="Refazer (Ctrl+Shift+Z / Ctrl+Y)" aria-label="Refazer">
+                        <svg class="icon" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-redo-2"/></svg>
+                    </button>
+                </div>
+                <span class="action-sep raster-only" aria-hidden="true"></span>
+                <button id="btn-problem" class="ghost btn-problem" type="button" title="Tile com imagem ruim, fora da área ou impossível de classificar">
+                    <svg class="icon" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-flag"/></svg>Reportar problema
+                </button>
+                <button id="btn-request-changes" class="hidden" type="button" title="Devolver ao classificador com nota (mantém máscara)">
+                    <svg class="icon" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-message-square-text"/></svg>Pedir ajustes
+                </button>
+            </div>
+            <div class="action-group action-group-end">
+                <button id="btn-pause" class="footer-pause" type="button" title="Pausa salva o trabalho parcial no servidor e congela o tempo">
+                    <svg class="icon" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-pause"/></svg>Pausar
+                </button>
+                <button id="btn-submit" class="primary btn-submit" type="button">
+                    <svg class="icon submit-icon-send" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-send"/></svg>
+                    <svg class="icon submit-icon-approve" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-check"/></svg>
+                    <svg class="icon submit-icon-warn" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-triangle-alert"/></svg>
+                    <span id="submit-label">Submeter</span>
+                    <span class="kbd">Ctrl S</span>
+                </button>
+            </div>
         </footer>
 
         <!-- Operator action confirmation modal (submit/pause) -->
         <div id="modal-action-confirm" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="action-confirm-title">
-            <div class="modal-box">
-                <h2 id="action-confirm-title">Confirmar</h2>
-                <p id="action-confirm-message"></p>
+            <div class="modal-box modal-box-sm">
+                <div class="modal-head">
+                    <span id="action-confirm-icon" class="modal-icon tone-accent" aria-hidden="true"><svg class="icon icon-lg"><use id="action-confirm-icon-use" href="/static/vendor/lucide/icons.svg#i-send"/></svg></span>
+                    <div class="modal-head-text">
+                        <h2 id="action-confirm-title">Confirmar</h2>
+                        <p id="action-confirm-message"></p>
+                    </div>
+                </div>
                 <div class="modal-actions">
-                    <button id="action-confirm-cancel">Cancelar</button>
-                    <button id="action-confirm-ok" class="primary">Confirmar</button>
+                    <button id="action-confirm-cancel" type="button">Cancelar</button>
+                    <button id="action-confirm-ok" class="primary" type="button">Confirmar</button>
                 </div>
             </div>
         </div>
 
         <!-- Problem modal -->
-        <div id="modal-problem" class="modal hidden" role="dialog" aria-modal="true" aria-label="Reportar problema">
-            <div class="modal-box">
-                <h2>Reportar Problema</h2>
-                <textarea id="problem-note" rows="5" maxlength="2000"
-                          placeholder="Descreva o problema..."></textarea>
+        <div id="modal-problem" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="problem-title">
+            <div class="modal-box modal-box-md">
+                <div class="modal-head">
+                    <span class="modal-icon tone-err" aria-hidden="true"><svg class="icon icon-lg"><use href="/static/vendor/lucide/icons.svg#i-flag"/></svg></span>
+                    <div class="modal-head-text">
+                        <h2 id="problem-title">Reportar problema</h2>
+                        <p>O tile sai da sua fila e vai para análise do administrador.</p>
+                    </div>
+                </div>
+                <label class="field">
+                    <span class="field-label">O que há de errado com este tile?</span>
+                    <textarea id="problem-note" rows="5" maxlength="2000"
+                              placeholder="Ex.: imagem com nuvens, fora da área de interesse, sem satélite..."></textarea>
+                </label>
                 <div class="textarea-footer">
-                    <span class="hint">Ctrl+Enter para enviar</span>
+                    <span class="hint"><span class="kbd">Ctrl Enter</span> para enviar</span>
                     <span id="problem-note-count" class="char-count">0/2000</span>
                 </div>
                 <div class="modal-actions">
-                    <button id="problem-cancel">Cancelar</button>
-                    <button id="problem-confirm" class="primary">Confirmar</button>
+                    <button id="problem-cancel" type="button">Cancelar</button>
+                    <button id="problem-confirm" class="danger solid" type="button">
+                        <svg class="icon" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-flag"/></svg>Reportar problema
+                    </button>
                 </div>
             </div>
         </div>
 
         <!-- Reviewer "request changes" modal -->
-        <div id="modal-request-changes" class="modal hidden" role="dialog" aria-modal="true" aria-label="Pedir ajustes">
-            <div class="modal-box">
-                <h2>Pedir ajustes</h2>
-                <p class="hint">A máscara é preservada e o tile volta para a fila de classificação com sua nota.</p>
-                <textarea id="request-changes-note" rows="5" maxlength="2000"
-                          placeholder="Explique o que precisa ser ajustado..."></textarea>
+        <div id="modal-request-changes" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="request-changes-title">
+            <div class="modal-box modal-box-md">
+                <div class="modal-head">
+                    <span class="modal-icon tone-warn" aria-hidden="true"><svg class="icon icon-lg"><use href="/static/vendor/lucide/icons.svg#i-message-square-text"/></svg></span>
+                    <div class="modal-head-text">
+                        <h2 id="request-changes-title">Pedir ajustes</h2>
+                        <p>A máscara é preservada e o tile volta para a fila de classificação com sua nota.</p>
+                    </div>
+                </div>
+                <label class="field">
+                    <span class="field-label">Nota para o classificador</span>
+                    <textarea id="request-changes-note" rows="5" maxlength="2000"
+                              placeholder="Explique o que precisa ser ajustado..."></textarea>
+                </label>
                 <div class="textarea-footer">
-                    <span class="hint">Ctrl+Enter para enviar</span>
+                    <span class="hint"><span class="kbd">Ctrl Enter</span> para enviar</span>
                 </div>
                 <div class="modal-actions">
-                    <button id="request-changes-cancel">Cancelar</button>
-                    <button id="request-changes-confirm" class="primary">Devolver ao classificador</button>
+                    <button id="request-changes-cancel" type="button">Cancelar</button>
+                    <button id="request-changes-confirm" class="primary" type="button">
+                        <svg class="icon" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-send"/></svg>Devolver ao classificador
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Keyboard shortcuts reference (? key / "Ver todos os atalhos") -->
+        <div id="modal-shortcuts" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="shortcuts-title">
+            <div class="modal-box modal-box-lg">
+                <div class="modal-head">
+                    <span class="modal-icon tone-accent" aria-hidden="true"><svg class="icon icon-lg"><use href="/static/vendor/lucide/icons.svg#i-keyboard"/></svg></span>
+                    <div class="modal-head-text">
+                        <h2 id="shortcuts-title">Atalhos de teclado</h2>
+                        <p>Atalhos ficam desativados enquanto um campo de texto ou diálogo está aberto.</p>
+                    </div>
+                </div>
+                <div class="sc-groups">
+                    <div class="sc-group raster-only">
+                        <h4 class="eyebrow">Pintura</h4>
+                        <div class="sc-row"><span class="sc-desc">Selecionar classe</span><span class="sc-keys"><span class="kbd">1</span>–<span class="kbd">6</span></span></div>
+                        <div class="sc-row"><span class="sc-desc">Pincel</span><span class="sc-keys"><span class="kbd">Q</span></span></div>
+                        <div class="sc-row"><span class="sc-desc">Borracha</span><span class="sc-keys"><span class="kbd">W</span></span></div>
+                        <div class="sc-row"><span class="sc-desc">Balde de preenchimento</span><span class="sc-keys"><span class="kbd">E</span></span></div>
+                        <div class="sc-row"><span class="sc-desc">Pincel menor / maior</span><span class="sc-keys"><span class="kbd">A</span><span class="kbd">S</span></span></div>
+                        <div class="sc-row"><span class="sc-desc">Desfazer</span><span class="sc-keys"><span class="kbd">Ctrl Z</span></span></div>
+                        <div class="sc-row"><span class="sc-desc">Refazer</span><span class="sc-keys"><span class="kbd">Ctrl Y</span><span class="kbd">Ctrl ⇧ Z</span></span></div>
+                    </div>
+                    <div class="sc-group raster-only">
+                        <h4 class="eyebrow">Visualização</h4>
+                        <div class="sc-row"><span class="sc-desc">Esconder máscara (segurar)</span><span class="sc-keys"><span class="kbd">Space</span></span></div>
+                        <div class="sc-row"><span class="sc-desc">Opacidade − / +</span><span class="sc-keys"><span class="kbd">Z</span><span class="kbd">X</span></span></div>
+                        <div class="sc-row"><span class="sc-desc">Opacidade fina</span><span class="sc-keys"><span class="kbd">Ctrl</span>+<span class="kbd">Roda</span></span></div>
+                        <div class="sc-row"><span class="sc-desc">Zoom</span><span class="sc-keys"><span class="kbd">Roda</span></span></div>
+                        <div class="sc-row"><span class="sc-desc">Mover a imagem</span><span class="sc-keys"><span class="kbd">Botão direito</span>+ arrastar</span></div>
+                        <div class="sc-row"><span class="sc-desc">Destacar faltantes</span><span class="sc-keys"><span class="kbd">F</span></span></div>
+                        <div class="sc-row"><span class="sc-desc">Próximo pixel faltante</span><span class="sc-keys"><span class="kbd">C</span></span></div>
+                        <div class="sc-row" data-overlay-key="d"><span class="sc-desc">Imagem 2ª (segurar)</span><span class="sc-keys"><span class="kbd">D</span></span></div>
+                        <div class="sc-row" data-overlay-key="r"><span class="sc-desc">Imagem 3ª (segurar)</span><span class="sc-keys"><span class="kbd">R</span></span></div>
+                        <div class="sc-row" data-overlay-key="t"><span class="sc-desc">Máscara ref. 1ª (segurar)</span><span class="sc-keys"><span class="kbd">T</span></span></div>
+                        <div class="sc-row" data-overlay-key="y"><span class="sc-desc">Máscara ref. 2ª (segurar)</span><span class="sc-keys"><span class="kbd">Y</span></span></div>
+                    </div>
+                    <div class="sc-group classification-only">
+                        <h4 class="eyebrow">Classificação</h4>
+                        <div class="sc-row"><span class="sc-desc">Selecionar classe</span><span class="sc-keys"><span class="kbd">1</span>–<span class="kbd">9</span></span></div>
+                        <div class="sc-row"><span class="sc-desc">Zoom / mover o mapa</span><span class="sc-keys"><span class="kbd">Roda</span><span class="kbd">Arrastar</span></span></div>
+                    </div>
+                    <div class="sc-group">
+                        <h4 class="eyebrow">Geral</h4>
+                        <div class="sc-row"><span class="sc-desc">Submeter / aprovar</span><span class="sc-keys"><span class="kbd">Ctrl S</span></span></div>
+                        <div class="sc-row"><span class="sc-desc">Trocar de projeto</span><span class="sc-keys"><span class="kbd">Ctrl P</span></span></div>
+                        <div class="sc-row"><span class="sc-desc">Esta lista de atalhos</span><span class="sc-keys"><span class="kbd">?</span></span></div>
+                        <div class="sc-row"><span class="sc-desc">Fechar diálogo</span><span class="sc-keys"><span class="kbd">Esc</span></span></div>
+                    </div>
+                </div>
+                <div class="modal-actions">
+                    <button id="shortcuts-close" class="primary" type="button">Entendi</button>
                 </div>
             </div>
         </div>

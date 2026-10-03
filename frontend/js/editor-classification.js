@@ -9,7 +9,7 @@
 import { authHeader } from "./api.js";
 import { showToast } from "./toast.js";
 import { tileTransformRequest, makeRasterStyle } from "./maplib.js";
-import { escapeHtml } from "./utils.js";
+import { icon } from "./utils.js";
 import { classIdForKey, tileFrameGeoJSON } from "./classification-core.js";
 
 let _map = null;
@@ -73,23 +73,41 @@ export async function enterClassificationTile(tile, project) {
     map.on("load", () => _addTileFrame(map, tile));
 }
 
+// Frame colors are theme tokens (editor.css: --canvas-ink / --canvas-accent
+// on #view-editor), re-applied on `tc-themechange`.
+function _frameColors() {
+    const el = document.getElementById("view-editor") || document.documentElement;
+    const cs = getComputedStyle(el);
+    return {
+        shade: cs.getPropertyValue("--canvas-ink").trim(),
+        accent: cs.getPropertyValue("--canvas-accent").trim(),
+    };
+}
+
 // Dim everything outside the tile and outline its bbox, so the operator
 // classifies the tile itself and not the surrounding context.
 function _addTileFrame(map, tile) {
     const { shade, outline } = tileFrameGeoJSON(tile);
-    const accent = getComputedStyle(document.documentElement)
-        .getPropertyValue("--accent").trim() || "#4fc3f7";
+    const colors = _frameColors();
     map.addSource("tile-shade", { type: "geojson", data: shade });
     map.addSource("tile-outline", { type: "geojson", data: outline });
     map.addLayer({
         id: "tile-shade", type: "fill", source: "tile-shade",
-        paint: { "fill-color": "#000000", "fill-opacity": 0.55 },
+        paint: { "fill-opacity": 0.55, ...(colors.shade ? { "fill-color": colors.shade } : {}) },
     });
     map.addLayer({
         id: "tile-outline", type: "line", source: "tile-outline",
-        paint: { "line-color": accent, "line-width": 2 },
+        paint: { "line-width": 2, ...(colors.accent ? { "line-color": colors.accent } : {}) },
     });
 }
+
+window.addEventListener("tc-themechange", () => {
+    const map = _map;
+    if (!map?.getLayer?.("tile-shade")) return;
+    const colors = _frameColors();
+    if (colors.shade) map.setPaintProperty("tile-shade", "fill-color", colors.shade);
+    if (colors.accent) map.setPaintProperty("tile-outline", "line-color", colors.accent);
+});
 
 // Digit 1–9 selects the Nth class. editor.js calls this after its own
 // text-focus / modal guards, so it only sees keys meant for the editor.
@@ -145,32 +163,67 @@ function _setupContainer() {
 }
 
 function _renderClassPanel() {
+    // index.html ships the panel inside the right sidebar; tests (and any
+    // host page without it) get one appended to <body>.
     let panel = document.getElementById("classification-panel");
     if (!panel) {
-        panel = document.createElement("aside");
+        panel = document.createElement("section");
         panel.id = "classification-panel";
-        panel.className = "classification-panel";
+        panel.className = "panel-section classification-panel";
         document.body.appendChild(panel);
     }
     panel.classList.remove("hidden");
     const classes = _project?.classes || [];
-    panel.innerHTML = `
-        <h3>Escolha a classe</h3>
-        <p class="classification-hint">Clique na classe (ou tecle 1–9) que melhor descreve a área dentro do contorno, então use o botão Submeter no rodapé.</p>
-        <div class="classification-list" id="classification-list">
-            ${classes.map((c, i) => `
-                <button class="classification-class" data-class-id="${c.id}">
-                    <span class="classification-swatch" style="background:${escapeHtml(c.color)}"></span>
-                    <span class="classification-name">${escapeHtml(c.name)}</span>
-                    ${i < 9 ? `<span class="kbd">${i + 1}</span>` : ""}
-                </button>
-            `).join("")}
-        </div>
-        <p class="classification-meta" id="classification-status">Nenhuma classe selecionada.</p>
-    `;
-    for (const b of panel.querySelectorAll("[data-class-id]")) {
-        b.onclick = () => _selectClass(parseInt(b.dataset.classId, 10));
-    }
+
+    const heading = document.createElement("div");
+    heading.className = "panel-heading";
+    const h3 = document.createElement("h3");
+    h3.className = "eyebrow";
+    h3.textContent = "Escolha a classe";
+    heading.appendChild(h3);
+
+    const hint = document.createElement("p");
+    hint.className = "classification-hint";
+    hint.textContent = "Escolha a classe que melhor descreve a área dentro do contorno "
+        + "(clique ou tecle 1–9) e envie com Submeter.";
+
+    const list = document.createElement("div");
+    list.className = "classification-list";
+    list.id = "classification-list";
+    list.setAttribute("role", "listbox");
+    list.setAttribute("aria-label", "Classe do tile");
+    classes.forEach((c, i) => {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = "classification-class";
+        b.dataset.classId = String(c.id);
+        b.setAttribute("role", "option");
+        b.setAttribute("aria-selected", "false");
+        const sw = document.createElement("span");
+        sw.className = "classification-swatch";
+        sw.style.backgroundColor = c.color;  // class color is data
+        const name = document.createElement("span");
+        name.className = "classification-name";
+        name.textContent = c.name;
+        const check = icon("check", "classification-check");
+        b.append(sw, name, check);
+        if (i < 9) {
+            const k = document.createElement("span");
+            k.className = "kbd";
+            k.textContent = String(i + 1);
+            b.appendChild(k);
+        }
+        b.onclick = () => _selectClass(c.id);
+        list.appendChild(b);
+    });
+
+    const status = document.createElement("p");
+    status.className = "classification-meta";
+    status.id = "classification-status";
+    status.setAttribute("aria-live", "polite");
+    status.textContent = "Nenhuma classe selecionada.";
+
+    panel.replaceChildren(heading, hint, list, status);
 }
 
 function _selectClass(cid) {
@@ -178,12 +231,15 @@ function _selectClass(cid) {
     const panel = document.getElementById("classification-panel");
     if (!panel) return;
     for (const b of panel.querySelectorAll("[data-class-id]")) {
-        b.classList.toggle("active", parseInt(b.dataset.classId, 10) === cid);
+        const on = parseInt(b.dataset.classId, 10) === cid;
+        b.classList.toggle("active", on);
+        b.setAttribute("aria-selected", String(on));
     }
     const cls = (_project?.classes || []).find(c => c.id === cid);
     const status = document.getElementById("classification-status");
     if (status) {
-        status.textContent = cls ? `Selecionado: ${cls.name}` : "Nenhuma classe selecionada.";
+        status.textContent = cls ? `Selecionada: ${cls.name}` : "Nenhuma classe selecionada.";
+        status.classList.toggle("selected", !!cls);
     }
     // Footer submit button flips out of incomplete state when a class is chosen.
     window.tcRefreshSubmit?.();

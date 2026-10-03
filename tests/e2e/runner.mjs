@@ -727,18 +727,64 @@ try {
         await login(page, "op_keys", "secret123");
         await page.focus("#canvas-cursor");
         const brush0 = await page.$eval("#brush-size-label", el => el.textContent);
+        // The fitted zoom depends on the stage size; what matters is that the
+        // chords leave it untouched.
+        const zoom0 = await page.$eval("#zoom-label", el => el.textContent);
         for (const key of ["a", "f", "c"]) {
             await page.keyboard.down("Control"); await page.keyboard.press(key); await page.keyboard.up("Control");
         }
         const brush1 = await page.$eval("#brush-size-label", el => el.textContent);
         assert(brush1 === brush0, `Ctrl+A changed brush ${brush0} → ${brush1}`);
         const zoom = await page.$eval("#zoom-label", el => el.textContent);
-        assert(zoom === "100%", `Ctrl+C jumped/zoomed to a missing pixel (zoom ${zoom})`);
+        assert(zoom === zoom0, `Ctrl+C jumped/zoomed to a missing pixel (zoom ${zoom0} → ${zoom})`);
         // Mask is incomplete → Ctrl+S goes through submit(), which refuses
         // with the "Faltam N pixels" toast instead of opening the save dialog.
         await page.keyboard.down("Control"); await page.keyboard.press("s"); await page.keyboard.up("Control");
         const toast = await page.$eval("#toast", el => el.textContent);
         assert(/Faltam/.test(toast), `Ctrl+S should run submit, toast="${toast}"`);
+        await page.close(); await page._tcContext?.close();
+    });
+
+    await test("hover readout never moves the stage (canvas/map rects stable across hovers)", async () => {
+        const page = await newPageBlocked();
+        await login(page, "op_keys", "secret123");
+        // Class 6 has the longest name in the default project ("Terreno exposto").
+        await page.keyboard.press("6");
+        await page.click("#tool-brush");
+        const box = await page.$eval("#canvas-cursor", el => {
+            const r = el.getBoundingClientRect();
+            return { x: r.left, y: r.top, w: r.width, h: r.height };
+        });
+        await page.mouse.move(box.x + 10, box.y + 10);
+        await page.mouse.down();
+        for (let i = 0; i < 40; i++) await page.mouse.move(box.x + 10 + i * 3, box.y + 10);
+        await page.mouse.up();
+        const snap = () => page.evaluate(() => {
+            const r = (sel) => {
+                const b = document.querySelector(sel).getBoundingClientRect();
+                return [b.left, b.top, b.width, b.height].map(v => Math.round(v * 10) / 10);
+            };
+            return {
+                rects: JSON.stringify({ viewport: r("#canvas-viewport"), stack: r(".canvas-stack") }),
+                hover: document.getElementById("hover-class").textContent,
+            };
+        });
+        const seen = new Set(), texts = new Set();
+        // painted → unpainted → painted → centre (unpainted) → painted
+        for (const [dx, dy] of [[12, 10], [box.w - 20, box.h - 20], [20, 10], [box.w / 2, box.h / 2], [15, 11]]) {
+            await page.mouse.move(box.x + dx, box.y + dy);
+            await new Promise(r => setTimeout(r, 120));
+            const s = await snap();
+            seen.add(s.rects);
+            texts.add(s.hover);
+        }
+        await page.mouse.move(box.x - 40, box.y + box.h / 2);  // leave → "—"
+        await new Promise(r => setTimeout(r, 120));
+        const out = await snap();
+        seen.add(out.rects); texts.add(out.hover);
+        assert(texts.has("Terreno exposto") && texts.has("(não preenchido)"),
+            `hover text did not vary as expected: ${[...texts].join(" | ")}`);
+        assert(seen.size === 1, `stage moved while the hover text changed:\n      ${[...seen].join("\n      ")}`);
         await page.close(); await page._tcContext?.close();
     });
 
