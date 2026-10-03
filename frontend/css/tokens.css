@@ -1,0 +1,224 @@
+/* Design tokens — the only place colors live.
+ *
+ * Theme resolution: theme-boot.js sets <html data-theme="light|dark"> before
+ * first paint (from the saved preference, or the OS setting when the
+ * preference is "system"). The @media block is a no-JS fallback.
+ *
+ * Components must use these variables — never hex values — so both themes
+ * stay correct. Names are kept from the previous single-theme palette
+ * (--bg-0…4, --text*, --accent*, --ok/--warn/--err/--info + soft triplets)
+ * so existing rules keep working; new semantic names are additive.
+ */
+
+:root {
+    color-scheme: light;
+
+    /* Surfaces: 0 = app background, 1 = cards/panels, 2–4 = raised/hover/pressed */
+    --bg-0: #f7f7f8;
+    --bg-1: #ffffff;
+    --bg-2: #f4f4f5;
+    --bg-3: #ececee;
+    --bg-4: #e2e2e6;
+    --surface-sunken: #f1f1f3;
+    --overlay: rgba(9, 9, 11, 0.45);
+
+    --border: #e6e6ea;
+    --border-strong: #d4d4da;
+
+    --text: #09090b;
+    --text-muted: #5b5b66;
+    --text-dim: #8e8e99;
+    --on-accent: #ffffff;
+    --on-dark: #fafafa;
+
+    /* Brand accent — indigo */
+    --accent: #4f46e5;
+    --accent-hi: #4338ca;
+    --accent-lo: #3730a3;
+    --accent-soft: rgba(79, 70, 229, 0.10);
+    --accent-soft-strong: rgba(79, 70, 229, 0.18);
+    --focus-ring: 0 0 0 3px rgba(79, 70, 229, 0.25);
+
+    --ok: #15803d;
+    --warn: #b45309;
+    --err: #dc2626;
+    --info: #0369a1;
+
+    --ok-bg: #ecfdf3;    --ok-border: #a6e9bf;    --ok-fg: #166534;
+    --warn-bg: #fffbeb;  --warn-border: #fcd38d;  --warn-fg: #92400e;
+    --warn-hi: #92410a;
+    --err-bg: #fef2f2;   --err-border: #fecaca;   --err-fg: #b91c1c;
+    --err-hover-bg: #fee2e2;
+    --info-bg: #eff8ff;  --info-border: #b2ddff;  --info-fg: #075985;
+
+    /* Tile status palette (chips, map legend, charts) */
+    --st-pending: #71717a;     --st-pending-bg: #f4f4f5;
+    --st-in_progress: #4f46e5; --st-in_progress-bg: #eef2ff;
+    --st-classified: #0284c7;  --st-classified-bg: #e0f2fe;
+    --st-in_review: #d97706;   --st-in_review-bg: #fef3c7;
+    --st-reviewed: #16a34a;    --st-reviewed-bg: #dcfce7;
+    --st-problem: #dc2626;     --st-problem-bg: #fee2e2;
+    --st-paused: #7c3aed;      --st-paused-bg: #ede9fe;
+    --st-blocked: #3f3f46;     --st-blocked-bg: #e4e4e7;
+
+    /* Categorical chart series (non-status data) */
+    --chart-1: #4f46e5;
+    --chart-2: #0ea5e9;
+    --chart-3: #f59e0b;
+    --chart-4: #ec4899;
+    --chart-5: #14b8a6;
+    --chart-6: #8b5cf6;
+    --chart-grid: #ececee;
+
+    /* Editor stage: the area around the satellite canvas */
+    --stage-bg: #e9e9ec;
+    --stage-pattern: rgba(9, 9, 11, 0.04);
+
+    --radius-sm: 6px;
+    --radius: 8px;
+    --radius-lg: 12px;
+    --radius-xl: 16px;
+    --radius-full: 999px;
+
+    --shadow-xs: 0 1px 2px rgba(9, 9, 11, 0.05);
+    --shadow-sm: 0 1px 3px rgba(9, 9, 11, 0.08), 0 1px 2px rgba(9, 9, 11, 0.04);
+    --shadow: 0 4px 12px -2px rgba(9, 9, 11, 0.08), 0 2px 4px -2px rgba(9, 9, 11, 0.04);
+    --shadow-lg: 0 16px 40px -8px rgba(9, 9, 11, 0.18), 0 4px 12px -4px rgba(9, 9, 11, 0.08);
+
+    --space-1: 4px;
+    --space-2: 8px;
+    --space-3: 12px;
+    --space-4: 16px;
+    --space-5: 20px;
+    --space-6: 24px;
+    --space-8: 32px;
+    --space-10: 40px;
+
+    --font-sans: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --font-mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+    --text-xs: 11px;
+    --text-sm: 12px;
+    --text-md: 13px;
+    --text-base: 14px;
+    --text-lg: 15px;
+    --text-xl: 17px;
+    --text-2xl: 22px;
+    --text-3xl: 28px;
+
+    --header-h: 56px;
+    --footer-h: 60px;
+    --sidebar-w: 248px;
+    --sidebar-right-w: 272px;
+
+    --ease: cubic-bezier(0.4, 0, 0.2, 1);
+    --duration-fast: 80ms;
+    --duration-base: 140ms;
+    --duration-slow: 220ms;
+    --transition: var(--duration-base) var(--ease);
+
+    --z-overlay: 10;
+    --z-floating: 50;
+    --z-modal: 100;
+    --z-toast: 200;
+    --z-takeover: 500;
+}
+
+/* ---- Dark theme ---------------------------------------------------------
+   Declared twice on purpose: explicit [data-theme="dark"] (set by JS), and
+   the OS preference when no explicit light choice was made (no-JS fallback).
+   Keep the two blocks identical. */
+:root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg-0: #09090b;
+    --bg-1: #111114;
+    --bg-2: #18181c;
+    --bg-3: #212126;
+    --bg-4: #2b2b31;
+    --surface-sunken: #0c0c0e;
+    --overlay: rgba(0, 0, 0, 0.6);
+    --border: #26262c;
+    --border-strong: #35353d;
+    --text: #fafafa;
+    --text-muted: #a1a1aa;
+    --text-dim: #71717a;
+    --on-accent: #ffffff;
+    --accent: #6366f1;
+    --accent-hi: #818cf8;
+    --accent-lo: #4f46e5;
+    --accent-soft: rgba(99, 102, 241, 0.14);
+    --accent-soft-strong: rgba(99, 102, 241, 0.24);
+    --focus-ring: 0 0 0 3px rgba(129, 140, 248, 0.35);
+    --ok: #22c55e;  --warn: #f59e0b;  --err: #f87171;  --info: #38bdf8;
+    --ok-bg: rgba(34, 197, 94, 0.12);   --ok-border: rgba(34, 197, 94, 0.35);   --ok-fg: #4ade80;
+    --warn-bg: rgba(245, 158, 11, 0.12); --warn-border: rgba(245, 158, 11, 0.35); --warn-fg: #fbbf24;
+    --warn-hi: #fcd34d;
+    --err-bg: rgba(248, 113, 113, 0.12); --err-border: rgba(248, 113, 113, 0.35); --err-fg: #fca5a5;
+    --err-hover-bg: rgba(248, 113, 113, 0.2);
+    --info-bg: rgba(56, 189, 248, 0.12); --info-border: rgba(56, 189, 248, 0.35); --info-fg: #7dd3fc;
+    --st-pending: #a1a1aa;     --st-pending-bg: rgba(161, 161, 170, 0.14);
+    --st-in_progress: #818cf8; --st-in_progress-bg: rgba(129, 140, 248, 0.16);
+    --st-classified: #38bdf8;  --st-classified-bg: rgba(56, 189, 248, 0.14);
+    --st-in_review: #fbbf24;   --st-in_review-bg: rgba(251, 191, 36, 0.14);
+    --st-reviewed: #4ade80;    --st-reviewed-bg: rgba(74, 222, 128, 0.14);
+    --st-problem: #f87171;     --st-problem-bg: rgba(248, 113, 113, 0.14);
+    --st-paused: #a78bfa;      --st-paused-bg: rgba(167, 139, 250, 0.16);
+    --st-blocked: #d4d4d8;     --st-blocked-bg: rgba(212, 212, 216, 0.12);
+    --chart-1: #818cf8; --chart-2: #38bdf8; --chart-3: #fbbf24;
+    --chart-4: #f472b6; --chart-5: #2dd4bf; --chart-6: #a78bfa;
+    --chart-grid: #26262c;
+    --stage-bg: #050506;
+    --stage-pattern: rgba(255, 255, 255, 0.03);
+    --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.5);
+    --shadow: 0 4px 14px -2px rgba(0, 0, 0, 0.55);
+    --shadow-lg: 0 18px 44px -8px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255, 255, 255, 0.04);
+}
+
+@media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+        color-scheme: dark;
+        --bg-0: #09090b;
+        --bg-1: #111114;
+        --bg-2: #18181c;
+        --bg-3: #212126;
+        --bg-4: #2b2b31;
+        --surface-sunken: #0c0c0e;
+        --overlay: rgba(0, 0, 0, 0.6);
+        --border: #26262c;
+        --border-strong: #35353d;
+        --text: #fafafa;
+        --text-muted: #a1a1aa;
+        --text-dim: #71717a;
+        --on-accent: #ffffff;
+        --accent: #6366f1;
+        --accent-hi: #818cf8;
+        --accent-lo: #4f46e5;
+        --accent-soft: rgba(99, 102, 241, 0.14);
+        --accent-soft-strong: rgba(99, 102, 241, 0.24);
+        --focus-ring: 0 0 0 3px rgba(129, 140, 248, 0.35);
+        --ok: #22c55e;  --warn: #f59e0b;  --err: #f87171;  --info: #38bdf8;
+        --ok-bg: rgba(34, 197, 94, 0.12);   --ok-border: rgba(34, 197, 94, 0.35);   --ok-fg: #4ade80;
+        --warn-bg: rgba(245, 158, 11, 0.12); --warn-border: rgba(245, 158, 11, 0.35); --warn-fg: #fbbf24;
+        --warn-hi: #fcd34d;
+        --err-bg: rgba(248, 113, 113, 0.12); --err-border: rgba(248, 113, 113, 0.35); --err-fg: #fca5a5;
+        --err-hover-bg: rgba(248, 113, 113, 0.2);
+        --info-bg: rgba(56, 189, 248, 0.12); --info-border: rgba(56, 189, 248, 0.35); --info-fg: #7dd3fc;
+        --st-pending: #a1a1aa;     --st-pending-bg: rgba(161, 161, 170, 0.14);
+        --st-in_progress: #818cf8; --st-in_progress-bg: rgba(129, 140, 248, 0.16);
+        --st-classified: #38bdf8;  --st-classified-bg: rgba(56, 189, 248, 0.14);
+        --st-in_review: #fbbf24;   --st-in_review-bg: rgba(251, 191, 36, 0.14);
+        --st-reviewed: #4ade80;    --st-reviewed-bg: rgba(74, 222, 128, 0.14);
+        --st-problem: #f87171;     --st-problem-bg: rgba(248, 113, 113, 0.14);
+        --st-paused: #a78bfa;      --st-paused-bg: rgba(167, 139, 250, 0.16);
+        --st-blocked: #d4d4d8;     --st-blocked-bg: rgba(212, 212, 216, 0.12);
+        --chart-1: #818cf8; --chart-2: #38bdf8; --chart-3: #fbbf24;
+        --chart-4: #f472b6; --chart-5: #2dd4bf; --chart-6: #a78bfa;
+        --chart-grid: #26262c;
+        --stage-bg: #050506;
+        --stage-pattern: rgba(255, 255, 255, 0.03);
+        --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.4);
+        --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.5);
+        --shadow: 0 4px 14px -2px rgba(0, 0, 0, 0.55);
+        --shadow-lg: 0 18px 44px -8px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255, 255, 255, 0.04);
+    }
+}

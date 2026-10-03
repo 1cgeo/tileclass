@@ -4,6 +4,7 @@
 import { apiGet, login, getTokens, setTokens } from "./api.js";
 import { initEditor, enterEditor } from "./editor.js";
 import { initAdmin, enterAdmin } from "./admin.js";
+import { initTheme } from "./theme.js";
 
 const LS_ADMIN_LAST_VIEW = "tileclass_admin_last_view";
 
@@ -85,4 +86,5 @@ function showLogin() {
     };
 }
 
+initTheme();
 start();

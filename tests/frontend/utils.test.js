@@ -61,3 +61,21 @@ describe("statusLabel", () => {
         expect(statusLabel("future_state")).toBe("future_state");
     });
 });
+
+describe("icon / iconHtml", () => {
+    it("builds an aria-hidden svg referencing the sprite symbol", async () => {
+        const { icon, ICON_SPRITE } = await import("../../frontend/js/utils.js");
+        const el = icon("sun", "icon-lg");
+        expect(el.tagName.toLowerCase()).toBe("svg");
+        expect(el.getAttribute("class")).toBe("icon icon-lg");
+        expect(el.getAttribute("aria-hidden")).toBe("true");
+        expect(el.querySelector("use").getAttribute("href")).toBe(`${ICON_SPRITE}#i-sun`);
+    });
+
+    it("iconHtml escapes the class and rejects unsafe names", async () => {
+        const { iconHtml } = await import("../../frontend/js/utils.js");
+        expect(iconHtml("moon", '"x')).toContain('class="icon &quot;x"');
+        expect(() => iconHtml('sun"/><script>')).toThrow();
+        expect(() => iconHtml("../x")).toThrow();
+    });
+});

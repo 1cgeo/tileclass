@@ -4,23 +4,59 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TileClass</title>
-    <!-- Inline SVG favicon: blue T on the slate background tone — keeps the
-         identity recognizable at 16px without shipping a binary asset. -->
-    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%231b2230'/%3E%3Cpath d='M7 9h18v4h-7v14h-4V13H7z' fill='%232563eb'/%3E%3C/svg%3E">
+    <meta name="color-scheme" content="light dark">
+    <!-- Brand mark: indigo tile with a 2×2 grid, one cell "labelled". -->
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%234f46e5'/%3E%3Crect x='8' y='8' width='7' height='7' rx='1.5' fill='%23fff'/%3E%3Crect x='17' y='8' width='7' height='7' rx='1.5' fill='%23fff' fill-opacity='.45'/%3E%3Crect x='8' y='17' width='7' height='7' rx='1.5' fill='%23fff' fill-opacity='.45'/%3E%3Crect x='17' y='17' width='7' height='7' rx='1.5' fill='%23fff' fill-opacity='.8'/%3E%3C/svg%3E">
+    <!-- Sets <html data-theme> before first paint (no light/dark flash). -->
+    <script src="/static/js/theme-boot.js"></script>
+    <link rel="preload" href="/static/vendor/inter/inter-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin>
     <link rel="stylesheet" href="/static/vendor/maplibre/maplibre-gl.css">
-    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="stylesheet" href="/static/css/tokens.css">
+    <link rel="stylesheet" href="/static/css/base.css">
+    <link rel="stylesheet" href="/static/css/editor.css">
+    <link rel="stylesheet" href="/static/css/admin.css">
     <script src="/static/vendor/maplibre/maplibre-gl.js"></script>
 </head>
 <body>
     <!-- Login view -->
     <div id="view-login" class="view">
-        <form id="login-form" class="login-box">
-            <h1>TileClass</h1>
-            <label>Usuário <input type="text" id="login-username" autocomplete="username" required></label>
-            <label>Senha <input type="password" id="login-password" autocomplete="current-password" required></label>
-            <button type="submit">Entrar</button>
-            <div id="login-error" class="error"></div>
-        </form>
+        <div class="login-shell">
+            <aside class="login-hero">
+                <div class="brand">
+                    <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" class="bm-bg"/><rect x="8" y="8" width="7" height="7" rx="1.5" class="bm-cell bm-on"/><rect x="17" y="8" width="7" height="7" rx="1.5" class="bm-cell"/><rect x="8" y="17" width="7" height="7" rx="1.5" class="bm-cell"/><rect x="17" y="17" width="7" height="7" rx="1.5" class="bm-cell bm-on2"/></svg>
+                    <span class="brand-name">TileClass</span>
+                </div>
+                <div class="login-hero-grid" aria-hidden="true"></div>
+                <div class="login-hero-tiles" aria-hidden="true">
+                    <span></span><span class="t1"></span><span></span><span class="t2"></span>
+                    <span class="t3"></span><span></span><span class="t1"></span><span></span>
+                    <span></span><span class="t4"></span><span></span><span class="t2"></span>
+                </div>
+                <div class="login-hero-copy">
+                    <h1>Datasets geoespaciais rotulados, com revisão em equipe.</h1>
+                    <p>Segmentação pixel a pixel e classificação de tiles de satélite, com fila de trabalho, revisão por pares e exportação georreferenciada.</p>
+                    <ul class="login-features">
+                        <li><svg class="icon" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-layers"/></svg>Segmentação e classificação por projeto</li>
+                        <li><svg class="icon" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-user-check"/></svg>Fila de revisão com controle de qualidade</li>
+                        <li><svg class="icon" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-download"/></svg>Export GeoTIFF e CSV prontos para treino</li>
+                    </ul>
+                </div>
+                <div class="login-hero-foot">TileClass · anotação de imagens de satélite</div>
+            </aside>
+            <main class="login-panel">
+                <button type="button" class="ghost icon-btn theme-toggle" data-theme-toggle title="Alternar tema" aria-label="Alternar tema"><svg class="icon" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-moon"/></svg></button>
+                <form id="login-form" class="login-box">
+                    <div>
+                        <h2>Entrar</h2>
+                        <p class="login-lead">Use as credenciais fornecidas pelo administrador.</p>
+                    </div>
+                    <label>Usuário <input type="text" id="login-username" autocomplete="username" required></label>
+                    <label>Senha <input type="password" id="login-password" autocomplete="current-password" required></label>
+                    <button type="submit" class="primary btn-block">Entrar</button>
+                    <div id="login-error" class="error" role="alert"></div>
+                </form>
+            </main>
+        </div>
     </div>
 
     <!-- Editor view (operator) -->

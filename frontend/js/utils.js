@@ -1,4 +1,27 @@
 // Shared DOM/data helpers used by editor and admin.
+
+// Lucide icon sprite (vendored). `icon()` builds a DOM node; `iconHtml()` is
+// for template strings. Names are the Lucide ids without the `i-` prefix.
+export const ICON_SPRITE = "/static/vendor/lucide/icons.svg";
+const SVG_NS = "http://www.w3.org/2000/svg";
+const ICON_NAME_RE = /^[a-z0-9-]+$/;
+
+export function icon(name, cls = "") {
+    if (!ICON_NAME_RE.test(name)) throw new Error(`invalid icon name: ${name}`);
+    const svg = document.createElementNS(SVG_NS, "svg");
+    svg.setAttribute("class", `icon ${cls}`.trim());
+    svg.setAttribute("aria-hidden", "true");
+    const use = document.createElementNS(SVG_NS, "use");
+    use.setAttribute("href", `${ICON_SPRITE}#i-${name}`);
+    svg.appendChild(use);
+    return svg;
+}
+
+export function iconHtml(name, cls = "") {
+    if (!ICON_NAME_RE.test(name)) throw new Error(`invalid icon name: ${name}`);
+    const c = escapeHtml(`icon ${cls}`.trim());
+    return `<svg class="${c}" aria-hidden="true"><use href="${ICON_SPRITE}#i-${name}"/></svg>`;
+}
 export function hexToRgb(hex) {
     const h = hex.replace("#", "");
     return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
