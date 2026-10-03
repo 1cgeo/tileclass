@@ -1,13 +1,18 @@
 // Admin tab "Projetos". Two views in the same tab:
-//   - LIST: grid of project cards with filters/search/sort. Default.
-//   - DETAIL: full-page view of one project (back button returns to LIST).
+//   - LIST: filterable table of projects (search, kind, status, sort). Default.
+//   - DETAIL: one project as sectioned cards (overview, configuration,
+//     layers, classes, members, export). Back button returns to LIST.
 // CRUD always goes through modals (promptForm / openModal). Tile ingestion
 // lives in the CLI (backend.scripts.import_points) — never in this UI.
 import { apiGet, apiPostJson, apiPatchJson, apiPutJson, apiDelete, authHeader } from "../api.js";
 import { showToast } from "../toast.js";
 import { escapeHtml, KIND_LABELS } from "../utils.js";
+import { fmtInt, fmtPct, fmtDecimal, fmtEtaDays } from "../admin-core.js";
 import { confirmDestructive, promptForm, openModal } from "./modals.js";
 import { syncAdminProjects } from "../admin.js";
+import {
+    h, icon, button, iconButton, avatar, card, progressBar, emptyState, menuButton,
+} from "./ui.js";
 
 const LAYER_FIELDS = [
     { key: "primary_mbtiles",            label: "Imagem primária",            required: true,  hint: "Caminho .mbtiles, URL com {z}/{x}/{y} ou bingmaps://{z}/{x}/{y}" },
@@ -22,6 +27,7 @@ const KIND_HINTS = {
     raster: "Máscara per-pixel (1 byte por pixel).",
     classification: "Uma classe por tile inteiro.",
 };
+const KIND_ICONS = { raster: "paintbrush", classification: "tag" };
 
 // View state (kept across renders so filters/sort/selection survive when the
 // admin leaves the tab and comes back).
@@ -46,15 +52,23 @@ function _sortCompare(a, b) {
     return (b.id || 0) - (a.id || 0);
 }
 
+function _pageActions() {
+    const slot = document.getElementById("admin-page-actions");
+    if (slot) slot.textContent = "";
+    return slot;
+}
+
 export async function renderProjects(root) {
     root.innerHTML = `<div class="loading-text"><span class="loading"></span> Carregando projetos...</div>`;
     let stats;
     try {
         stats = await apiGet("/api/admin/projects-stats");
     } catch (e) {
-        root.innerHTML = `<p class="error">Erro: ${escapeHtml(e.message)}</p>`;
+        root.textContent = "";
+        root.appendChild(card({}, emptyState({ icon: "triangle-alert", title: "Erro ao carregar", text: e.message })));
         return;
     }
+    if (!root.isConnected) return;  // tab changed while loading
     _statsCache = stats;
     if (_view === "detail" && _selectedProjectId != null
         && stats.some(p => p.id === _selectedProjectId)) {
@@ -68,33 +82,23 @@ export async function renderProjects(root) {
 // ---- LIST VIEW ------------------------------------------------------------
 
 function _renderListView(root) {
-    root.innerHTML = `
-        <div class="projects-toolbar">
-            <div class="projects-toolbar-row">
-                <h3>Projetos <span class="muted" id="projects-count"></span></h3>
-                <button id="btn-new-project" class="primary" type="button">+ Novo projeto</button>
-            </div>
-            <div class="projects-toolbar-row">
-                <input type="search" id="projects-search" class="projects-search"
-                       placeholder="Buscar por nome ou descrição..." autocomplete="off">
-                <label class="projects-sort">
-                    <span class="muted">Ordenar:</span>
-                    <select id="projects-sort"></select>
-                </label>
-            </div>
-            <div class="projects-toolbar-row projects-filter-row">
-                <span class="projects-filter-label muted">Tipo:</span>
-                <div class="projects-filters" id="kind-filters" role="tablist" aria-label="Filtro por tipo"></div>
-            </div>
-            <div class="projects-toolbar-row projects-filter-row">
-                <span class="projects-filter-label muted">Status:</span>
-                <div class="projects-filters" id="status-filters" role="tablist" aria-label="Filtro por status"></div>
-            </div>
-        </div>
-        <div id="projects-list-host"></div>
-    `;
-    document.getElementById("btn-new-project").onclick = openCreateProjectModal;
-    const search = document.getElementById("projects-search");
+    _pageActions()?.appendChild(button("Novo projeto", {
+        id: "btn-new-project", icon: "plus", variant: "primary", onClick: openCreateProjectModal,
+    }));
+    root.textContent = "";
+    const search = h("input", { type: "search", id: "projects-search", class: "projects-search",
+                                placeholder: "Buscar por nome ou descrição…", autocomplete: "off",
+                                "aria-label": "Buscar projetos" });
+    const sort = h("select", { id: "projects-sort", "aria-label": "Ordenar" });
+    root.append(
+        h("div", { class: "toolbar projects-toolbar" },
+            h("label", { class: "input-icon toolbar-search" }, icon("search"), search),
+            h("div", { class: "segmented projects-filters", id: "kind-filters", role: "group", "aria-label": "Filtro por tipo" }),
+            h("div", { class: "segmented projects-filters", id: "status-filters", role: "group", "aria-label": "Filtro por status" }),
+            h("span", { class: "toolbar-spacer" }),
+            h("label", { class: "toolbar-field projects-sort" }, h("span", { class: "dim", text: "Ordenar" }), sort)),
+        h("div", { class: "results-bar" }, h("span", { id: "projects-count", class: "results-count" })),
+        h("div", { id: "projects-list-host" }));
     search.value = _searchQuery;
     // Debounce so typing fast doesn't redraw the whole list on every keystroke.
     let searchTimer;
@@ -111,50 +115,37 @@ function _renderListView(root) {
     _redrawList();
 }
 
-function _drawKindFilters() {
-    const host = document.getElementById("kind-filters");
+function _drawChipGroup(hostId, opts, current, onPick) {
+    const host = document.getElementById(hostId);
     if (!host) return;
-    host.innerHTML = "";
-    const opts = [
-        ["all", "Todos"],
-        ["raster", KIND_LABELS.raster],
-        ["classification", KIND_LABELS.classification],
-    ];
+    host.textContent = "";
     for (const [value, label] of opts) {
-        const btn = document.createElement("button");
-        btn.type = "button";
-        btn.className = "project-filter-chip" + (_kindFilter === value ? " active" : "");
-        btn.dataset.value = value;
-        btn.textContent = label;
-        btn.onclick = () => { _kindFilter = value; _drawKindFilters(); _redrawList(); };
-        host.appendChild(btn);
+        const b = h("button", { type: "button", class: `project-filter-chip${current === value ? " active" : ""}`,
+                                dataset: { value }, text: label, "aria-pressed": String(current === value) });
+        b.onclick = () => onPick(value);
+        host.appendChild(b);
     }
 }
 
+function _drawKindFilters() {
+    _drawChipGroup("kind-filters", [
+        ["all", "Todos os tipos"],
+        ["raster", KIND_LABELS.raster],
+        ["classification", KIND_LABELS.classification],
+    ], _kindFilter, (v) => { _kindFilter = v; _drawKindFilters(); _redrawList(); });
+}
+
 function _drawStatusFilters() {
-    const host = document.getElementById("status-filters");
-    if (!host) return;
-    host.innerHTML = "";
-    const opts = [["all", "Todos"], ["active", "Ativos"], ["inactive", "Inativos"]];
-    for (const [value, label] of opts) {
-        const btn = document.createElement("button");
-        btn.type = "button";
-        btn.className = "project-filter-chip" + (_statusFilter === value ? " active" : "");
-        btn.dataset.value = value;
-        btn.textContent = label;
-        btn.onclick = () => { _statusFilter = value; _drawStatusFilters(); _redrawList(); };
-        host.appendChild(btn);
-    }
+    _drawChipGroup("status-filters", [["all", "Todos"], ["active", "Ativos"], ["inactive", "Inativos"]],
+        _statusFilter, (v) => { _statusFilter = v; _drawStatusFilters(); _redrawList(); });
 }
 
 function _drawSortSelect() {
     const sel = document.getElementById("projects-sort");
     if (!sel) return;
-    sel.innerHTML = "";
+    sel.textContent = "";
     for (const [value, label] of Object.entries(_SORT_LABELS)) {
-        const o = document.createElement("option");
-        o.value = value;
-        o.textContent = label;
+        const o = h("option", { value, text: label });
         if (_sortKey === value) o.selected = true;
         sel.appendChild(o);
     }
@@ -175,103 +166,57 @@ function _redrawList() {
         }
         return true;
     }).sort(_sortCompare);
-    if (counter) counter.textContent = `(${filtered.length}/${_statsCache.length})`;
-    host.innerHTML = "";
+    if (counter) {
+        counter.textContent = "";
+        counter.append(h("strong", { class: "tabular", text: fmtInt(filtered.length) }),
+            ` de ${fmtInt(_statsCache.length)} projetos`);
+    }
+    host.textContent = "";
     if (!_statsCache.length) {
         host.appendChild(_emptyPortfolio());
         return;
     }
     if (!filtered.length) {
-        const e = document.createElement("p");
-        e.className = "muted";
-        e.style.padding = "var(--space-4)";
-        e.style.textAlign = "center";
-        e.textContent = "Nenhum projeto bate com os filtros atuais.";
-        host.appendChild(e);
+        host.appendChild(card({}, emptyState({ icon: "search", title: "Nenhum projeto encontrado",
+            text: "Nenhum projeto bate com os filtros atuais." })));
         return;
     }
     host.appendChild(_buildProjectsTable(filtered));
 }
 
 function _buildProjectsTable(projects) {
-    const wrap = document.createElement("div");
-    wrap.className = "admin-table-wrap projects-table-wrap";
-    const table = document.createElement("table");
-    table.className = "admin-table projects-table";
-    table.innerHTML = `
-        <thead>
-            <tr>
-                <th>Nome</th>
-                <th>Tipo</th>
-                <th class="num">Tiles</th>
-                <th>Progresso</th>
-                <th class="num">Membros</th>
-                <th>Status</th>
-            </tr>
-        </thead>
-        <tbody></tbody>
-    `;
-    const tbody = table.querySelector("tbody");
+    const table = h("table", { class: "table admin-table projects-table" },
+        h("thead", {}, h("tr", {},
+            h("th", { text: "Projeto" }), h("th", { text: "Tipo" }),
+            h("th", { class: "num", text: "Tiles" }), h("th", { text: "Progresso" }),
+            h("th", { class: "num", text: "Ritmo" }), h("th", { class: "num", text: "Membros" }),
+            h("th", { text: "Status" }), h("th", { class: "col-chevron", "aria-hidden": "true" }))));
+    const tbody = h("tbody");
     for (const p of projects) tbody.appendChild(_buildProjectRow(p));
-    wrap.appendChild(table);
-    return wrap;
+    table.appendChild(tbody);
+    return h("div", { class: "card card-flush projects-table-wrap" }, h("div", { class: "table-wrap admin-table-wrap" }, table));
 }
 
 function _buildProjectRow(p) {
-    const tr = document.createElement("tr");
-    tr.className = "project-row" + (p.active ? "" : " inactive");
-    tr.tabIndex = 0;
-    tr.setAttribute("role", "button");
-    tr.setAttribute("aria-label", `Abrir projeto ${p.name}`);
-
-    const nameTd = document.createElement("td");
-    const nameWrap = document.createElement("div");
-    nameWrap.className = "project-row-name";
-    const name = document.createElement("strong"); name.textContent = p.name;
-    nameWrap.appendChild(name);
-    if (p.description) {
-        const d = document.createElement("span");
-        d.className = "muted project-row-desc";
-        d.textContent = p.description;
-        nameWrap.appendChild(d);
-    }
-    nameTd.appendChild(nameWrap);
-
-    const kindTd = document.createElement("td");
-    const chip = document.createElement("span");
-    chip.className = "chip info";
-    chip.textContent = KIND_LABELS[p.kind] || p.kind;
-    kindTd.appendChild(chip);
-
-    const tilesTd = document.createElement("td");
-    tilesTd.className = "num";
-    tilesTd.textContent = p.total_tiles;
-
-    const progressTd = document.createElement("td");
-    const progWrap = document.createElement("div");
-    progWrap.className = "project-row-progress";
-    const bar = document.createElement("div");
-    bar.className = "project-row-progress-bar";
-    const fill = document.createElement("span");
-    fill.style.width = `${Math.min(100, p.completion_percent || 0)}%`;
-    bar.appendChild(fill);
-    const pct = document.createElement("span");
-    pct.className = "project-row-progress-pct";
-    pct.textContent = `${p.completion_percent}%`;
-    progWrap.append(bar, pct);
-    progressTd.appendChild(progWrap);
-
-    const membersTd = document.createElement("td");
-    membersTd.className = "num";
-    membersTd.textContent = p.member_count;
-
-    const statusTd = document.createElement("td");
-    const statusChip = document.createElement("span");
-    statusChip.className = p.active ? "chip reviewed" : "chip warn";
-    statusChip.textContent = p.active ? "ativo" : "inativo";
-    statusTd.appendChild(statusChip);
-
-    tr.append(nameTd, kindTd, tilesTd, progressTd, membersTd, statusTd);
+    const tr = h("tr", {
+        class: `project-row${p.active ? "" : " inactive"}`, tabIndex: 0, role: "button",
+        "aria-label": `Abrir projeto ${p.name}`,
+    });
+    tr.append(
+        h("td", {}, h("div", { class: "project-row-name" },
+            h("span", { class: `project-glyph kind-${p.kind}` }, icon(KIND_ICONS[p.kind] || "folder")),
+            h("span", { class: "project-row-text" },
+                h("strong", { text: p.name }),
+                p.description ? h("span", { class: "muted project-row-desc", text: p.description }) : null))),
+        h("td", {}, h("span", { class: "chip", text: KIND_LABELS[p.kind] || p.kind })),
+        h("td", { class: "num", text: fmtInt(p.total_tiles) }),
+        h("td", {}, h("span", { class: "progress-cell" },
+            progressBar(p.completion_percent, { label: "concluído" }),
+            h("span", { class: "tabular progress-cell-pct", text: fmtPct(p.completion_percent) }))),
+        h("td", { class: "num", text: p.rate_per_day ? `${fmtDecimal(p.rate_per_day, 1)}/dia` : "—" }),
+        h("td", { class: "num", text: fmtInt(p.member_count) }),
+        h("td", {}, h("span", { class: p.active ? "chip ok" : "chip", text: p.active ? "Ativo" : "Inativo" })),
+        h("td", { class: "col-chevron" }, icon("chevron-right", "icon-sm")));
     const open = () => {
         _selectedProjectId = p.id;
         _view = "detail";
@@ -288,20 +233,11 @@ function _buildProjectRow(p) {
 }
 
 function _emptyPortfolio() {
-    const wrap = document.createElement("div");
-    wrap.className = "project-empty-state";
-    const h = document.createElement("h3"); h.textContent = "Nenhum projeto ainda";
-    const p = document.createElement("p");
-    p.textContent = "Crie o primeiro projeto: defina tipo, classes/atributos e camadas de imagem.";
-    const cta = document.createElement("button");
-    cta.type = "button"; cta.className = "primary"; cta.textContent = "+ Criar primeiro projeto";
-    cta.onclick = openCreateProjectModal;
-    const hint = document.createElement("p");
-    hint.className = "muted";
-    hint.style.fontSize = "var(--text-sm)";
-    hint.textContent = "Depois importe tiles via CLI: python -m backend.scripts.import_points";
-    wrap.append(h, p, cta, hint);
-    return wrap;
+    return card({}, emptyState({
+        icon: "folder-open", title: "Nenhum projeto ainda",
+        text: "Crie o primeiro projeto: defina tipo, classes e camadas de imagem. Depois importe tiles via CLI (python -m backend.scripts.import_points).",
+        action: button("Criar primeiro projeto", { icon: "plus", variant: "primary", onClick: openCreateProjectModal }),
+    }));
 }
 
 // ---- DETAIL VIEW ----------------------------------------------------------
@@ -315,249 +251,167 @@ async function _renderDetailView(root, projectId) {
             apiGet(`/api/admin/projects/${projectId}/members`).catch(() => []),
         ]);
     } catch (e) {
-        root.innerHTML = `<p class="error">Erro: ${escapeHtml(e.message)}</p>`;
+        root.textContent = "";
+        root.appendChild(card({}, emptyState({ icon: "triangle-alert", title: "Erro ao carregar", text: e.message })));
         return;
     }
-    root.innerHTML = "";
-    root.appendChild(_renderBackBar(proj));
-    root.appendChild(_renderOverviewSection(proj));
-    root.appendChild(_renderClassesSection(proj));
-    root.appendChild(_renderMembersSection(proj, members));
-    root.appendChild(_renderExportSection(proj));
+    if (!root.isConnected) return;
+    const stats = _statsCache.find(s => s.id === projectId) || {};
+    _pageActions();
+    root.textContent = "";
+    root.append(
+        _renderBackBar(proj),
+        _renderOverviewSection(proj, stats),
+        h("div", { class: "project-grid" },
+            h("div", { class: "project-col" },
+                _renderClassesSection(proj),
+                _renderMembersSection(proj, members)),
+            h("div", { class: "project-col" },
+                _renderExportSection(proj),
+                _renderConfigSection(proj),
+                _renderLayersSection(proj))));
 }
 
 function _renderBackBar(proj) {
-    const bar = document.createElement("div");
-    bar.className = "projects-detail-bar";
-    const left = document.createElement("div");
-    left.className = "projects-detail-bar-left";
-    const back = document.createElement("button");
-    back.type = "button";
-    back.className = "projects-back-btn";
-    back.innerHTML = "&larr; Projetos";
-    back.onclick = () => {
+    const back = button("Projetos", { icon: "arrow-left", variant: "ghost btn-sm projects-back-btn", onClick: () => {
         _view = "list";
         renderProjects(document.getElementById("admin-content"));
-    };
-    const title = document.createElement("h3");
-    title.className = "projects-detail-title";
-    const name = document.createElement("span"); name.textContent = proj.name;
-    const idSpan = document.createElement("span"); idSpan.className = "muted"; idSpan.textContent = `#${proj.id}`;
-    const kindChip = document.createElement("span"); kindChip.className = "chip info"; kindChip.textContent = KIND_LABELS[proj.kind] || proj.kind;
-    title.append(name, idSpan, kindChip);
-    if (!proj.active) {
-        const inact = document.createElement("span");
-        inact.className = "chip warn";
-        inact.textContent = "Inativo";
-        title.appendChild(inact);
-    }
-    left.append(back, title);
-    bar.appendChild(left);
-
-    const actions = document.createElement("div");
-    actions.className = "projects-detail-actions";
-    actions.append(
-        _action("Editar projeto", () => openEditProjectModal(proj), "primary"),
-        _action("Clonar", () => openCloneProjectModal(proj)),
-        _action("Excluir", () => deleteProject(proj.id, proj.name), "danger"),
-    );
-    bar.appendChild(actions);
+    } });
+    const title = h("h2", { class: "projects-detail-title" },
+        h("span", { class: `project-glyph project-glyph-lg kind-${proj.kind}` }, icon(KIND_ICONS[proj.kind] || "folder")),
+        h("span", { class: "projects-detail-name" },
+            h("span", { text: proj.name }),
+            h("span", { class: "projects-detail-meta" },
+                h("span", { class: "chip accent", text: KIND_LABELS[proj.kind] || proj.kind }),
+                h("span", { class: proj.active ? "chip ok" : "chip warn", text: proj.active ? "Ativo" : "Inativo" }),
+                h("span", { class: "dim mono", text: `#${proj.id}` }))));
+    const actions = h("div", { class: "projects-detail-actions" },
+        button("Editar projeto", { icon: "pencil", variant: "primary", onClick: () => openEditProjectModal(proj) }),
+        menuButton(() => [
+            { label: "Clonar projeto…", icon: "copy", onClick: () => openCloneProjectModal(proj) },
+            "sep",
+            { label: "Excluir projeto…", icon: "trash-2", danger: true, onClick: () => deleteProject(proj.id, proj.name) },
+        ], "Mais ações do projeto"));
+    const bar = h("div", { class: "projects-detail-bar" },
+        h("div", { class: "projects-detail-bar-left" }, back, title,
+            proj.description ? h("p", { class: "muted projects-detail-desc", text: proj.description }) : null),
+        actions);
     return bar;
 }
 
-function _action(label, onClick, extraClass = "") {
-    const b = document.createElement("button");
-    b.type = "button";
-    b.textContent = label;
-    if (extraClass) b.className = extraClass;
-    b.onclick = onClick;
-    return b;
+function _stat(label, value, sub) {
+    return h("div", { class: "project-stat" },
+        h("span", { class: "project-stat-label", text: label }),
+        h("span", { class: "project-stat-value tabular", text: value }),
+        sub ? h("span", { class: "project-stat-sub", text: sub }) : null);
 }
 
-function _renderOverviewSection(proj) {
-    const sec = document.createElement("section");
-    sec.className = "project-section";
-    const h = document.createElement("h4");
-    h.textContent = "Visão geral";
-    sec.appendChild(h);
-    if (proj.description) {
-        const p = document.createElement("p");
-        p.className = "muted project-section-lead";
-        p.textContent = proj.description;
-        sec.appendChild(p);
-    }
-    const grid = document.createElement("div");
-    grid.className = "project-meta-grid";
+function _renderOverviewSection(proj, stats) {
+    const pct = stats.completion_percent || 0;
+    return h("section", { class: "card project-overview" },
+        h("div", { class: "project-overview-progress" },
+            h("div", { class: "project-overview-head" },
+                h("span", { class: "eyebrow", text: "Progresso" }),
+                h("span", { class: "tabular project-overview-pct", text: fmtPct(pct) })),
+            progressBar(pct, { label: "Progresso do projeto" }),
+            h("span", { class: "muted", text: `${fmtInt(stats.classified_tiles || 0)} de ${fmtInt(stats.total_tiles || 0)} tiles classificados` })),
+        h("div", { class: "project-stats" },
+            _stat("Tiles", fmtInt(stats.total_tiles || 0), `${fmtInt((stats.total_tiles || 0) - (stats.classified_tiles || 0))} a classificar`),
+            _stat("Ritmo", stats.rate_per_day ? `${fmtDecimal(stats.rate_per_day, 1)}/dia` : "—", "últimos 7 dias"),
+            _stat("Previsão", fmtEtaDays(stats.eta_days), "para concluir"),
+            _stat("Membros", fmtInt(stats.member_count || 0), "com acesso")));
+}
+
+function _renderConfigSection(proj) {
     const tileMeters = proj.tile_meters
         ?? (proj.tile_px || 256) * (proj.meters_per_pixel || 2.5);
-    grid.append(
-        _metaItem("Tipo", KIND_LABELS[proj.kind] || proj.kind),
-        _metaItem("Status", proj.active ? "Ativo" : "Inativo"),
-        _metaItem("Tile (px)", `${proj.tile_px ?? 256} × ${proj.tile_px ?? 256}`),
-        _metaItem("Resolução", `${(proj.meters_per_pixel ?? 2.5).toFixed(2)} m/px`),
-        _metaItem("Tile no chão", `${tileMeters.toFixed(1)} m`),
-        _metaItem("Geometria", proj.tile_geometry_locked ? "Travada" : "Editável"),
-    );
-    sec.appendChild(grid);
-
-    const layersH = document.createElement("h4");
-    layersH.style.marginTop = "var(--space-4)";
-    layersH.textContent = "Camadas";
-    sec.appendChild(layersH);
-    const layersList = document.createElement("dl");
-    layersList.className = "project-layers-list";
-    for (const f of LAYER_FIELDS) {
-        const dt = document.createElement("dt"); dt.textContent = f.label;
-        const dd = document.createElement("dd");
-        const v = proj[f.key];
-        if (v) {
-            const code = document.createElement("code");
-            code.textContent = v;
-            dd.appendChild(code);
-        } else {
-            dd.className = "muted";
-            dd.textContent = "—";
-        }
-        layersList.append(dt, dd);
-    }
-    sec.appendChild(layersList);
-    return sec;
+    const item = (label, value, ic) => h("div", { class: "project-meta-item" },
+        h("span", { class: "label" }, ic ? icon(ic, "icon-sm") : null, label),
+        h("span", { class: "value", text: value }));
+    return card({ title: "Configuração", icon: "settings" },
+        h("div", { class: "project-meta-grid" },
+            item("Tile", `${proj.tile_px ?? 256} × ${proj.tile_px ?? 256} px`, "scan"),
+            item("Resolução", `${fmtDecimal(proj.meters_per_pixel ?? 2.5, 2)} m/px`, "target"),
+            item("Tile no chão", `${fmtDecimal(tileMeters, 1)} m`, "maximize-2"),
+            item("Geometria", proj.tile_geometry_locked ? "Travada" : "Editável", proj.tile_geometry_locked ? "lock" : "lock-open"),
+            proj.kind === "raster"
+                ? item("Máscara completa", proj.mask_complete_required === false ? "Opcional" : "Obrigatória", "list-checks")
+                : null));
 }
 
-function _metaItem(label, value) {
-    const item = document.createElement("div");
-    item.className = "project-meta-item";
-    const l = document.createElement("div"); l.className = "label"; l.textContent = label;
-    const v = document.createElement("div"); v.className = "value"; v.textContent = value;
-    item.append(l, v);
-    return item;
+function _renderLayersSection(proj) {
+    const list = h("ul", { class: "layer-list" });
+    for (const f of LAYER_FIELDS) {
+        const v = proj[f.key];
+        list.appendChild(h("li", { class: `layer-row${v ? "" : " is-empty"}` },
+            h("span", { class: "layer-icon" }, icon(f.key.startsWith("ref_") ? "layers" : "image", "icon-sm")),
+            h("span", { class: "layer-text" },
+                h("span", { class: "layer-label", text: f.label }),
+                v ? h("code", { class: "layer-value", text: v, title: v })
+                  : h("span", { class: "dim layer-value", text: "Não configurada" }))));
+    }
+    return card({ title: "Camadas de imagem", icon: "layers" }, list);
 }
 
 function _renderClassesSection(proj) {
-    const sec = document.createElement("section");
-    sec.className = "project-section";
-    const h = document.createElement("h4");
     // Raster mask bytes encode class ids — once tiles exist, any class
     // edit (rename/recolor/remove) risks orphaning painted pixels.
     // Backend already blocks removal, but we lock the whole editor for
     // raster to keep the UX coherent: "if it's locked, don't tempt the
     // admin". Classification still allows rename/recolor.
     const classesLocked = proj.kind === "raster" && proj.tile_geometry_locked;
-    const btn = _action(
-        "Editar classes",
-        () => openEditClassesModal(proj),
-        "primary",
-    );
+    const btn = button("Editar classes", { icon: "palette", variant: "btn-sm", onClick: () => openEditClassesModal(proj) });
     if (classesLocked) {
         btn.disabled = true;
         btn.title = "Projetos de segmentação não permitem editar classes depois do primeiro tile — os bytes da máscara guardam o id da classe e mudar quebra dados existentes.";
     }
-    h.append(_titleText("Classes"), btn);
-    sec.appendChild(h);
-    if (proj.kind === "raster" && proj.tile_geometry_locked) {
-        const p = document.createElement("p");
-        p.className = "muted project-section-lead";
-        p.textContent = "Classes estão travadas porque o projeto já possui tiles. Para mudar a paleta, clone o projeto.";
-        sec.appendChild(p);
-    }
-    sec.appendChild(_renderClassesReadonly(proj.classes || []));
-    return sec;
+    const classes = proj.classes || [];
+    const body = classes.length
+        ? h("ul", { class: "class-grid" }, classes.map(c => h("li", { class: "class-item" },
+            h("span", { class: "class-swatch", style: { background: c.color } }),
+            h("span", { class: "class-text" },
+                h("span", { class: "class-name", text: c.name }),
+                h("span", { class: "class-meta mono", text: `id ${c.id} · ${c.color}` })))))
+        : emptyState({ icon: "palette", title: "Nenhuma classe cadastrada" });
+    return card({
+        title: "Classes", icon: "palette",
+        subtitle: classesLocked ? "Travadas: o projeto já possui tiles. Para mudar a paleta, clone o projeto." : `${classes.length} classe(s)`,
+        actions: [btn],
+    }, body);
 }
 
-function _titleText(text) {
-    const span = document.createElement("span");
-    span.textContent = text;
-    return span;
-}
-
-function _renderClassesReadonly(classes) {
-    if (!classes.length) {
-        return _emptyP("Nenhuma classe cadastrada.");
-    }
-    const table = document.createElement("table");
-    table.className = "admin-table";
-    const thead = document.createElement("thead");
-    thead.innerHTML = "<tr><th>ID</th><th>Nome</th><th>Cor</th></tr>";
-    table.appendChild(thead);
-    const tbody = document.createElement("tbody");
-    for (const c of classes) {
-        const tr = document.createElement("tr");
-        const idTd = document.createElement("td"); idTd.textContent = c.id;
-        const nameTd = document.createElement("td"); nameTd.textContent = c.name;
-        const colorTd = document.createElement("td");
-        const swatch = document.createElement("span");
-        swatch.style.cssText = `display:inline-block;width:16px;height:16px;background:${c.color};border:1px solid rgba(0,0,0,.2);border-radius:3px;margin-right:6px;vertical-align:middle;`;
-        const code = document.createElement("code"); code.textContent = c.color;
-        colorTd.append(swatch, code);
-        tr.append(idTd, nameTd, colorTd);
-        tbody.appendChild(tr);
-    }
-    table.appendChild(tbody);
-    return table;
-}
-
-function _emptyP(text) {
-    const p = document.createElement("p");
-    p.className = "muted project-section-lead";
-    p.textContent = text;
-    return p;
-}
+const _ROLE_LABELS = { operator: "Operador", reviewer: "Revisor", admin: "Admin" };
 
 function _renderMembersSection(proj, members) {
-    const sec = document.createElement("section");
-    sec.className = "project-section";
-    const h = document.createElement("h4");
-    h.append(_titleText("Membros"),
-             _action("+ Adicionar membro", () => openAddMemberModal(proj), "primary"));
-    sec.appendChild(h);
+    const add = button("Adicionar", { icon: "user-plus", variant: "btn-sm", onClick: () => openAddMemberModal(proj) });
     if (!members.length) {
-        sec.appendChild(_emptyP("Nenhum membro adicionado. Use o botão acima para conceder acesso."));
-        return sec;
+        return card({ title: "Membros", icon: "users", actions: [add] },
+            emptyState({ icon: "users", title: "Nenhum membro", text: "Adicione usuários para que possam trabalhar neste projeto." }));
     }
-    const table = document.createElement("table");
-    table.className = "admin-table";
-    const thead = document.createElement("thead");
-    thead.innerHTML = "<tr><th>Usuário</th><th>Papel global</th><th>Papel no projeto</th><th>Ações</th></tr>";
-    table.appendChild(thead);
-    const tbody = document.createElement("tbody");
+    const list = h("ul", { class: "member-list" });
     for (const m of members) {
-        const tr = document.createElement("tr");
-        const userTd = document.createElement("td"); userTd.textContent = m.username;
-        const grTd = document.createElement("td"); grTd.textContent = m.global_role;
-        const roleTd = document.createElement("td");
-        const sel = document.createElement("select");
-        for (const role of ["operator", "reviewer"]) {
-            const o = document.createElement("option");
-            o.value = role; o.textContent = role;
-            if (m.project_role === role) o.selected = true;
-            sel.appendChild(o);
+        let roleCtl;
+        if (m.project_role === "operator" || m.project_role === "reviewer") {
+            roleCtl = h("select", { class: "member-role", "aria-label": `Papel de ${m.username}` },
+                ["operator", "reviewer"].map(role => h("option", { value: role, text: _ROLE_LABELS[role] })));
+            roleCtl.value = m.project_role;
+            roleCtl.onchange = () => upsertMemberRole(proj.id, m.id, roleCtl.value);
+        } else {
+            roleCtl = h("span", { class: "chip accent", text: _ROLE_LABELS[m.project_role] || m.project_role });
         }
-        sel.onchange = () => upsertMemberRole(proj.id, m.id, sel.value);
-        roleTd.appendChild(sel);
-        const actTd = document.createElement("td");
-        actTd.appendChild(_action("Remover", () => removeMember(proj.id, m.id, m.username), "danger"));
-        tr.append(userTd, grTd, roleTd, actTd);
-        tbody.appendChild(tr);
+        list.appendChild(h("li", { class: `member-row${m.active === false || m.active === 0 ? " is-inactive" : ""}` },
+            avatar(m.username, { size: "sm" }),
+            h("span", { class: "member-text" },
+                h("span", { class: "member-name", text: m.username }),
+                h("span", { class: "member-sub", text: m.global_role === "admin" ? "Administrador do sistema" : "Usuário" })),
+            roleCtl,
+            iconButton("x", `Remover ${m.username}`, { onClick: () => removeMember(proj.id, m.id, m.username) })));
     }
-    table.appendChild(tbody);
-    sec.appendChild(table);
-    return sec;
+    return card({ title: "Membros", icon: "users", subtitle: `${members.length} com acesso`, actions: [add], cls: "card-list" }, list);
 }
 
 function _renderExportSection(proj) {
-    const sec = document.createElement("section");
-    sec.className = "project-section";
-    const h = document.createElement("h4");
-    h.textContent = "Exportar dados";
-    sec.appendChild(h);
-    const p = document.createElement("p");
-    p.className = "muted project-section-lead";
-    p.innerHTML = `Formato: <strong>${escapeHtml(exportFormatLabel(proj.kind))}</strong>. ZIP inclui um manifest com status/autoria/bbox por tile.`;
-    sec.appendChild(p);
-    const bar = document.createElement("div");
-    bar.className = "filter-bar";
-    const select = document.createElement("select");
-    select.id = "export-status";
+    const select = h("select", { id: "export-status" });
     // "Somente classificados" was removed: exporting tiles that haven't gone
     // through review is rarely the right call — the reviewer step is where
     // the dataset gets its quality stamp. Admins who need the lower-quality
@@ -565,51 +419,34 @@ function _renderExportSection(proj) {
     for (const [v, label] of [
         ["reviewed", "Somente revisados"],
         ["reviewed_classified", "Revisados + classificados"],
-    ]) {
-        const o = document.createElement("option");
-        o.value = v; o.textContent = label;
-        select.appendChild(o);
-    }
-    bar.append(select);
+    ]) select.appendChild(h("option", { value: v, text: label }));
+    const fields = h("div", { class: "export-fields" },
+        h("label", { class: "field" }, h("span", { class: "field-label", text: "Tiles incluídos" }), select));
     // Raster only: the EDGV remap LUT is meaningful only for the legacy
     // 6-class palette (ids 1..6). "auto" lets the backend decide per project.
     let remapSelect = null;
     if (proj.kind !== "classification") {
-        const remapLabel = document.createElement("label");
-        remapLabel.className = "muted";
-        remapLabel.htmlFor = "export-remap";
-        remapLabel.textContent = "Remapeamento de classes";
-        remapSelect = document.createElement("select");
-        remapSelect.id = "export-remap";
-        remapSelect.title = "Automático: aplica o remap EDGV só quando a paleta do projeto é exatamente as classes 1..6";
+        remapSelect = h("select", { id: "export-remap",
+            title: "Automático: aplica o remap EDGV só quando a paleta do projeto é exatamente as classes 1..6" });
         for (const [v, label] of [
             ["auto", "Automático (padrão)"],
             ["edgv", "EDGV"],
             ["raw", "IDs originais"],
-        ]) {
-            const o = document.createElement("option");
-            o.value = v; o.textContent = label;
-            remapSelect.appendChild(o);
-        }
-        bar.append(remapLabel, remapSelect);
+        ]) remapSelect.appendChild(h("option", { value: v, text: label }));
+        fields.appendChild(h("label", { class: "field" },
+            h("span", { class: "field-label", text: "Remapeamento de classes" }), remapSelect));
     }
-    const btn = document.createElement("button");
-    btn.id = "btn-export";
-    btn.className = "primary";
-    btn.textContent = "Gerar export (ZIP)";
+    const btn = button("Gerar export (ZIP)", { id: "btn-export", icon: "download", variant: "primary" });
     btn.onclick = () => runExportJob(proj.id, select.value, remapSelect ? remapSelect.value : null, btn);
-    bar.append(btn);
-    sec.appendChild(bar);
-    const line = document.createElement("p");
-    line.className = "muted";
-    line.id = "export-status-line";
-    sec.appendChild(line);
-    return sec;
+    const line = h("p", { class: "muted export-status-line", id: "export-status-line", role: "status" });
+    return card({ title: "Exportar dataset", icon: "download", cls: "export-card",
+                  subtitle: `${exportFormatLabel(proj.kind)} · manifest com status, autoria e bbox por tile` },
+        fields, h("div", { class: "export-actions" }, btn), line);
 }
 
 function exportFormatLabel(kind) {
     if (kind === "classification") return "CSV (classifications.csv)";
-    return "GeoTIFF (.tif) + manifest.csv";
+    return "GeoTIFF + manifest.csv";
 }
 
 // ---- Modais (create / edit / clone / members / classes) -------------------
@@ -761,7 +598,8 @@ function _renderProjectFormBody(host, proj) {
         const lockText = proj?.tile_geometry_locked
             ? " Geometria já travada (projeto tem tiles)."
             : " Após o primeiro tile, esses campos travam.";
-        hint.textContent = `Tile no chão: ${ground.toFixed(1)} m × ${ground.toFixed(1)} m (${p}×${p} px @ ${m.toFixed(2)} m/px).${lockText}`;
+        const g = fmtDecimal(ground, 1);
+        hint.textContent = `Tile no chão: ${g} m × ${g} m (${p}×${p} px a ${fmtDecimal(m, 2)} m/px).${lockText}`;
     };
     px.addEventListener("input", refreshGeom);
     mpp.addEventListener("input", refreshGeom);
@@ -923,7 +761,7 @@ function _renderClassesEditor(host, initial) {
             </tr></thead>
             <tbody></tbody>
         </table>
-        <button type="button" data-act="add-class" class="add-row-btn">+ Adicionar classe</button>
+        <button type="button" data-act="add-class" class="add-row-btn btn-sm">+ Adicionar classe</button>
     `;
     const tbody = host.querySelector("tbody");
     const addRow = (c) => {
@@ -932,7 +770,7 @@ function _renderClassesEditor(host, initial) {
             <td><input type="number" min="1" max="254" data-cf="id" value="${c.id}"></td>
             <td><input type="text" data-cf="name" value="${escapeHtml(c.name)}"></td>
             <td><input type="color" data-cf="color" value="${escapeHtml(c.color)}"></td>
-            <td><button type="button" class="danger" data-act="remove">Remover</button></td>
+            <td><button type="button" class="ghost danger btn-sm" data-act="remove">Remover</button></td>
         `;
         tr.querySelector('[data-act="remove"]').onclick = () => tr.remove();
         tbody.appendChild(tr);
@@ -1012,9 +850,10 @@ async function deleteProject(projectId, projectName) {
 
 async function runExportJob(projectId, status, remap, btn) {
     const line = document.getElementById("export-status-line");
-    const prev = btn.textContent;
+    const prev = [...btn.childNodes];
     btn.disabled = true;
-    btn.textContent = "Gerando...";
+    btn.textContent = "";
+    btn.append(h("span", { class: "loading loading-sm" }), "Gerando...");
     const setLine = (t) => { if (line) line.textContent = t; };
     try {
         const qs = new URLSearchParams({ status });
@@ -1032,7 +871,7 @@ async function runExportJob(projectId, status, remap, btn) {
         showToast(`Falha no export: ${e.message}`, "error", 6000);
     } finally {
         btn.disabled = false;
-        btn.textContent = prev;
+        btn.replaceChildren(...prev);
     }
 }
 

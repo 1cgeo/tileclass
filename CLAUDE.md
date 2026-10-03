@@ -49,7 +49,8 @@ UI em pt-BR, com acentuação. Código, comentários, banco e JSON da API em ing
 - Nada de `drawOutlines` durante o gesto (é O(n) pixels). Undo guarda só os pixels alterados (`Uint32Array` + `Uint8Array`), com 50 níveis. Bresenham entre `mousemove`.
 - Atalhos desligados com `isTextFocused() || isModalOpen()`.
 - Nunca use `innerHTML` com dado de usuário; use `textContent`/`escapeHtml` (`utils.js`, junto de `hexToRgb`, `blobToImage`, que não devem ser redefinidos).
-- CSS: use os tokens de `:root` em `style.css` via `var()`, nunca hex hardcoded. Paleta de classes contrastante, evitando verde e tons escuros.
+- **CSS/tema:** `tokens.css` (cores, temas claro/escuro via `<html data-theme>`) → `base.css` (primitivos: botões, chips de status, cards, tabelas, modais…) → `editor.css` / `admin.css`. Nunca hex em CSS/JS (exceto cores de classe, que são dado); use `var()`. Cores pintadas fora do CSS (canvas, MapLibre, SVG) leem variáveis via `getComputedStyle` e repintam no evento `tc-themechange`. Ícones: sprite Lucide (`icon()`/`iconHtml()` em `utils.js`). Paleta de classes contrastante, evitando verde e tons escuros.
+- **Revisão visual:** `node tests/e2e/screenshots.mjs <pasta> --demo` gera as telas nos dois temas (seed `tests/e2e/seed_demo.py`).
 - UX inegociável: login → pintar em < 5s; pré-carga via `/next-preview`; sem auto-avanço após submit; backup da máscara em `localStorage`; refresh proativo do JWT 60s antes do `exp`.
 - O 404 de `maplibre-gl.js.map` é benigno.
 

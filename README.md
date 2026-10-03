@@ -63,6 +63,24 @@ Remap de classes (segmentação): por padrão é automático — projetos com a 
 
 `backup_db`, `verify_db`, `merge_db`, `recompute_class_counts`, `recolor_mbtiles` em `backend/scripts/` (`python -m backend.scripts.<nome> --help`).
 
+## Demonstração
+
+Base fictícia e realista (300 tiles de segmentação, 80 de classificação, equipe de 8 pessoas, 30 dias de histórico e imagem de satélite sintética), separada do banco real:
+
+```bash
+python -m tests.e2e.seed_demo demo/tileclass_demo.db demo   # ~1–2 min; pasta demo/ fica fora do git
+```
+
+Copie `backend/config.yaml` para `demo/config.yaml`, aponte `database.path` (e `mask_overlay.cache_path`) para dentro de `demo/` com caminho absoluto e suba numa porta separada:
+
+```powershell
+$env:TILECLASS_CONFIG = "demo\config.yaml"; python -m backend.run --port 8001
+```
+
+Logins: `admin` / `admin123`; equipe (ex.: `diego.rocha`, `gabriela.reis`) com `secret123`.
+
+Screenshots de todas as telas nos dois temas: `node tests/e2e/screenshots.mjs <pasta> --demo`.
+
 ## Testes
 
 ```bash

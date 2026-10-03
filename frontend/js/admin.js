@@ -1,17 +1,25 @@
-// Admin panel: dashboard, tiles (list+grid+bulk+filters+viewer), problems, users.
-// Dashboard tab + shared modals live in ./admin/ submodules; the rest stays
-// here because tiles/map/actions/viewer share so much state that splitting
-// them costs more readability than it gains.
+// Admin panel shell + tabs: tiles (table/grid, filters, bulk actions, viewer),
+// map, problems, users, maintenance. Dashboard and Projetos live in ./admin/;
+// the rest stays here because tiles/map/actions/viewer share so much state
+// that splitting them costs more readability than it gains.
 import { apiGet, apiGetBlob, apiGetWithHeaders, apiPostJson, apiPatchJson, apiJson, logout as apiLogout } from "./api.js";
 import { showToast } from "./toast.js";
 import { createLockedMap, disposeMap, tileTransformRequest } from "./maplib.js";
 import {
-    hexToRgb, blobToImage, escapeHtml as escape, fmtDate, fmtBytes,
-    withProjectParam, renderProjectPicker, statusLabel,
+    hexToRgb, blobToImage, fmtDate, fmtBytes, withProjectParam, renderProjectPicker,
+    statusLabel, kindLabel, truncateName,
 } from "./utils.js";
-import { renderDashboard, fmtDuration } from "./admin/dashboard.js";
+import {
+    BLOCKABLE_STATES, tileRowActions, pageWindow, actionLabel, actionTone, relativeTime,
+    initials, fmtInt, STATUS_ORDER,
+} from "./admin-core.js";
+import { renderDashboard } from "./admin/dashboard.js";
 import { wireConfirmModal, confirmDestructive, promptAssign, promptForm } from "./admin/modals.js";
 import { renderProjects } from "./admin/projects.js";
+import {
+    h, icon, button, iconButton, avatar, userCell, statusChip, card, kpi, emptyState,
+    menuButton, sortHeader, cssVar, closeMenu,
+} from "./admin/ui.js";
 
 let tileserverUrl = "";
 let tileserverMaxZoom = 22;
@@ -22,6 +30,8 @@ let projectsById = {};   // id → { id, name, kind, ... } — populated by init
 let selectedIds = new Set();
 let currentTab = "dashboard";
 let listView = "table"; // "table" | "grid"
+// Status preset handed from the dashboard ("ver estes tiles") to the Tiles tab.
+let _pendingStatusFilter = null;
 
 // User list used by the tiles-tab filter dropdown. Lazily populated by
 // renderTiles via /api/admin/users; invalidated when a user is created or
@@ -67,10 +77,8 @@ export async function syncAdminProjects() {
     return projects;
 }
 
-// Single `onChange` shared by every per-tab project filter (Dashboard, Tiles,
-// Mapa, Problemas). Keeps `currentProjectId` + palette in sync wherever the
-// admin switches projects. The global header picker was removed once each
-// tab grew its own — duplicate scope controls were confusing.
+// Single `onChange` shared by every tab's project scope picker (Dashboard,
+// Tiles, Mapa, Problemas). Keeps `currentProjectId` + palette in sync.
 async function _onProjectFilterChange(newId) {
     currentProjectId = newId;
     await _loadProjectPalette(newId);
@@ -79,12 +87,20 @@ async function _onProjectFilterChange(newId) {
     await selectTab(currentTab);
 }
 
-function _wireTabProjectFilter({ wrapId, selectId, allowAll = true, alwaysShow = false }) {
+// Mount the project scope picker into the top bar. Each tab keeps its own
+// ids (`<tab>-project-filter[-wrap]`) — tests and deep links rely on them.
+function _wireTabProjectFilter({ wrapId, selectId, allowAll = true, alwaysShow = true }) {
+    const slot = document.getElementById("admin-scope-slot");
+    slot.textContent = "";
+    const sel = h("select", { id: selectId, "aria-label": "Projeto" });
+    slot.appendChild(h("label", { id: wrapId, class: "scope-picker", title: "Projeto exibido" },
+        icon("folder"), sel));
     renderProjectPicker({
         wrapId, selectId,
         projects: Object.values(projectsById),
         activeId: currentProjectId,
         allowAll, alwaysShow,
+        allLabel: "Todos os projetos",
         onChange: _onProjectFilterChange,
     });
 }
@@ -120,16 +136,13 @@ let viewerMap = null;
 
 function disposeViewerMap() { viewerMap = disposeMap(viewerMap); }
 
-// Mirrors backend `_BLOCKABLE_STATES` in admin_service.py. Backend rejects the
-// whole batch if any tile is outside this set, so the UI must filter the
-// selection before sending — never trust users to know the gate.
-const BLOCKABLE_STATES = new Set(["pending", "classified", "reviewed"]);
 const isBlockable = t => BLOCKABLE_STATES.has(t.status);
 
 let _adminInitialized = false;
 
 export async function initAdmin(user) {
-    document.getElementById("admin-user-label").textContent = `${user.username} (admin)`;
+    document.getElementById("admin-user-label").textContent = user.username;
+    document.getElementById("admin-user-avatar").textContent = initials(user.username);
     if (_adminInitialized) {
         await enterAdmin();
         return;
@@ -161,7 +174,7 @@ export async function initAdmin(user) {
         disposeViewerMap();
         // Clear body so any in-flight renderTileInfo's setTimeout sees the
         // mapDiv is gone and bails before creating an orphan WebGL context.
-        document.getElementById("view-tile-body").innerHTML = "";
+        document.getElementById("view-tile-body").textContent = "";
     };
     document.getElementById("view-tile-close").addEventListener("click", closeVt);
     // Click on the backdrop (outside the modal-box) closes the viewer.
@@ -170,6 +183,8 @@ export async function initAdmin(user) {
         if (document.getElementById("view-admin").classList.contains("hidden")) return;
         if (ev.key === "Escape" && !vtModal.classList.contains("hidden")) closeVt();
     });
+    // Map layers paint status colors from CSS tokens — repaint on theme switch.
+    window.addEventListener("tc-themechange", () => applyMapTheme());
     wireConfirmModal();
     _adminInitialized = true;
     await selectTab("dashboard");
@@ -181,23 +196,31 @@ export async function enterAdmin() {
     await selectTab(currentTab || "dashboard");
 }
 
-// Human labels for the browser tab title so admins switching between tabs
-// see the right context in their tab strip.
-const _TAB_LABELS = {
-    dashboard: "Dashboard",
-    projects: "Projetos",
-    tiles: "Tiles",
-    map: "Mapa",
-    problems: "Problemas",
-    users: "Usuários",
-    maintenance: "Manutenção",
+// Page title + subtitle per tab (top bar), also used for the browser tab.
+const _TAB_META = {
+    dashboard:   { title: "Dashboard",  sub: "Progresso, ritmo e produtividade da equipe" },
+    projects:    { title: "Projetos",   sub: "Configuração, classes, membros e exportação" },
+    tiles:       { title: "Tiles",      sub: "Busque, inspecione e aja sobre tiles individuais ou em lote" },
+    map:         { title: "Mapa",       sub: "Distribuição espacial dos tiles por status" },
+    problems:    { title: "Problemas",  sub: "Tiles reportados pela equipe que precisam de decisão" },
+    users:       { title: "Usuários",   sub: "Contas, papéis e acesso ao sistema" },
+    maintenance: { title: "Manutenção", sub: "Estado do cache do overlay do mapa" },
 };
 
+// Tabs whose content depends on the project scope picker.
+const _SCOPED_TABS = new Set(["dashboard", "tiles", "map", "problems"]);
+
 async function selectTab(tab) {
+    closeMenu();
     currentTab = tab;
     selectedIds.clear();
     page = 0;
-    document.title = `Admin · ${_TAB_LABELS[tab] || tab} — TileClass`;
+    const meta = _TAB_META[tab] || { title: tab, sub: "" };
+    document.title = `${meta.title} · Admin — TileClass`;
+    document.getElementById("admin-page-title").textContent = meta.title;
+    document.getElementById("admin-page-subtitle").textContent = meta.sub;
+    document.getElementById("admin-scope-slot").textContent = "";
+    document.getElementById("admin-page-actions").textContent = "";
     if (mapEventsAbort) { mapEventsAbort.abort(); mapEventsAbort = null; }
     mapView = disposeMap(mapView);
     // Drop the GeoJSON references when leaving the map tab — these hold one
@@ -207,49 +230,71 @@ async function selectTab(tab) {
     mapPointGeojson = null;
     disposeViewerMap();
     document.querySelectorAll(".admin-nav button").forEach(b => {
-        b.classList.toggle("active", b.dataset.tab === tab);
+        const on = b.dataset.tab === tab;
+        b.classList.toggle("active", on);
+        if (on) b.setAttribute("aria-current", "page"); else b.removeAttribute("aria-current");
     });
     const content = document.getElementById("admin-content");
-    content.innerHTML = `<div class="loading-text"><span class="loading"></span> Carregando...</div>`;
+    content.classList.toggle("is-map", tab === "map");
+    content.dataset.tab = tab;
+    content.scrollTop = 0;
+    // Each render gets its own container. Switching tabs replaces it, so a
+    // slow render from the previous tab (e.g. the dashboard still fetching)
+    // lands in a detached node instead of overwriting the new tab.
+    const view = h("div", { class: "tab-view", dataset: { tab } });
+    view.innerHTML = `<div class="loading-text"><span class="loading"></span> Carregando...</div>`;
+    content.replaceChildren(view);
+    if (_SCOPED_TABS.has(tab)) {
+        _wireTabProjectFilter({ wrapId: `${tab}-project-filter-wrap`, selectId: `${tab}-project-filter` });
+    }
+    refreshProblemsBadge();
     try {
         if (tab === "dashboard") {
-            await renderDashboard(content, {
+            await renderDashboard(view, {
                 projectId: currentProjectId, projectsById,
                 onSelectProject: _onProjectFilterChange,
-            });
-            // Wire the per-tab project filter that renderDashboard injected at
-            // the top — kept here so dashboard.js stays admin.js-agnostic.
-            _wireTabProjectFilter({
-                wrapId: "dashboard-project-filter-wrap",
-                selectId: "dashboard-project-filter",
-                allowAll: true,
-                alwaysShow: true,
+                onOpenStatus: (status) => {
+                    if (status === "problem") { selectTab("problems"); return; }
+                    _pendingStatusFilter = status;
+                    selectTab("tiles");
+                },
             });
         }
-        else if (tab === "projects") await renderProjects(content);
-        else if (tab === "tiles") await renderTiles(content);
-        else if (tab === "map") await renderMap(content);
-        else if (tab === "problems") await renderProblems(content);
-        else if (tab === "users") await renderUsers(content);
-        else if (tab === "maintenance") await renderMaintenance(content);
+        else if (tab === "projects") await renderProjects(view);
+        else if (tab === "tiles") await renderTiles(view);
+        else if (tab === "map") await renderMap(view);
+        else if (tab === "problems") await renderProblems(view);
+        else if (tab === "users") await renderUsers(view);
+        else if (tab === "maintenance") await renderMaintenance(view);
     } catch (e) {
-        renderError(content, e);
+        if (view.isConnected) renderError(view, e);
     }
+}
+
+// Sidebar badge with the number of open problems (all projects).
+async function refreshProblemsBadge() {
+    const el = document.getElementById("nav-problems-count");
+    if (!el) return;
+    try {
+        const list = await apiGet("/api/admin/tiles/problems");
+        const n = (list || []).length;
+        el.textContent = n > 99 ? "99+" : String(n);
+        el.classList.toggle("hidden", n === 0);
+        el.title = `${n} problema(s) aberto(s)`;
+    } catch { el.classList.add("hidden"); }
 }
 
 function renderError(target, e) {
     target.textContent = "";
-    const p = document.createElement("p");
-    p.className = "error";
-    p.textContent = `Erro: ${e.message}`;
-    target.appendChild(p);
+    target.appendChild(card({},
+        emptyState({ icon: "triangle-alert", title: "Não foi possível carregar", text: `Erro: ${e.message}` })));
 }
 
 // Filter-status options. `value` stays as the API contract (English snake_case);
 // only the label is localized. `paused_review` is virtual — the backend uses
 // it to filter paused-in-review tiles via the `paused=true` query param.
 const _STATUS_FILTER_OPTIONS = [
-    { value: "",              label: "(todos)" },
+    { value: "",              label: "Todos os status" },
     { value: "pending",       label: statusLabel("pending") },
     { value: "in_progress",   label: statusLabel("in_progress") },
     { value: "paused",        label: statusLabel("paused") },
@@ -268,50 +313,62 @@ async function renderTiles(root) {
         try { _usersCache = await apiGet("/api/admin/users"); }
         catch { _usersCache = []; }
     }
-    const userOptions = _usersCache
-        .filter(u => u.active)
-        .map(u => `<option value="${u.id}">${escape(u.username)}</option>`)
-        .join("");
-    const statusOptions = _STATUS_FILTER_OPTIONS
-        .map(o => `<option value="${o.value}">${escape(o.label)}</option>`)
-        .join("");
-    root.innerHTML = `
-        <div class="filter-bar">
-            <label id="tiles-project-filter-wrap" class="hidden">Projeto
-                <select id="tiles-project-filter"></select>
-            </label>
-            <label>Buscar <input type="search" id="filter-q" placeholder="ID ou nome (parcial)" autocomplete="off"></label>
-            <label>Status <select id="filter-status">${statusOptions}</select></label>
-            <label>Operador <select id="filter-user" title="Filtra tiles em que esse usuário classificou ou revisou">
-                <option value="">(qualquer)</option>
-                ${userOptions}
-            </select></label>
-            <label>De <input type="date" id="filter-from"></label>
-            <label>Até <input type="date" id="filter-to"></label>
-            <button id="btn-filter">Filtrar</button>
-            <div class="view-mode-toggle">
-                <button id="view-table" class="${listView==='table'?'active':''}">Tabela</button>
-                <button id="view-grid" class="${listView==='grid'?'active':''}">Grade</button>
-            </div>
-        </div>
-        <div id="bulk-bar" class="bulk-bar hidden">
-            <span><span id="bulk-count">0</span> selecionados</span>
-            <button id="bulk-assign">Atribuir a operador…</button>
-            <button id="bulk-unassign">Liberar operador</button>
-            <button id="bulk-reset">Resetar</button>
-            <button id="bulk-rereview">Re-revisar</button>
-            <button id="bulk-report-problem">Reportar problema…</button>
-            <button id="bulk-block">Bloquear</button>
-            <button id="bulk-unblock">Desbloquear</button>
-            <button id="bulk-clear">Limpar seleção</button>
-        </div>
-        <div id="pager-top" class="pager"></div>
-        <div id="tiles-list"></div>
-        <div id="pager-bottom" class="pager"></div>
-    `;
+    if (!root.isConnected) return;  // tab changed while loading
+    root.textContent = "";
+    const statusSel = h("select", { id: "filter-status", "aria-label": "Status" },
+        _STATUS_FILTER_OPTIONS.map(o => h("option", { value: o.value, text: o.label })));
+    const userSel = h("select", { id: "filter-user", "aria-label": "Operador",
+                                  title: "Filtra tiles em que esse usuário classificou ou revisou" },
+        h("option", { value: "", text: "Qualquer operador" }),
+        _usersCache.filter(u => u.active).map(u => h("option", { value: String(u.id), text: u.username })));
+    const viewToggle = h("div", { class: "segmented view-mode-toggle", role: "group", "aria-label": "Visualização" },
+        h("button", { type: "button", id: "view-table", class: listView === "table" ? "active" : null, title: "Tabela" },
+            icon("table-2"), "Tabela"),
+        h("button", { type: "button", id: "view-grid", class: listView === "grid" ? "active" : null, title: "Grade" },
+            icon("layout-grid"), "Grade"));
+    const toolbar = h("div", { class: "toolbar tiles-toolbar" },
+        h("label", { class: "input-icon toolbar-search" }, icon("search"),
+            h("input", { type: "search", id: "filter-q", placeholder: "Buscar por ID ou nome…", autocomplete: "off",
+                         "aria-label": "Buscar tiles" })),
+        h("label", { class: "toolbar-field" }, statusSel),
+        h("label", { class: "toolbar-field" }, userSel),
+        h("div", { class: "toolbar-dates", title: "Período (classificação ou revisão)" },
+            icon("calendar", "icon-sm"),
+            h("input", { type: "date", id: "filter-from", "aria-label": "De" }),
+            h("span", { class: "dim", text: "–" }),
+            h("input", { type: "date", id: "filter-to", "aria-label": "Até" })),
+        button("Filtrar", { id: "btn-filter", icon: "filter" }));
+    const bulk = h("div", { id: "bulk-bar", class: "bulk-bar hidden", role: "toolbar", "aria-label": "Ações em lote" },
+        h("span", { class: "bulk-count" }, h("strong", { id: "bulk-count", class: "tabular", text: "0" }), " selecionados"),
+        h("span", { class: "bulk-sep" }),
+        button("Atribuir…", { id: "bulk-assign", icon: "user-plus", variant: "ghost btn-sm" }),
+        button("Liberar", { id: "bulk-unassign", icon: "log-out", variant: "ghost btn-sm", title: "Liberar operador" }),
+        button("Re-revisar", { id: "bulk-rereview", icon: "refresh-cw", variant: "ghost btn-sm" }),
+        button("Bloquear", { id: "bulk-block", icon: "lock", variant: "ghost btn-sm" }),
+        button("Desbloquear", { id: "bulk-unblock", icon: "lock-open", variant: "ghost btn-sm" }),
+        button("Reportar…", { id: "bulk-report-problem", icon: "flag", variant: "ghost btn-sm", title: "Reportar problema" }),
+        button("Resetar", { id: "bulk-reset", icon: "rotate-ccw", variant: "ghost btn-sm bulk-danger" }),
+        h("span", { class: "bulk-sep" }),
+        iconButton("x", "Limpar seleção", { id: "bulk-clear" }));
+    root.append(
+        toolbar,
+        h("div", { class: "results-bar" },
+            h("span", { id: "tiles-result-count", class: "results-count" }),
+            h("div", { class: "results-bar-right" }, h("div", { id: "pager-top", class: "pager" }), viewToggle)),
+        h("div", { id: "tiles-list" }),
+        h("div", { id: "pager-bottom", class: "pager" }),
+        bulk);
+    if (_pendingStatusFilter) {
+        statusSel.value = _pendingStatusFilter;
+        _pendingStatusFilter = null;
+    }
     document.getElementById("view-table").addEventListener("click", () => { listView = "table"; loadAndRender(); });
     document.getElementById("view-grid").addEventListener("click", () => { listView = "grid"; loadAndRender(); });
     document.getElementById("btn-filter").addEventListener("click", () => { page = 0; loadAndRender(); });
+    // Selects/dates apply immediately; "Filtrar" stays for explicit refresh.
+    for (const id of ["filter-status", "filter-user", "filter-from", "filter-to"]) {
+        document.getElementById(id).addEventListener("change", () => { page = 0; loadAndRender(); });
+    }
     const filterQ = document.getElementById("filter-q");
     let qTimer;
     filterQ.addEventListener("input", () => {
@@ -334,13 +391,6 @@ async function renderTiles(root) {
         target.querySelectorAll(".selected").forEach(el => el.classList.remove("selected"));
         target.querySelectorAll("input[type=checkbox]").forEach(cb => { cb.checked = false; });
         updateBulkBar();
-    });
-    // Per-tab project filter (includes "(todos)" so admins can review tiles
-    // across projects without leaving the tab).
-    _wireTabProjectFilter({
-        wrapId: "tiles-project-filter-wrap",
-        selectId: "tiles-project-filter",
-        allowAll: true,
     });
     await loadAndRender();
 }
@@ -382,13 +432,24 @@ async function loadAndRender() {
     params.set("offset", page * PAGE_SIZE);
     const target = document.getElementById("tiles-list");
     target.innerHTML = `<div class="loading-text"><span class="loading"></span> Carregando tiles...</div>`;
-    const { json: tiles, headers: h } = await apiGetWithHeaders(`/api/admin/tiles?${params}`);
-    totalTiles = Number(h.get("X-Total-Count") || tiles.length);
+    const { json: tiles, headers: hd } = await apiGetWithHeaders(`/api/admin/tiles?${params}`);
+    totalTiles = Number(hd.get("X-Total-Count") || tiles.length);
     document.querySelectorAll(".view-mode-toggle button").forEach(b => {
         b.classList.toggle("active", b.id === `view-${listView}`);
     });
-    target.innerHTML = "";
-    if (listView === "table") renderTable(target, tiles);
+    const count = document.getElementById("tiles-result-count");
+    if (count) {
+        count.textContent = "";
+        count.append(h("strong", { class: "tabular", text: fmtInt(totalTiles) }),
+            totalTiles === 1 ? " tile encontrado" : " tiles encontrados");
+    }
+    target.textContent = "";
+    if (!tiles.length) {
+        target.appendChild(card({}, emptyState({
+            icon: "search", title: "Nenhum tile encontrado",
+            text: "Ajuste a busca ou os filtros para ver resultados.",
+        })));
+    } else if (listView === "table") renderTable(target, tiles);
     else renderGrid(target, tiles);
     updateBulkBar();
     renderPager();
@@ -406,168 +467,133 @@ function setSort(key) {
 function renderPager() {
     for (const id of ["pager-top", "pager-bottom"]) {
         const el = document.getElementById(id);
-        if (el) buildPagerInto(el);
+        if (el) buildPagerInto(el, id === "pager-bottom");
     }
 }
 
-// Compact page-number window: always show 1 and last; show current ± 1;
-// insert "…" placeholders where there are gaps. Returns an array of either
-// page numbers (0-indexed) or the literal string "…".
-function pageWindow(current, totalPages) {
-    if (totalPages <= 7) {
-        return Array.from({ length: totalPages }, (_, i) => i);
-    }
-    const set = new Set([0, totalPages - 1, current]);
-    if (current - 1 >= 0) set.add(current - 1);
-    if (current + 1 <= totalPages - 1) set.add(current + 1);
-    // Pad the ends so the window doesn't shrink at the edges.
-    if (current <= 2) { set.add(1); set.add(2); set.add(3); }
-    if (current >= totalPages - 3) {
-        set.add(totalPages - 2); set.add(totalPages - 3); set.add(totalPages - 4);
-    }
-    const sorted = [...set].filter(n => n >= 0 && n < totalPages).sort((a, b) => a - b);
-    const out = [];
-    for (let i = 0; i < sorted.length; i++) {
-        out.push(sorted[i]);
-        if (i < sorted.length - 1 && sorted[i + 1] !== sorted[i] + 1) out.push("…");
-    }
-    return out;
-}
-
-function buildPagerInto(el) {
-    el.innerHTML = "";
+function buildPagerInto(el, withInfo) {
+    el.textContent = "";
     const totalPages = Math.max(1, Math.ceil(totalTiles / PAGE_SIZE));
+    if (totalPages <= 1 && !withInfo) return;
     const goTo = (p) => {
         const clamped = Math.max(0, Math.min(totalPages - 1, p));
         if (clamped === page) return;
         page = clamped;
         loadAndRender();
+        document.getElementById("admin-content").scrollTop = 0;
     };
-    const navBtn = (label, disabled, onClick, title) => {
-        const b = document.createElement("button");
-        b.type = "button";
-        b.className = "pager-btn";
-        b.textContent = label;
+    const navBtn = (ic, disabled, onClick, title) => {
+        const b = iconButton(ic, title, { onClick, variant: "pager-btn" });
         b.disabled = disabled;
-        if (title) b.title = title;
-        b.addEventListener("click", onClick);
         return b;
     };
-
-    el.append(
-        navBtn("«", page === 0, () => goTo(0), "Primeira página"),
-        navBtn("←", page === 0, () => goTo(page - 1), "Página anterior"),
-    );
-
-    for (const item of pageWindow(page, totalPages)) {
-        if (item === "…") {
-            const span = document.createElement("span");
-            span.className = "pager-ellipsis";
-            span.textContent = "…";
-            el.appendChild(span);
-        } else {
-            const b = navBtn(String(item + 1), false, () => goTo(item));
-            b.classList.add("pager-num");
-            if (item === page) b.classList.add("active");
-            el.appendChild(b);
+    if (totalPages > 1) {
+        el.append(navBtn("chevron-left", page === 0, () => goTo(page - 1), "Página anterior"));
+        for (const item of pageWindow(page, totalPages)) {
+            if (item === "…") {
+                el.appendChild(h("span", { class: "pager-ellipsis", text: "…" }));
+            } else {
+                const b = h("button", { type: "button", class: `pager-btn pager-num${item === page ? " active" : ""}`,
+                                        text: String(item + 1), "aria-current": item === page ? "page" : null });
+                b.addEventListener("click", () => goTo(item));
+                el.appendChild(b);
+            }
         }
+        el.append(navBtn("chevron-right", page >= totalPages - 1, () => goTo(page + 1), "Próxima página"));
     }
-
-    el.append(
-        navBtn("→", page >= totalPages - 1, () => goTo(page + 1), "Próxima página"),
-        navBtn("»", page >= totalPages - 1, () => goTo(totalPages - 1), "Última página"),
-    );
-
-    const info = document.createElement("span");
-    info.className = "pager-info";
-    const start = page * PAGE_SIZE + 1;
-    const end = Math.min(totalTiles, (page + 1) * PAGE_SIZE);
-    info.textContent = totalTiles === 0
-        ? "Nenhum tile"
-        : `${start}–${end} de ${totalTiles}`;
-    el.appendChild(info);
+    if (withInfo) {
+        const start = page * PAGE_SIZE + 1;
+        const end = Math.min(totalTiles, (page + 1) * PAGE_SIZE);
+        el.appendChild(h("span", { class: "pager-info",
+            text: totalTiles === 0 ? "Nenhum tile" : `${fmtInt(start)}–${fmtInt(end)} de ${fmtInt(totalTiles)}` }));
+    }
 }
 
 function updateBulkBar() {
     const bar = document.getElementById("bulk-bar");
+    if (!bar) return;
     document.getElementById("bulk-count").textContent = selectedIds.size;
     bar.classList.toggle("hidden", selectedIds.size === 0);
 }
 
+function tileStatusChip(t) {
+    if (t.paused_at) return statusChip(t.status, { paused: true, title: `Pausado em ${fmtDate(t.paused_at)}` });
+    return statusChip(t.status, {
+        title: t.status === "blocked" && t.blocked_from ? `Antes: ${statusLabel(t.blocked_from)}` : null,
+    });
+}
+
+// Secondary actions → overflow menu entries (labels/icons per action key).
+const _ROW_ACTION_META = {
+    assign:   (t) => ({ label: t.status === "classified" ? "Atribuir revisor…" : "Atribuir operador…", icon: "user-plus", run: () => assignOne(t) }),
+    rereview: (t) => ({ label: "Enviar para nova revisão", icon: "refresh-cw", run: () => reReviewOne(t.id) }),
+    pause:    (t) => ({ label: "Pausar", icon: "circle-pause", run: () => adminPauseOne(t.id) }),
+    unassign: (t) => ({ label: "Liberar operador", icon: "log-out", run: () => unassignOne(t.id) }),
+    block:    (t) => ({ label: "Bloquear", icon: "lock", run: () => blockAction([t.id]) }),
+    unblock:  (t) => ({ label: "Desbloquear", icon: "lock-open", run: () => blockAction([t.id], { unblock: true }) }),
+};
+
+function rowMenuItems(t) {
+    return tileRowActions(t).map(k => {
+        const m = _ROW_ACTION_META[k](t);
+        return { label: m.label, icon: m.icon, onClick: m.run };
+    });
+}
+
+function dateCell(timestamp, pendingLabel) {
+    if (timestamp) {
+        return h("span", { class: "date-cell", title: fmtDate(timestamp) },
+            h("span", { text: fmtDate(timestamp).split(",")[0] || fmtDate(timestamp) }),
+            h("span", { class: "dim", text: relativeTime(timestamp) }));
+    }
+    if (pendingLabel) return h("span", { class: "chip-text", text: pendingLabel });
+    return h("span", { class: "dim", text: "—" });
+}
+
 function buildTableRow(t) {
-    const tr = document.createElement("tr");
-    tr.dataset.id = t.id;
-    if (selectedIds.has(t.id)) tr.classList.add("selected");
-    const cb = document.createElement("input"); cb.type = "checkbox"; cb.checked = selectedIds.has(t.id);
+    const tr = h("tr", { dataset: { id: t.id }, class: selectedIds.has(t.id) ? "selected" : null });
+    const cb = h("input", { type: "checkbox", "aria-label": `Selecionar tile ${t.id}` });
+    cb.checked = selectedIds.has(t.id);
     cb.addEventListener("change", () => toggleSelect(t.id, cb.checked, tr));
-    const tdCb = document.createElement("td"); tdCb.appendChild(cb);
-    const tdStatus = document.createElement("td");
-    const chip = document.createElement("span");
-    if (t.paused_at) {
-        chip.className = "chip paused";
-        chip.textContent = statusLabel(t.status, true);
-        chip.title = `Pausado em ${t.paused_at}`;
-    } else {
-        chip.className = `chip ${t.status}`;
-        chip.textContent = statusLabel(t.status);
-        if (t.status === "blocked" && t.blocked_from) {
-            chip.title = `Antes: ${statusLabel(t.blocked_from)}`;
-        }
-    }
-    tdStatus.appendChild(chip);
-    const tdAct = document.createElement("td");
-    tdAct.append(btn("Ver", () => openViewer(t.id)));
-    if (t.status === "reviewed") tdAct.append(btn("Re-revisar", () => reReviewOne(t.id)));
-    if (t.status === "pending" || t.status === "classified") {
-        tdAct.append(btn("Atribuir", () => assignOne(t)));
-    }
-    if (t.status === "in_progress" || t.status === "in_review") {
-        if (!t.paused_at) {
-            tdAct.append(btn("Pausar", () => adminPauseOne(t.id)));
-        }
-        tdAct.append(btn("Liberar operador", () => unassignOne(t.id)));
-    }
-    if (isBlockable(t)) {
-        tdAct.append(btn("Bloquear", () => blockAction([t.id])));
-    }
-    if (t.status === "blocked") {
-        tdAct.append(btn("Desbloquear", () => blockAction([t.id], { unblock: true })));
-    }
-    tr.append(tdCb, td(t.id), td(t.name), tdStatus,
-              td(classifierCell(t)), td(reviewerCell(t)),
-              td(finishedCell(t.classified_at, t.status === "in_progress")),
-              td(finishedCell(t.reviewed_at, t.status === "in_review")),
-              tdAct);
+    const actions = h("div", { class: "row-actions" },
+        button("Ver", { variant: "btn-sm", onClick: () => openViewer(t.id) }));
+    const items = rowMenuItems(t);
+    if (items.length) actions.appendChild(menuButton(() => rowMenuItems(t), `Ações do tile ${t.id}`));
+    else actions.appendChild(h("span", { class: "row-actions-spacer" }));
+    const multiProject = currentProjectId == null;
+    tr.append(
+        h("td", { class: "col-check" }, cb),
+        h("td", { class: "num mono dim", text: `#${t.id}` }),
+        h("td", {}, h("span", { class: "cell-strong", text: t.name }),
+            multiProject && projectsById[t.project_id]
+                ? h("span", { class: "cell-sub", text: projectsById[t.project_id].name }) : null),
+        h("td", {}, tileStatusChip(t)),
+        h("td", {}, userCell(classifierCell(t), { hint: t.status === "in_progress" && !t.classified_by_username ? "atribuído" : null })),
+        h("td", {}, userCell(reviewerCell(t), { hint: t.status === "in_review" && !t.reviewed_by_username ? "atribuído" : null })),
+        h("td", {}, dateCell(t.classified_at, t.status === "in_progress" ? "em andamento" : "")),
+        h("td", {}, dateCell(t.reviewed_at, t.status === "in_review" ? "em revisão" : "")),
+        h("td", { class: "col-actions" }, actions));
+    tr.addEventListener("dblclick", () => openViewer(t.id));
     return tr;
 }
 
 function renderTable(root, tiles) {
-    const wrap = document.createElement("div");
-    wrap.className = "admin-table-wrap";
-    const table = document.createElement("table");
-    table.className = "admin-table";
-    const thead = document.createElement("thead");
-    const sortArrow = (k) => sortKey === k ? (sortDir === "asc" ? " ▲" : " ▼") : "";
-    thead.innerHTML = `<tr><th><input type="checkbox" id="check-all"></th>
-        <th data-sort="id">ID${sortArrow("id")}</th>
-        <th data-sort="name">Nome${sortArrow("name")}</th>
-        <th data-sort="status">Status${sortArrow("status")}</th>
-        <th data-sort="classified_by_username">Classificado por${sortArrow("classified_by_username")}</th>
-        <th data-sort="reviewed_by_username">Revisado por${sortArrow("reviewed_by_username")}</th>
-        <th data-sort="classified_at">Classificado${sortArrow("classified_at")}</th>
-        <th data-sort="reviewed_at">Revisado${sortArrow("reviewed_at")}</th>
-        <th>Ações</th></tr>`;
-    thead.querySelectorAll("th[data-sort]").forEach(th => {
-        th.style.cursor = "pointer";
-        th.addEventListener("click", () => setSort(th.dataset.sort));
-    });
-    table.appendChild(thead);
-    const tbody = document.createElement("tbody");
+    const cols = [
+        ["id", "ID", true], ["name", "Nome"], ["status", "Status"],
+        ["classified_by_username", "Classificado por"], ["reviewed_by_username", "Revisado por"],
+        ["classified_at", "Classificado em"], ["reviewed_at", "Revisado em"],
+    ];
+    const checkAll = h("input", { type: "checkbox", id: "check-all", "aria-label": "Selecionar todos da página" });
+    const table = h("table", { class: "table admin-table tiles-table" },
+        h("thead", {}, h("tr", {},
+            h("th", { class: "col-check" }, checkAll),
+            cols.map(([k, l, num]) => sortHeader(l, { key: k, activeKey: sortKey, dir: sortDir, onSort: setSort, num })),
+            h("th", { class: "col-actions", "aria-label": "Ações" }))));
+    const tbody = h("tbody");
     for (const t of tiles) tbody.appendChild(buildTableRow(t));
     table.appendChild(tbody);
-    wrap.appendChild(table);
-    root.appendChild(wrap);
-    document.getElementById("check-all").addEventListener("change", (ev) => {
+    root.appendChild(h("div", { class: "card card-flush" }, h("div", { class: "table-wrap admin-table-wrap" }, table)));
+    checkAll.addEventListener("change", (ev) => {
         tbody.querySelectorAll("tr").forEach(tr => {
             const id = Number(tr.dataset.id);
             if (ev.target.checked) selectedIds.add(id); else selectedIds.delete(id);
@@ -578,65 +604,95 @@ function renderTable(root, tiles) {
     });
 }
 
+// Raster tiles with paint: satellite underneath, colorized mask on top.
+// Everything else: the server picks the best single thumbnail.
+// Classification tiles: satellite only — the class goes in an HTML tag (the
+// server-rendered badge can't draw accented names).
+function _thumbLayers(t) {
+    const kind = projectsById[t.project_id]?.kind || "raster";
+    const painted = kind === "raster" && !["pending", "problem"].includes(t.status)
+        && !(t.status === "blocked" && t.blocked_from === "pending");
+    const classified = kind === "classification" && ["classified", "in_review", "reviewed"].includes(t.status);
+    return { kind, painted, classified };
+}
+
+function classTag(classId, projectId) {
+    const cls = (projectsById[projectId]?.classes || []).find(c => c.id === classId);
+    const sw = h("span", { class: "viewer-swatch" });
+    sw.style.background = cls?.color || "var(--border-strong)";
+    return h("span", { class: "thumb-class" }, sw, h("span", { text: cls ? cls.name : `Classe #${classId}` }));
+}
+
 function buildGridCard(t) {
-    const card = document.createElement("div");
-    card.className = "thumb-card" + (selectedIds.has(t.id) ? " selected" : "");
-    card.dataset.id = t.id;
+    const cardEl = h("div", {
+        class: `thumb-card${selectedIds.has(t.id) ? " selected" : ""}`,
+        dataset: { id: t.id }, tabIndex: 0, role: "button", "aria-label": `Abrir tile ${t.id}`,
+    });
     // Selection checkbox overlaid top-left. Stops propagation so toggling it
     // doesn't also open the viewer. Shift+click on the card body still works.
-    const cb = document.createElement("input");
-    cb.type = "checkbox";
-    cb.className = "thumb-check";
+    const cb = h("input", { type: "checkbox", class: "thumb-check", "aria-label": `Selecionar tile ${t.id}` });
     cb.checked = selectedIds.has(t.id);
     cb.addEventListener("click", (ev) => ev.stopPropagation());
-    cb.addEventListener("change", () => toggleSelect(t.id, cb.checked, card));
-    card.appendChild(cb);
-    const img = document.createElement("img");
-    img.alt = `Tile ${t.id}`;
-    img.className = "thumb-skeleton";
-    // Backend picks mask vs satellite based on whether the tile has any
-    // painted pixels, so empty masks (pending / problem / freshly-assigned)
-    // still show something meaningful without frontend branching.
-    apiGetBlob(`/api/admin/tiles/${t.id}/thumbnail?size=128`)
-        .then(b => { img.src = URL.createObjectURL(b); img.classList.remove("thumb-skeleton"); })
-        .catch(() => { img.alt = "?"; img.classList.remove("thumb-skeleton"); });
-    const meta = document.createElement("div");
-    meta.className = "meta";
-    meta.textContent = `#${t.id} · ${statusLabel(t.status, !!t.paused_at)}`;
-    const whoText =
-        t.reviewed_by_username ? `revisado por ${t.reviewed_by_username}` :
-        t.classified_by_username ? `classificado por ${t.classified_by_username}` :
-        t.assigned_to_username ? `atribuído a ${t.assigned_to_username}` : "";
-    card.append(img, meta);
-    if (whoText) {
-        const who = document.createElement("div");
-        who.className = "meta-dim";
-        who.textContent = whoText;
-        card.append(who);
-    }
-    if (t.status === "pending" || t.status === "classified") {
-        const assignBtn = document.createElement("button");
-        assignBtn.className = "card-action";
-        assignBtn.textContent = t.status === "classified" ? "Atribuir revisor" : "Atribuir";
-        assignBtn.addEventListener("click", (ev) => {
-            ev.stopPropagation();
-            assignOne(t);
+    cb.addEventListener("change", () => toggleSelect(t.id, cb.checked, cardEl));
+    const media = h("div", { class: "thumb-media thumb-skeleton" });
+    const { kind, painted, classified } = _thumbLayers(t);
+    const addImg = (url, cls) => apiGetBlob(url)
+        .then(b => {
+            const img = h("img", { alt: "", class: cls, draggable: "false" });
+            img.src = URL.createObjectURL(b);
+            img.onload = () => URL.revokeObjectURL(img.src);
+            media.appendChild(img);
         });
-        card.appendChild(assignBtn);
+    const loads = [];
+    if (kind === "classification") {
+        loads.push(addImg(`/api/admin/tiles/${t.id}/satellite-thumbnail?size=192`, "thumb-sat")
+            .catch(() => addImg(`/api/admin/tiles/${t.id}/thumbnail?size=192`, "thumb-main")).catch(() => {}));
+    } else {
+        if (painted) loads.push(addImg(`/api/admin/tiles/${t.id}/satellite-thumbnail?size=192`, "thumb-sat").catch(() => {}));
+        loads.push(addImg(`/api/admin/tiles/${t.id}/thumbnail?size=192`, painted ? "thumb-mask" : "thumb-main").catch(() => {}));
     }
-    if (t.status === "blocked") {
-        card.appendChild(btn("Desbloquear", () => blockAction([t.id], { unblock: true }), "card-action"));
+    Promise.all(loads).finally(() => media.classList.remove("thumb-skeleton"));
+    media.appendChild(cb);
+    media.appendChild(h("span", { class: "thumb-status" }, tileStatusChip(t)));
+    const whoName = t.reviewed_by_username || t.classified_by_username || t.assigned_to_username;
+    const whoText =
+        t.reviewed_by_username ? "revisado por" :
+        t.classified_by_username ? "classificado por" :
+        t.assigned_to_username ? "atribuído a" : "";
+    const body = h("div", { class: "thumb-body" },
+        h("div", { class: "thumb-title" },
+            h("span", { class: "thumb-name", text: truncateName(t.name, 24), title: t.name }),
+            h("span", { class: "thumb-id mono", text: `#${t.id}` })),
+        whoName
+            ? h("div", { class: "thumb-who" }, avatar(whoName, { size: "xs" }),
+                h("span", { class: "dim", text: whoText }), h("span", { text: whoName }))
+            : h("div", { class: "thumb-who dim", text: "Sem responsável" }));
+    const items = rowMenuItems(t);
+    if (items.length) {
+        const mb = menuButton(() => rowMenuItems(t), `Ações do tile ${t.id}`);
+        mb.classList.add("thumb-menu");
+        media.appendChild(mb);
     }
-    card.addEventListener("click", (ev) => {
-        if (ev.shiftKey) toggleSelect(t.id, !selectedIds.has(t.id), card);
+    if (classified) {
+        apiGet(`/api/tiles/${t.id}/classification`)
+            .then(r => { if (r?.class_id != null) body.insertBefore(classTag(r.class_id, t.project_id), body.lastChild); })
+            .catch(() => {});
+    }
+    cardEl.append(media, body);
+    cardEl.addEventListener("click", (ev) => {
+        if (ev.shiftKey) toggleSelect(t.id, !selectedIds.has(t.id), cardEl, true);
         else openViewer(t.id);
     });
-    return card;
+    cardEl.addEventListener("keydown", (ev) => {
+        if (ev.target !== cardEl) return;
+        if (ev.key === "Enter") openViewer(t.id);
+        if (ev.key === " ") { ev.preventDefault(); toggleSelect(t.id, !selectedIds.has(t.id), cardEl, true); }
+    });
+    return cardEl;
 }
 
 function renderGrid(root, tiles) {
-    const grid = document.createElement("div");
-    grid.className = "thumb-grid";
+    const grid = h("div", { class: "thumb-grid" });
     for (const t of tiles) grid.appendChild(buildGridCard(t));
     root.appendChild(grid);
 }
@@ -665,13 +721,15 @@ async function refreshTilesInPlace(ids) {
     await Promise.all(ids.map(refreshTileInPlace));
 }
 
-function toggleSelect(id, on, el) {
+function toggleSelect(id, on, el, syncCheckbox = false) {
     if (on) selectedIds.add(id); else selectedIds.delete(id);
     el?.classList.toggle("selected", on);
+    if (syncCheckbox) {
+        const cb = el?.querySelector("input[type=checkbox]");
+        if (cb) cb.checked = on;
+    }
     updateBulkBar();
 }
-
-function td(v) { const el = document.createElement("td"); el.textContent = v ?? ""; return el; }
 
 function classifierCell(t) {
     return t.classified_by_username
@@ -681,19 +739,6 @@ function classifierCell(t) {
 function reviewerCell(t) {
     return t.reviewed_by_username
         || (t.status === "in_review" ? (t.assigned_to_username || "") : "");
-}
-
-function finishedCell(timestamp, inProgress) {
-    if (timestamp) return `✓ ${fmtDate(timestamp)}`;
-    if (inProgress) return "em andamento";
-    return "";
-}
-function btn(label, fn, cls) {
-    const b = document.createElement("button"); b.textContent = label;
-    if (cls) b.className = cls;
-    b.style.marginRight = "4px";
-    b.addEventListener("click", (ev) => { ev.stopPropagation(); fn(); });
-    return b;
 }
 
 async function resetOne(id) {
@@ -841,12 +886,12 @@ async function blockAction(ids, { unblock = false, reload = true } = {}) {
 
 async function bulkBlock() {
     if (!selectedIds.size) return;
-    if (await blockAction([...selectedIds])) selectedIds.clear();
+    if (await blockAction([...selectedIds])) { selectedIds.clear(); updateBulkBar(); }
 }
 
 async function bulkUnblock() {
     if (!selectedIds.size) return;
-    if (await blockAction([...selectedIds], { unblock: true })) selectedIds.clear();
+    if (await blockAction([...selectedIds], { unblock: true })) { selectedIds.clear(); updateBulkBar(); }
 }
 
 async function bulkReset() {
@@ -980,31 +1025,30 @@ async function bulkUnassign() {
     refreshTilesInPlace(ids);
 }
 
-// Render the tile info (status, actions, history, map+mask preview) into
-// `targetBody`. Used by both the modal viewer (Tiles tab) and the side panel
-// (Mapa tab). Owns `viewerMap` lifecycle — disposes the previous map and
-// installs a new one in the rendered `viewer-map-${tileId}` div. `reload`
-// is the function to call when an action button needs to refresh the same
-// view (e.g. after Re-revisar / Bloquear).
-async function renderTileInfo(targetBody, tileId, reload) {
+// ---------- Tile viewer (modal + map side panel) ----------
+
+// Render the tile info (imagery + mask, status, metadata, actions, history)
+// into `targetBody`. Used by both the modal viewer (two columns) and the map
+// side panel (stacked). Owns `viewerMap` lifecycle — disposes the previous
+// map and installs a new one in the rendered `viewer-map-${tileId}` div.
+// `reload` re-renders the same view after an action (Re-revisar, Bloquear…).
+async function renderTileInfo(targetBody, tileId, reload, { layout = "wide", onLoaded } = {}) {
     disposeViewerMap();
     targetBody.innerHTML = `
-        <div class="loading-text"><span class="loading"></span> Carregando tile...</div>
-        <div class="viewer-skeleton"></div>`;
+        <div class="tile-info tile-info-${layout} is-loading">
+            <div class="tile-info-media"><div class="viewer-skeleton"></div></div>
+            <div class="tile-info-side"><div class="loading-text"><span class="loading"></span> Carregando tile...</div></div>
+        </div>`;
     try {
         // Tile first so we can decide whether to fetch the raster mask:
         // classification doesn't have a per-pixel PNG and the /image endpoint
         // isn't meant for it.
         const t = await apiGet(`/api/tiles/${tileId}`);
-        const kind = projectsById[t.project_id]?.kind || "raster";
+        const proj = projectsById[t.project_id] || {};
+        const kind = proj.kind || "raster";
         // The mask exists only for raster projects, and only after the operator
-        // has painted something. `pending` and `problem` are wiped/empty —
-        // nothing to toggle in those states.
-        const hasMask = kind === "raster"
-            && t.status !== "pending" && t.status !== "problem";
-        // Classification: the body is a single class id (null/204 when the
-        // tile was never submitted). Class names live on the project detail —
-        // only fetched when the palette isn't cached for this project yet.
+        // has painted something. `pending` and `problem` are wiped/empty.
+        const hasMask = kind === "raster" && t.status !== "pending" && t.status !== "problem";
         const isClassification = kind === "classification";
         const [history, blob, clsBody, projDetail] = await Promise.all([
             apiGet(`/api/tiles/${tileId}/history`),
@@ -1012,184 +1056,219 @@ async function renderTileInfo(targetBody, tileId, reload) {
             isClassification
                 ? apiGet(`/api/tiles/${tileId}/classification`).catch(() => null)
                 : Promise.resolve(null),
-            isClassification && !projectsById[t.project_id]?.classes
-                ? apiGet(`/api/projects/${t.project_id}`).catch(() => null)
-                : Promise.resolve(null),
+            !proj.classes ? apiGet(`/api/projects/${t.project_id}`).catch(() => null) : Promise.resolve(null),
         ]);
+        if (projDetail) projectsById[t.project_id] = { ...projectsById[t.project_id], ...projDetail };
+        const projClasses = projectsById[t.project_id]?.classes || [];
+        const palette = Object.fromEntries(projClasses.map(c => [c.id, c]));
+        const tilePx = projectsById[t.project_id]?.tile_px || 256;
+        const primaryUrl = projectsById[t.project_id]?.layers?.primary?.url
+            || (t.project_id === currentProjectId ? tileserverUrl : "");
+        const primaryMax = projectsById[t.project_id]?.layers?.primary?.max_zoom ?? tileserverMaxZoom;
         const img = blob ? await blobToImage(blob) : null;
-        targetBody.innerHTML = "";
-        const meta = document.createElement("div");
-        const statusLine = document.createElement("p");
-        statusLine.innerHTML = `<b>Status:</b> `;
-        const chip = document.createElement("span");
-        if (t.paused_at) {
-            chip.className = "chip paused";
-            chip.textContent = statusLabel(t.status, true);
-            chip.title = `Pausado em ${t.paused_at}`;
-        } else {
-            chip.className = `chip ${t.status}`;
-            chip.textContent = statusLabel(t.status);
-        }
-        statusLine.appendChild(chip);
-        if (t.status === "blocked" && t.blocked_from) {
-            statusLine.append(document.createTextNode(` (antes: ${statusLabel(t.blocked_from)})`));
-        }
-        if (t.classified_by_username) {
-            statusLine.append(document.createTextNode(" · classificado por "));
-            const b = document.createElement("b"); b.textContent = t.classified_by_username;
-            statusLine.append(b);
-        }
-        meta.appendChild(statusLine);
-        if (isClassification) {
-            const projClasses = projectsById[t.project_id]?.classes || projDetail?.classes || [];
-            meta.appendChild(classificationLine(clsBody?.class_id ?? null, projClasses));
-        }
-        const viewerActions = document.createElement("div");
-        viewerActions.className = "viewer-actions";
-        if (t.status === "pending" || t.status === "classified") {
-            viewerActions.appendChild(btn(
-                t.status === "classified" ? "Atribuir revisor" : "Atribuir operador",
-                () => assignOne(t),
-            ));
-        }
-        if (t.status === "reviewed") {
-            viewerActions.appendChild(btn("Re-revisar", async () => {
-                await reReviewOne(t.id);
-                reload(t.id);
-            }));
-        }
-        if (isBlockable(t)) {
-            viewerActions.appendChild(btn("Bloquear", async () => {
-                if (await blockAction([t.id], { reload: false })) reload(t.id);
-            }));
-        } else if (t.status === "blocked") {
-            viewerActions.appendChild(btn("Desbloquear", async () => {
-                if (await blockAction([t.id], { unblock: true, reload: false })) reload(t.id);
-            }));
-        }
-        if (viewerActions.children.length) meta.appendChild(viewerActions);
-        targetBody.appendChild(meta);
+        onLoaded?.(t);
 
-        if (history.length) {
-            const h = document.createElement("details");
-            h.open = true;
-            const summary = document.createElement("summary");
-            summary.textContent = `Histórico (${history.length} ações)`;
-            summary.style.cursor = "pointer";
-            h.appendChild(summary);
-            const ul = document.createElement("ul");
-            ul.className = "history-list";
-            for (const ev of history) {
-                const li = document.createElement("li");
-                const act = document.createElement("span"); act.className = "act"; act.textContent = ev.action;
-                const by = document.createTextNode(`por ${ev.username || "?"}`);
-                const when = document.createElement("div"); when.className = "when"; when.textContent = fmtDate(ev.created_at);
-                li.append(act, by);
-                if (ev.detail) li.append(document.createTextNode(` — ${ev.detail}`));
-                li.append(when);
-                ul.appendChild(li);
-            }
-            h.appendChild(ul);
-            targetBody.appendChild(h);
-        }
-        // Mask toggle only appears for raster tiles with painted content —
-        // classification has no per-pixel mask to hide, and
-        // `pending`/`problem` raster tiles have nothing painted.
-        if (hasMask) {
-            const stackTools = document.createElement("div");
-            stackTools.className = "viewer-stack-tools";
-            const maskBtn = document.createElement("button");
-            maskBtn.type = "button";
-            maskBtn.className = "viewer-tool-btn active";
-            const maskIcon = document.createElement("span");
-            maskIcon.className = "viewer-tool-icon";
-            maskIcon.textContent = "🎨";
-            const maskLabel = document.createElement("span");
-            maskLabel.textContent = "Esconder máscara";
-            maskBtn.append(maskIcon, maskLabel);
-            maskBtn.setAttribute("aria-pressed", "true");
-            stackTools.appendChild(maskBtn);
-            targetBody.appendChild(stackTools);
-            // The click handler is wired after `stack` exists; capture a
-            // reference here and attach below.
-            targetBody._maskBtn = maskBtn;
-            targetBody._maskLabel = maskLabel;
-        }
-
-        const stack = document.createElement("div");
-        stack.className = "viewer-stack";
-        const mapDiv = document.createElement("div");
-        mapDiv.id = `viewer-map-${tileId}`;
+        // ---- Media column ----
+        const stack = h("div", { class: "viewer-stack" });
+        const mapDiv = h("div", { id: `viewer-map-${tileId}`, class: "viewer-map" });
         stack.appendChild(mapDiv);
-        // Mask canvas only when we actually have a mask to render. Otherwise
-        // the satellite map (below) fills the stack on its own.
         let maskCnv = null;
         if (hasMask) {
-            maskCnv = document.createElement("canvas");
-            maskCnv.width = 512; maskCnv.height = 512;
+            maskCnv = h("canvas", { width: 512, height: 512 });
             stack.appendChild(maskCnv);
         }
-        targetBody.appendChild(stack);
-
+        if (!primaryUrl) {
+            stack.appendChild(h("div", { class: "viewer-noimage" }, icon("image"),
+                h("span", { text: "Sem imagem de satélite configurada" })));
+        }
+        const frame = h("div", { class: "viewer-frame" }, stack);
         if (hasMask) {
-            const maskBtn = targetBody._maskBtn;
-            const maskLabel = targetBody._maskLabel;
+            const maskLabel = h("span", { text: "Máscara" });
+            const maskBtn = h("button", {
+                type: "button", class: "viewer-tool-btn active", "aria-pressed": "true",
+                title: "Mostrar/esconder a máscara sobre a imagem",
+            }, icon("eye"), maskLabel);
             maskBtn.addEventListener("click", () => {
-                // Toggle the canvas only — the underlying satellite map keeps
-                // rendering so admins can inspect the imagery beneath.
+                // Toggle the canvas only — the satellite map keeps rendering
+                // so admins can inspect the imagery beneath.
                 const hidden = stack.classList.toggle("mask-hidden");
                 maskBtn.classList.toggle("active", !hidden);
                 maskBtn.setAttribute("aria-pressed", String(!hidden));
-                maskLabel.textContent = hidden ? "Mostrar máscara" : "Esconder máscara";
+                maskBtn.querySelector("use")?.setAttribute("href",
+                    `/static/vendor/lucide/icons.svg#i-${hidden ? "eye-off" : "eye"}`);
             });
-            delete targetBody._maskBtn;
-            delete targetBody._maskLabel;
+            frame.appendChild(h("div", { class: "viewer-stack-tools" }, maskBtn));
         }
+        const media = h("div", { class: "tile-info-media" }, frame);
+        const legendHost = h("div", { class: "viewer-legend-host" });
+        if (hasMask) media.appendChild(legendHost);
+        // Timestamps / notes come from the action log (the tile payload
+        // carries only the actors).
+        const lastLog = (action) => [...history].reverse().find(e => e.action === action);
+        const classifiedAt = lastLog("classify")?.created_at;
+        const reviewedAt = lastLog("review")?.created_at;
+        const problemNote = t.status === "problem" ? lastLog("report_problem")?.detail : null;
+
+        // ---- Side column ----
+        const side = h("div", { class: "tile-info-side" });
+        const statusRow = h("div", { class: "viewer-status-row" }, tileStatusChip(t));
+        if (t.status === "blocked" && t.blocked_from) {
+            statusRow.appendChild(h("span", { class: "muted", text: `antes: ${statusLabel(t.blocked_from)}` }));
+        }
+        statusRow.appendChild(h("span", { class: "chip", text: kindLabel(kind) }));
+        side.appendChild(statusRow);
+        if (isClassification) {
+            side.appendChild(classificationLine(clsBody?.class_id ?? null, projClasses));
+        }
+        if (problemNote) {
+            side.appendChild(h("div", { class: "viewer-note" }, icon("message-square-text"),
+                h("div", {}, h("strong", { text: "Problema reportado" }), h("p", { text: problemNote }))));
+        }
+        const meta = h("dl", { class: "viewer-meta" });
+        const addMeta = (label, value) => {
+            if (value == null || value === "") return;
+            meta.append(h("dt", { text: label }), h("dd", {}, value));
+        };
+        addMeta("Projeto", proj.name || `#${t.project_id}`);
+        addMeta("Nome", h("span", { class: "mono", text: t.name }));
+        if (t.classified_by_username) {
+            addMeta("Classificado", h("span", { class: "meta-user" }, userCell(t.classified_by_username),
+                classifiedAt ? h("span", { class: "dim", text: fmtDate(classifiedAt) }) : null));
+        }
+        if (t.reviewed_by_username) {
+            addMeta("Revisado", h("span", { class: "meta-user" }, userCell(t.reviewed_by_username),
+                reviewedAt ? h("span", { class: "dim", text: fmtDate(reviewedAt) }) : null));
+        }
+        if (t.assigned_to_username && (t.status === "in_progress" || t.status === "in_review")) {
+            addMeta("Com", userCell(t.assigned_to_username, { hint: t.paused_at ? "pausado" : "trabalhando" }));
+        }
+        addMeta("Centro", h("span", { class: "mono dim",
+            text: `${((t.bbox_south + t.bbox_north) / 2).toFixed(5)}, ${((t.bbox_west + t.bbox_east) / 2).toFixed(5)}` }));
+        side.appendChild(meta);
+
+        const actions = h("div", { class: "viewer-actions" });
+        if (t.status === "pending" || t.status === "classified") {
+            actions.appendChild(button(t.status === "classified" ? "Atribuir revisor" : "Atribuir operador",
+                { icon: "user-plus", variant: "primary btn-sm", onClick: () => assignOne(t) }));
+        }
+        if (t.status === "reviewed") {
+            actions.appendChild(button("Re-revisar", { icon: "refresh-cw", variant: "btn-sm", onClick: async () => {
+                await reReviewOne(t.id);
+                reload(t.id);
+            } }));
+        }
+        if (isBlockable(t)) {
+            actions.appendChild(button("Bloquear", { icon: "lock", variant: "btn-sm", onClick: async () => {
+                if (await blockAction([t.id], { reload: false })) reload(t.id);
+            } }));
+        } else if (t.status === "blocked") {
+            actions.appendChild(button("Desbloquear", { icon: "lock-open", variant: "btn-sm", onClick: async () => {
+                if (await blockAction([t.id], { unblock: true, reload: false })) reload(t.id);
+            } }));
+        }
+        if (actions.children.length) side.appendChild(actions);
+
+        if (history.length) {
+            const list = h("ol", { class: "timeline" });
+            for (const ev of [...history].reverse()) {
+                list.appendChild(h("li", { class: `timeline-item tl-${actionTone(ev.action)}` },
+                    h("span", { class: "timeline-dot" }),
+                    h("div", { class: "timeline-body" },
+                        h("div", { class: "timeline-line" },
+                            h("strong", { text: actionLabel(ev.action) }),
+                            h("span", { class: "muted", text: ` · ${ev.username || "?"}` })),
+                        ev.detail && !/^[{[]/.test(ev.detail) && !["queue", "auto", "admin"].includes(ev.detail)
+                            ? h("div", { class: "timeline-detail", text: ev.detail }) : null,
+                        h("time", { class: "timeline-when", title: fmtDate(ev.created_at),
+                                    text: `${fmtDate(ev.created_at)} · ${relativeTime(ev.created_at)}` }))));
+            }
+            side.appendChild(h("div", { class: "viewer-section" },
+                h("h4", { class: "viewer-section-title" }, icon("clock", "icon-sm"),
+                    `Histórico`, h("span", { class: "badge badge-soft", text: String(history.length) })),
+                list));
+        }
+
+        targetBody.textContent = "";
+        targetBody.appendChild(h("div", { class: `tile-info tile-info-${layout}` }, media, side));
+
         setTimeout(() => {
             // Bail if the host cleared this body (closed modal / panel, or
             // requested a different tile) before this tick fires — otherwise
             // we'd leak a WebGL context into an orphaned div.
-            if (!document.getElementById(`viewer-map-${tileId}`)) return;
+            if (!document.getElementById(`viewer-map-${tileId}`) || !primaryUrl) return;
             disposeViewerMap();
-            viewerMap = createLockedMap(`viewer-map-${tileId}`, tileserverUrl,
-                [t.bbox_west, t.bbox_south, t.bbox_east, t.bbox_north], tileserverMaxZoom);
+            viewerMap = createLockedMap(`viewer-map-${tileId}`, primaryUrl,
+                [t.bbox_west, t.bbox_south, t.bbox_east, t.bbox_north], primaryMax);
         }, 0);
         if (hasMask && img && maskCnv) {
+            const n = tilePx;
             const tmp = document.createElement("canvas");
-            tmp.width = 256; tmp.height = 256;
+            tmp.width = n; tmp.height = n;
             const tctx = tmp.getContext("2d");
-            tctx.drawImage(img, 0, 0, 256, 256);
-            const data = tctx.getImageData(0, 0, 256, 256);
-            const out = maskCnv.getContext("2d").createImageData(256, 256);
-            for (let i = 0; i < 256*256; i++) {
-                const v = data.data[i*4];
-                const c = classesById[v];
-                if (c) {
-                    const [r,g,b] = hexToRgb(c.color);
-                    out.data[i*4] = r; out.data[i*4+1] = g; out.data[i*4+2] = b; out.data[i*4+3] = 180;
-                } else { out.data[i*4+3] = 0; }
+            tctx.drawImage(img, 0, 0, n, n);
+            const data = tctx.getImageData(0, 0, n, n);
+            const out = tctx.createImageData(n, n);
+            const lut = new Map(projClasses.map(c => [c.id, hexToRgb(c.color)]));
+            const counts = {};
+            for (let i = 0; i < n * n; i++) {
+                const v = data.data[i * 4];
+                if (v !== 255) counts[v] = (counts[v] || 0) + 1;
+                const rgb = lut.get(v);
+                if (rgb) {
+                    out.data[i * 4] = rgb[0]; out.data[i * 4 + 1] = rgb[1];
+                    out.data[i * 4 + 2] = rgb[2]; out.data[i * 4 + 3] = 120;
+                }
             }
-            const off = document.createElement("canvas"); off.width = 256; off.height = 256;
-            off.getContext("2d").putImageData(out, 0, 0);
+            tctx.putImageData(out, 0, 0);
             const mctx = maskCnv.getContext("2d");
             mctx.imageSmoothingEnabled = false;
-            mctx.drawImage(off, 0, 0, 512, 512);
+            mctx.drawImage(tmp, 0, 0, 512, 512);
+            const filled = Object.values(counts).reduce((a, b) => a + b, 0);
+            legendHost.appendChild(classCountsLegend(counts, palette, n * n - filled));
         }
     } catch (e) {
         renderError(targetBody, e);
     }
 }
 
+// Class share bar + legend under the image, from the decoded mask.
+// `counts` = {classId: pixels}; `unfilled` pixels (255) get their own slot.
+function classCountsLegend(counts, palette, unfilled = 0) {
+    const entries = Object.entries(counts).map(([k, v]) => [Number(k), Number(v)]).filter(([, v]) => v > 0);
+    if (unfilled > 0) entries.push([255, unfilled]);
+    const total = entries.reduce((a, [, v]) => a + v, 0) || 1;
+    entries.sort((a, b) => b[1] - a[1]);
+    const bar = h("div", { class: "viewer-mix", role: "img",
+        "aria-label": entries.map(([k, v]) => `${palette[k]?.name || `#${k}`}: ${Math.round(100 * v / total)}%`).join(", ") });
+    const legend = h("div", { class: "viewer-legend" });
+    for (const [k, v] of entries) {
+        const c = k === 255 ? { name: "Não preenchido", color: "var(--bg-4)" } : palette[k];
+        const seg = h("span", { class: "viewer-mix-seg", title: `${c?.name || `#${k}`}: ${Math.round(100 * v / total)}%` });
+        seg.style.flexGrow = String(v);
+        seg.style.background = c?.color || "var(--border-strong)";
+        bar.appendChild(seg);
+        legend.appendChild(h("span", { class: "viewer-legend-item" },
+            h("span", { class: "viewer-swatch", style: { background: c?.color || "var(--border-strong)" } }),
+            h("span", { text: c?.name || `#${k}` }),
+            h("span", { class: "dim tabular", text: `${Math.round(100 * v / total)}%` })));
+    }
+    return h("div", { class: "viewer-mix-wrap" }, bar, legend);
+}
+
 async function openViewer(tileId) {
     const modal = document.getElementById("modal-view-tile");
     const body = document.getElementById("view-tile-body");
     document.getElementById("view-tile-title").textContent = `Tile #${tileId}`;
+    const sub = document.getElementById("view-tile-subtitle");
+    sub.textContent = "";
     modal.classList.remove("hidden");
-    await renderTileInfo(body, tileId, openViewer);
+    await renderTileInfo(body, tileId, openViewer, {
+        layout: "wide",
+        onLoaded: (t) => {
+            sub.textContent = `${t.name} · ${projectsById[t.project_id]?.name || `projeto #${t.project_id}`}`;
+        },
+    });
 }
-
-const MAP_PANEL_EMPTY_HTML =
-    `<p class="map-panel-empty-msg">Clique em um tile no mapa para ver detalhes aqui.</p>`;
 
 function getMapPanelEls() {
     const panel = document.getElementById("map-panel");
@@ -1211,7 +1290,8 @@ async function showTileInPanel(tileId) {
     els.panel.dataset.tileId = String(tileId);
     els.panel.classList.remove("empty");
     els.title.textContent = `Tile #${tileId}`;
-    await renderTileInfo(els.body, tileId, showTileInPanel);
+    await renderTileInfo(els.body, tileId, (id) => { delete els.panel.dataset.tileId; showTileInPanel(id); },
+                         { layout: "stack" });
 }
 
 function closeMapPanel() {
@@ -1221,25 +1301,8 @@ function closeMapPanel() {
     delete els.panel.dataset.tileId;
     els.panel.classList.add("empty");
     els.title.textContent = "Detalhes do tile";
-    els.body.innerHTML = MAP_PANEL_EMPTY_HTML;
+    els.body.textContent = "";
 }
-
-
-// Effective category → fill color for the map polygons. The map keys on
-// `display_status`, not raw `status`, so paused tiles (which are technically
-// in_progress/in_review with paused_at != NULL) render distinctly. Kept in
-// sync with the chip colors in style.css so the map legend matches the
-// tiles-tab status chips.
-const MAP_STATUS_COLORS = {
-    pending:     "#9ca3af",
-    in_progress: "#3b82f6",
-    paused:      "#a855f7",  // overlay: in_progress|in_review with paused_at != NULL
-    classified:  "#eab308",
-    in_review:   "#f97316",
-    reviewed:    "#22c55e",
-    problem:     "#ef4444",
-    blocked:     "#4b5563",
-};
 
 // Single source of truth for the rendered category on the map. Paused beats
 // in_progress/in_review; otherwise the raw status wins.
@@ -1279,88 +1342,131 @@ function refreshMapFeatureProps() {
     }
 }
 
+// ---------- Map tab ----------
+
+// Map statuses keyed on `display_status` (paused is virtual: in_progress|
+// in_review with paused_at). Colors come from the --st-* tokens so the map
+// legend matches the status chips in both themes.
+const MAP_STATUSES = STATUS_ORDER;
+function mapStatusColors() {
+    return Object.fromEntries(MAP_STATUSES.map(s => [s, cssVar(`--st-${s}`) || cssVar("--text-dim")]));
+}
+// Pending tiles are the bulk of a fresh project — keep them light so the
+// imagery and the finished work stand out.
+const MAP_FILL_OPACITY = ["match", ["get", "display_status"], "pending", 0.18, "reviewed", 0.4, 0.55];
+function mapColorExpr() {
+    const expr = ["match", ["get", "display_status"]];
+    for (const [status, color] of Object.entries(mapStatusColors())) expr.push(status, color);
+    expr.push(cssVar("--text-dim"));
+    return expr;
+}
+
+// Basemap follows the theme (Esri light/dark gray canvas).
+const BASEMAP_URLS = {
+    light: "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}",
+    dark: "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}",
+};
+const currentThemeName = () =>
+    document.documentElement.getAttribute("data-theme") === "dark" ? "dark" : "light";
+
+// Re-apply token-driven paint after a theme switch (MapLibre can't read CSS).
+function applyMapTheme() {
+    if (!mapView || !mapView.getLayer("tiles-fill")) return;
+    const expr = mapColorExpr();
+    mapView.setPaintProperty("tiles-fill", "fill-color", expr);
+    mapView.setPaintProperty("tiles-outline", "line-color", expr);
+    mapView.setPaintProperty("tiles-dot", "circle-color", expr);
+    mapView.setPaintProperty("tiles-dot", "circle-stroke-color", cssVar("--bg-1"));
+    mapView.setPaintProperty("tiles-selected-outline", "line-color", cssVar("--text"));
+    mapView.setPaintProperty("tiles-selected-glow", "circle-stroke-color", cssVar("--text"));
+    mapView.getSource("basemap")?.setTiles([BASEMAP_URLS[currentThemeName()]]);
+    const legend = document.getElementById("map-legend");
+    const colors = mapStatusColors();
+    legend?.querySelectorAll(".map-legend-item").forEach(item => {
+        const sw = item.querySelector(".map-legend-swatch");
+        if (sw) sw.style.background = colors[item.dataset.status];
+    });
+}
+
 async function renderMap(root) {
     const tiles = await apiGet(withProjectParam("/api/admin/tiles/map", currentProjectId));
+    if (!root.isConnected) return;  // tab changed while loading
     mapSelectedIds = new Set();
     mapTilePropsById = new Map();
     mapRectSelectActive = false;
     root.innerHTML = `
         <div class="map-tab">
-            <div class="map-tab-toolbar" id="map-toolbar">
+            <div class="map-tab-container" id="admin-map">
+                <div id="map-rect-overlay" class="map-rect-overlay hidden"></div>
+            </div>
+            <div class="map-float map-float-tools" id="map-toolbar" role="toolbar" aria-label="Ferramentas do mapa">
                 <button id="map-tool-rect" class="map-tool-btn" type="button"
-                        title="Ativa a seleção retangular. Arraste sobre o mapa: Shift soma à seleção, Alt remove. A ferramenta desliga sozinha após o gesto. Esc cancela.">
-                    <span class="map-tool-icon">▭</span> Seleção retangular
-                </button>
-                <span id="map-sel-info" class="map-sel-info hidden">
-                    <b id="map-sel-count">0</b> tile(s) selecionado(s)
-                </span>
-                <span class="map-toolbar-spacer"></span>
-                <button id="map-bulk-assign" type="button" disabled>Atribuir operador</button>
-                <button id="map-bulk-unassign" type="button" disabled>Liberar operador</button>
-                <button id="map-bulk-rereview" type="button" disabled>Re-revisar selecionados</button>
-                <button id="map-bulk-block" type="button" disabled>Bloquear selecionados</button>
-                <button id="map-bulk-unblock" type="button" disabled>Desbloquear selecionados</button>
-                <button id="map-sel-clear" type="button" disabled>Limpar seleção</button>
-            </div>
-            <div class="map-tab-legend" id="map-legend"></div>
-            <div class="map-tab-main">
-                <div class="map-tab-container" id="admin-map">
-                    <div id="map-rect-overlay" class="map-rect-overlay hidden"></div>
-                    <!-- Floating overlay so toggling the classification layer
-                         doesn't push the map down. Sits inside the map
-                         container; pointer-events disabled so it never blocks
-                         pan/zoom or rectangle-select. -->
-                    <div class="map-class-legend-floating hidden" id="map-class-legend"></div>
-                </div>
-                <aside class="map-panel" id="map-panel">
-                    <header class="map-panel-header">
-                        <h3 id="map-panel-title"></h3>
-                        <button id="map-panel-close" class="map-panel-close" type="button"
-                                title="Fechar painel" aria-label="Fechar">×</button>
-                    </header>
-                    <div class="map-panel-body" id="map-panel-body"></div>
-                </aside>
-            </div>
-            <!-- Layer toggles + project picker sit BELOW the map: cosmetic
-                 (basemap+sat+classification overlays) and the project scope
-                 picker that swaps the whole rendering. Kept out of the top
-                 toolbar so selection/bulk actions don't compete for space. -->
-            <div class="map-tab-layers" id="map-layers">
-                <span class="map-layers-label">Camadas:</span>
+                        title="Seleção retangular: arraste sobre o mapa. Shift soma à seleção, Alt remove. Esc cancela."></button>
+                <span class="map-float-sep"></span>
                 <button id="map-tool-sat" class="map-tool-btn" type="button"
-                        title="Sobrepõe a imagem de satélite primária sobre o basemap.">
-                    <span class="map-tool-icon">🛰️</span> Imagem de satélite
-                </button>
+                        title="Sobrepõe a imagem de satélite primária do projeto."></button>
                 <button id="map-tool-classifs" class="map-tool-btn" type="button"
-                        title="Sobrepõe as classificações dos tiles classificados, em revisão e revisados.">
-                    <span class="map-tool-icon">🎨</span> Mostrar classificações
-                </button>
-                <span class="map-layers-spacer"></span>
-                <label id="map-project-filter-wrap" class="map-project-filter hidden">
-                    <span class="map-layers-label">Projeto:</span>
-                    <select id="map-project-filter"></select>
-                </label>
+                        title="Sobrepõe as classificações dos tiles classificados, em revisão e revisados."></button>
             </div>
+            <div class="map-float map-float-legend">
+                <div class="map-float-title">Status <span class="dim" id="map-total"></span></div>
+                <div class="map-tab-legend" id="map-legend"></div>
+                <div class="map-class-legend-floating hidden" id="map-class-legend"></div>
+            </div>
+            <div class="map-selection-bar hidden" id="map-sel-info" role="toolbar" aria-label="Ações na seleção">
+                <span class="map-sel-count"><b id="map-sel-count">0</b> selecionado(s)</span>
+                <span class="bulk-sep"></span>
+                <button id="map-bulk-assign" class="ghost btn-sm" type="button" disabled>Atribuir operador</button>
+                <button id="map-bulk-unassign" class="ghost btn-sm" type="button" disabled>Liberar operador</button>
+                <button id="map-bulk-rereview" class="ghost btn-sm" type="button" disabled>Re-revisar selecionados</button>
+                <button id="map-bulk-block" class="ghost btn-sm" type="button" disabled>Bloquear selecionados</button>
+                <button id="map-bulk-unblock" class="ghost btn-sm" type="button" disabled>Desbloquear selecionados</button>
+                <span class="bulk-sep"></span>
+                <button id="map-sel-clear" class="ghost btn-sm" type="button" disabled>Limpar seleção</button>
+            </div>
+            <aside class="map-panel map-float empty" id="map-panel" aria-label="Detalhes do tile">
+                <header class="map-panel-header">
+                    <h3 id="map-panel-title"></h3>
+                    <button id="map-panel-close" class="ghost icon-btn btn-sm map-panel-close" type="button"
+                            title="Fechar painel" aria-label="Fechar"></button>
+                </header>
+                <div class="map-panel-body" id="map-panel-body"></div>
+            </aside>
         </div>
     `;
+    // Static labels/icons built with DOM APIs (no data in them, but keeps
+    // every icon going through the shared helper).
+    const label = (id, ic, text) => {
+        const b = document.getElementById(id);
+        b.append(icon(ic), h("span", { text }));
+    };
+    label("map-tool-rect", "square-dashed-mouse-pointer", "Selecionar área");
+    label("map-tool-sat", "satellite", "Satélite");
+    label("map-tool-classifs", "palette", "Classificações");
+    document.getElementById("map-panel-close").appendChild(icon("x"));
     document.getElementById("map-panel-close").addEventListener("click", closeMapPanel);
     closeMapPanel();  // initialize empty state from the single source of truth
+
+    // Count per display status for the legend.
+    const counts = {};
+    for (const t of tiles) {
+        const ds = t.paused_at ? "paused" : t.status;
+        counts[ds] = (counts[ds] || 0) + 1;
+    }
+    document.getElementById("map-total").textContent = `· ${fmtInt(tiles.length)} tiles`;
     // All statuses enabled by default. Clicking a legend item toggles — the
     // filter on the three tile layers is recomputed from this set.
-    const enabledStatuses = new Set(Object.keys(MAP_STATUS_COLORS));
+    const enabledStatuses = new Set(MAP_STATUSES);
     const legend = document.getElementById("map-legend");
     const legendButtons = new Map();
-    for (const [status, color] of Object.entries(MAP_STATUS_COLORS)) {
-        const item = document.createElement("button");
-        item.type = "button";
-        item.className = "map-legend-item active";
-        item.dataset.status = status;
-        const sw = document.createElement("span");
-        sw.className = "map-legend-swatch";
-        sw.style.background = color;
-        const lbl = document.createElement("span");
-        lbl.textContent = statusLabel(status);
-        item.append(sw, lbl);
+    const colors = mapStatusColors();
+    for (const status of MAP_STATUSES) {
+        const item = h("button", { type: "button", class: "map-legend-item active", dataset: { status },
+                                   title: "Mostrar/ocultar no mapa", "aria-pressed": "true" },
+            h("span", { class: "map-legend-swatch", style: { background: colors[status] } }),
+            h("span", { class: "map-legend-label", text: statusLabel(status) }),
+            h("span", { class: "map-legend-count tabular", text: fmtInt(counts[status] || 0) }));
+        if (!counts[status]) item.classList.add("is-zero");
         item.addEventListener("click", () => toggleStatus(status));
         legend.appendChild(item);
         legendButtons.set(status, item);
@@ -1377,21 +1483,18 @@ async function renderMap(root) {
     const toggleStatus = (status) => {
         if (enabledStatuses.has(status)) enabledStatuses.delete(status);
         else enabledStatuses.add(status);
-        legendButtons.get(status).classList.toggle("active", enabledStatuses.has(status));
+        const on = enabledStatuses.has(status);
+        legendButtons.get(status).classList.toggle("active", on);
+        legendButtons.get(status).setAttribute("aria-pressed", String(on));
         applyFilter();
     };
 
     if (!tiles.length) {
-        document.getElementById("admin-map").innerHTML =
-            `<p class="empty-state">Nenhum tile cadastrado.</p>`;
-        // Still wire the picker so the admin can switch projects from here
-        // even when the current scope has no tiles to render.
-        _wireTabProjectFilter({
-            wrapId: "map-project-filter-wrap",
-            selectId: "map-project-filter",
-            allowAll: true,
-            alwaysShow: true,
-        });
+        const host = document.getElementById("admin-map");
+        host.textContent = "";
+        host.appendChild(emptyState({ icon: "map", title: "Nenhum tile neste escopo",
+            text: "Importe tiles ou escolha outro projeto no seletor acima." }));
+        document.getElementById("map-toolbar").classList.add("hidden");
         return;
     }
 
@@ -1446,12 +1549,7 @@ async function renderMap(root) {
         if (t.bbox_north > n) n = t.bbox_north;
     }
 
-    const matchExpr = ["match", ["get", "display_status"]];
-    for (const [status, color] of Object.entries(MAP_STATUS_COLORS)) {
-        matchExpr.push(status, color);
-    }
-    matchExpr.push("#888");
-
+    const colorExpr = mapColorExpr();
     mapView = new maplibregl.Map({
         container: "admin-map",
         style: {
@@ -1459,12 +1557,10 @@ async function renderMap(root) {
             sources: {
                 basemap: {
                     type: "raster",
-                    tiles: [
-                        "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
-                    ],
+                    tiles: [BASEMAP_URLS[currentThemeName()]],
                     tileSize: 256,
                     attribution: "Tiles © Esri",
-                    maxzoom: 19,
+                    maxzoom: 16,
                 },
                 // Primary satellite (the same source operators see in the editor).
                 // Toggled by `map-tool-sat`. Empty when tileserverUrl isn't
@@ -1491,29 +1587,30 @@ async function renderMap(root) {
                 },
                 {
                     id: "tiles-fill", type: "fill", source: "tiles",
-                    paint: { "fill-color": matchExpr, "fill-opacity": 0.55 },
+                    paint: { "fill-color": colorExpr, "fill-opacity": MAP_FILL_OPACITY },
                 },
                 {
                     id: "tiles-outline", type: "line", source: "tiles",
-                    paint: { "line-color": matchExpr, "line-width": 2 },
+                    paint: { "line-color": colorExpr, "line-width": 1.5, "line-opacity": 0.9 },
                 },
                 {
                     // Circle marker per tile so they stay visible when the
                     // polygon is sub-pixel at wide zoom levels.
                     id: "tiles-dot", type: "circle", source: "tile-points",
+                    maxzoom: 11,
                     paint: {
-                        "circle-color": matchExpr,
-                        "circle-radius": 5,
-                        "circle-stroke-color": "#111",
-                        "circle-stroke-width": 1,
+                        "circle-color": colorExpr,
+                        "circle-radius": 4,
+                        "circle-stroke-color": cssVar("--bg-1"),
+                        "circle-stroke-width": 1.5,
                     },
                 },
                 {
-                    // Selection highlight: thick white outline. Filter is
-                    // updated by updateMapSelectionHighlight().
+                    // Selection highlight. Filter is updated by
+                    // updateMapSelectionHighlight().
                     id: "tiles-selected-outline", type: "line", source: "tiles",
                     paint: {
-                        "line-color": "#ffffff",
+                        "line-color": cssVar("--text"),
                         "line-width": 3,
                         "line-opacity": 0.95,
                     },
@@ -1521,10 +1618,11 @@ async function renderMap(root) {
                 },
                 {
                     id: "tiles-selected-glow", type: "circle", source: "tile-points",
+                    maxzoom: 11,
                     paint: {
-                        "circle-color": "rgba(0,0,0,0)",
-                        "circle-radius": 9,
-                        "circle-stroke-color": "#ffffff",
+                        "circle-opacity": 0,
+                        "circle-radius": 8,
+                        "circle-stroke-color": cssVar("--text"),
                         "circle-stroke-width": 2,
                     },
                     filter: ["in", ["get", "id"], ["literal", []]],
@@ -1532,10 +1630,11 @@ async function renderMap(root) {
             ],
         },
         bounds: [[w, s], [e, n]],
-        fitBoundsOptions: { padding: 40, animate: false, maxZoom: 14 },
+        fitBoundsOptions: { padding: { top: 70, bottom: 70, left: 260, right: 60 }, animate: false, maxZoom: 15 },
         transformRequest: tileTransformRequest,
+        attributionControl: { compact: true },
     });
-    mapView.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
+    mapView.addControl(new maplibregl.NavigationControl({ showCompass: false }), "bottom-left");
 
     for (const layer of ["tiles-fill", "tiles-dot"]) {
         mapView.on("mouseenter", layer, () => {
@@ -1550,16 +1649,14 @@ async function renderMap(root) {
             if (mapRectSelectActive) return;  // suppress viewer while selecting
             // Any click ends the prior selection — admin's intent has moved
             // on. Cleared before showTileInPanel so the side panel opens
-            // without leftover blue outlines.
+            // without leftover outlines.
             if (mapSelectedIds.size) clearMapSelection();
             const f = ev.features && ev.features[0];
             if (!f) return;
             showTileInPanel(f.properties.id);
         });
     }
-    // Background click (no tile hit): also clears the selection. Without this,
-    // a user who selected a region by accident has to find the "Limpar seleção"
-    // button instead of just clicking the map.
+    // Background click (no tile hit): also clears the selection.
     mapView.on("click", (ev) => {
         if (mapRectSelectActive) return;
         const feats = mapView.queryRenderedFeatures(ev.point, {
@@ -1572,17 +1669,6 @@ async function renderMap(root) {
     wireMapSelectionTools();
     wireSatLayerToggle();
     wireClassOverlayToggle();
-    // Project scope picker on the bottom strip. `allowAll=true` matches the
-    // header so the cross-project state is consistent across the app; the
-    // overlay layer (`addClassOverlayLayer`) already bails when projectId is
-    // null and we hide its toggle button below — so "(todos)" is safe to
-    // expose without breaking the layer.
-    _wireTabProjectFilter({
-        wrapId: "map-project-filter-wrap",
-        selectId: "map-project-filter",
-        allowAll: true,
-        alwaysShow: true,
-    });
 }
 
 // ---------- Map tab: primary satellite overlay ----------
@@ -1726,7 +1812,7 @@ function applyClassOverlayState(on) {
     // classification yet). visibility=none would also drop the layer from
     // queryRenderedFeatures, breaking rectangle-select.
     if (mapView && mapView.getLayer("tiles-fill")) {
-        mapView.setPaintProperty("tiles-fill", "fill-opacity", on ? 0.15 : 0.55);
+        mapView.setPaintProperty("tiles-fill", "fill-opacity", on ? 0.15 : MAP_FILL_OPACITY);
     }
 }
 
@@ -2155,66 +2241,58 @@ async function mapBulkUnblock() {
     clearMapSelection();
 }
 
+// ---------- Problemas ----------
 
 async function renderProblems(root) {
-    root.innerHTML = `
-        <div class="filter-bar">
-            <h3 style="margin:0 var(--space-3) 0 0;">Tiles com problema</h3>
-            <label id="problems-project-filter-wrap" class="hidden">Projeto
-                <select id="problems-project-filter"></select>
-            </label>
-        </div>
-        <div id="problems-list"></div>
-    `;
-    _wireTabProjectFilter({
-        wrapId: "problems-project-filter-wrap",
-        selectId: "problems-project-filter",
-        allowAll: true,
-    });
-    const list = document.getElementById("problems-list");
     const problems = await apiGet(withProjectParam("/api/admin/tiles/problems", currentProjectId));
+    if (!root.isConnected) return;  // tab changed while loading
+    root.textContent = "";
     if (!problems.length) {
-        const p = document.createElement("p");
-        p.className = "empty-state";
-        p.textContent = currentProjectId == null
-            ? "Nenhum problema reportado em nenhum projeto. 🎉"
-            : "Nenhum problema reportado neste projeto. 🎉";
-        list.appendChild(p);
+        root.appendChild(card({}, emptyState({
+            icon: "party-popper", title: "Nenhum problema reportado",
+            text: currentProjectId == null
+                ? "Nenhum tile de nenhum projeto foi marcado com problema."
+                : "Nenhum tile deste projeto foi marcado com problema.",
+        })));
         return;
     }
-    const table = document.createElement("table");
-    table.className = "admin-table";
-    const thead = document.createElement("thead");
-    // Column "Projeto" surfaces the owning project — most useful in the
-    // cross-project view, but harmless when filtered (still tells the admin
-    // which project they're acting on).
-    thead.innerHTML = "<tr><th>ID</th><th>Projeto</th><th>Nome</th><th>Nota</th><th>Reportado em</th><th>Ações</th></tr>";
-    table.appendChild(thead);
-    const tbody = document.createElement("tbody");
+    const projectsInvolved = new Set(problems.map(p => p.project_id)).size;
+    const table = h("table", { class: "table admin-table problems-table" },
+        h("thead", {}, h("tr", {},
+            h("th", { class: "num", text: "ID" }), h("th", { text: "Tile" }),
+            h("th", { text: "Problema" }), h("th", { text: "Reportado" }),
+            h("th", { class: "col-actions", "aria-label": "Ações" }))));
+    const tbody = h("tbody");
     for (const p of problems) {
-        const tr = document.createElement("tr");
-        const tdAct = document.createElement("td");
-        tdAct.append(
-            btn("Ver", () => openViewer(p.id)),
-            btn("Resetar", () => resetOne(p.id)),
-            btn("Excluir", () => deleteOne(p.id, p.name), "danger"),
-        );
-        const projectCell = p.project_name
-            || projectsById[p.project_id]?.name
-            || `#${p.project_id}`;
-        tr.append(
-            td(p.id),
-            td(projectCell),
-            td(p.name),
-            td(p.problem_note || ""),
-            td(fmtDate(p.reported_at)),
-            tdAct,
-        );
-        tbody.appendChild(tr);
+        // Column "Projeto" folds under the tile name — most useful in the
+        // cross-project view, harmless when filtered.
+        const projectName = p.project_name || projectsById[p.project_id]?.name || `#${p.project_id}`;
+        const actions = h("div", { class: "row-actions" },
+            button("Ver", { variant: "btn-sm", onClick: () => openViewer(p.id) }),
+            button("Resetar", { variant: "btn-sm", icon: "rotate-ccw", onClick: () => resetOne(p.id),
+                                title: "Volta para pendente, apagando o trabalho" }),
+            iconButton("trash-2", "Excluir tile", { variant: "ghost danger", onClick: () => deleteOne(p.id, p.name) }));
+        tbody.appendChild(h("tr", { dataset: { id: p.id } },
+            h("td", { class: "num mono dim", text: `#${p.id}` }),
+            h("td", {}, h("span", { class: "cell-strong", text: p.name }), h("span", { class: "cell-sub", text: projectName })),
+            h("td", { class: "problem-note-cell" },
+                h("span", { class: "problem-note" }, icon("message-square-text", "icon-sm"),
+                    h("span", { text: p.problem_note || "Sem descrição" }))),
+            h("td", {}, h("span", { class: "date-cell", title: fmtDate(p.reported_at) },
+                h("span", { text: relativeTime(p.reported_at) || "—" }),
+                h("span", { class: "dim", text: fmtDate(p.reported_at) }))),
+            h("td", { class: "col-actions" }, actions)));
     }
     table.appendChild(tbody);
-    list.appendChild(table);
+    root.append(
+        h("div", { class: "callout callout-err" }, icon("triangle-alert"),
+            h("div", {},
+                h("strong", { text: `${fmtInt(problems.length)} ${problems.length === 1 ? "tile aguarda" : "tiles aguardam"} decisão` }),
+                h("p", { text: `Em ${projectsInvolved} projeto(s). Resetar devolve o tile à fila como pendente; excluir remove o tile e seu histórico.` }))),
+        h("div", { class: "card card-flush" }, h("div", { class: "table-wrap" }, table)));
 }
+
+// ---------- Usuários ----------
 
 // User-level role labels (just two: regular user vs admin). "Revisor" is no
 // longer a property here — it lives in project membership.
@@ -2226,19 +2304,16 @@ const _roleLabel = (r) => _ROLE_LABELS[r] || r;
 let _usersSortKey = "id";
 let _usersSortDir = "asc";
 
-// Each entry maps a column key → (user → comparable value). Localized labels
-// stay in `_USER_COLUMNS` to keep header markup and sort logic in sync.
 const _USER_COLUMNS = [
-    { key: "id",         label: "ID",        accessor: u => u.id,                    type: "num" },
     { key: "username",   label: "Usuário",   accessor: u => u.username,              type: "str" },
     { key: "role",       label: "Papel",     accessor: u => _roleLabel(u.role),      type: "str" },
-    { key: "active",     label: "Ativo",     accessor: u => (u.active ? 1 : 0),      type: "num" },
+    { key: "active",     label: "Acesso",    accessor: u => (u.active ? 1 : 0),      type: "num" },
     { key: "created_at", label: "Criado em", accessor: u => u.created_at || "",      type: "str" },
 ];
 
 function _sortUsers(rows) {
-    const col = _USER_COLUMNS.find(c => c.key === _usersSortKey);
-    if (!col) return rows;
+    const col = _USER_COLUMNS.find(c => c.key === _usersSortKey)
+        || { accessor: u => u.id, type: "num" };
     const dir = _usersSortDir === "asc" ? 1 : -1;
     return [...rows].sort((a, b) => {
         const va = col.accessor(a);
@@ -2250,81 +2325,70 @@ function _sortUsers(rows) {
 
 async function renderUsers(root) {
     const users = await apiGet("/api/admin/users");
-    root.innerHTML = `
-        <div class="users-header">
-            <h3>Usuários</h3>
-            <button id="btn-new-user" class="primary" type="button">+ Novo usuário</button>
-        </div>
-        <div id="users-table-host"></div>
-    `;
-    document.getElementById("btn-new-user").addEventListener("click", openCreateUserModal);
+    if (!root.isConnected) return;  // tab changed while loading
+    document.getElementById("admin-page-actions").appendChild(
+        button("Novo usuário", { id: "btn-new-user", icon: "user-plus", variant: "primary", onClick: openCreateUserModal }));
+    const admins = users.filter(u => u.role === "admin").length;
+    const active = users.filter(u => u.active).length;
+    root.textContent = "";
+    root.append(
+        h("div", { class: "kpi-grid kpi-grid-3" },
+            kpi({ icon: "users", label: "Usuários", value: fmtInt(users.length), sub: "contas cadastradas", tone: "neutral" }),
+            kpi({ icon: "user-check", label: "Ativos", value: fmtInt(active),
+                  sub: users.length - active ? `${fmtInt(users.length - active)} desativado(s)` : "todos com acesso", tone: "ok" }),
+            kpi({ icon: "shield", label: "Administradores", value: fmtInt(admins), sub: "acesso ao painel", tone: "accent" })),
+        h("div", { id: "users-table-host", class: "card card-flush" }));
     _drawUsersTable(users);
 }
 
 function _drawUsersTable(users) {
     const host = document.getElementById("users-table-host");
     if (!host) return;
-    host.innerHTML = "";
-    const table = document.createElement("table");
-    table.className = "admin-table sortable";
-    const thead = document.createElement("thead");
-    const trh = document.createElement("tr");
-    for (const col of _USER_COLUMNS) {
-        const th = document.createElement("th");
-        th.textContent = col.label
-            + (_usersSortKey === col.key ? (_usersSortDir === "asc" ? " ▲" : " ▼") : "");
-        th.style.cursor = "pointer";
-        th.title = "Clique para ordenar";
-        th.setAttribute("role", "button");
-        th.tabIndex = 0;
-        const flip = () => {
-            if (_usersSortKey === col.key) {
-                _usersSortDir = _usersSortDir === "asc" ? "desc" : "asc";
-            } else {
-                _usersSortKey = col.key;
-                _usersSortDir = col.type === "num" ? "desc" : "asc";
-            }
-            _drawUsersTable(users);
-        };
-        th.addEventListener("click", flip);
-        th.addEventListener("keydown", (ev) => {
-            if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); flip(); }
-        });
-        trh.appendChild(th);
-    }
-    // Final non-sortable "Ações" column.
-    const thAct = document.createElement("th");
-    thAct.textContent = "Ações";
-    trh.appendChild(thAct);
-    thead.appendChild(trh);
-    table.appendChild(thead);
-
-    const tbody = document.createElement("tbody");
-    for (const u of _sortUsers(users)) {
-        const tr = document.createElement("tr");
-        const tdAct = document.createElement("td");
-        // Admins can never be deactivated directly — they have to be demoted
-        // to "Usuário" first. We disable + explain instead of letting the
-        // backend 409 silently after a click.
-        const actLabel = u.active ? "Desativar" : "Ativar";
-        const actBtn = btn(actLabel, () => toggleActive(u.id, !u.active));
-        if (u.role === "admin" && u.active) {
-            actBtn.disabled = true;
-            actBtn.title = "Administradores não podem ser desativados. Use \"Tornar usuário\" primeiro.";
+    host.textContent = "";
+    const onSort = (key) => {
+        if (_usersSortKey === key) _usersSortDir = _usersSortDir === "asc" ? "desc" : "asc";
+        else {
+            _usersSortKey = key;
+            _usersSortDir = _USER_COLUMNS.find(c => c.key === key)?.type === "num" ? "desc" : "asc";
         }
-        tdAct.append(actBtn);
+        _drawUsersTable(users);
+    };
+    const table = h("table", { class: "table admin-table users-table sortable" },
+        h("thead", {}, h("tr", {},
+            _USER_COLUMNS.map(c => sortHeader(c.label, { key: c.key, activeKey: _usersSortKey, dir: _usersSortDir, onSort })),
+            h("th", { class: "col-actions", "aria-label": "Ações" }))));
+    const tbody = h("tbody");
+    for (const u of _sortUsers(users)) {
+        // Admins can never be deactivated directly — they have to be demoted
+        // to "Usuário" first. Disable + explain instead of a 409 after click.
+        const lockActive = u.role === "admin" && u.active;
+        const sw = h("input", { type: "checkbox", class: "switch", role: "switch",
+                                "aria-label": u.active ? `Desativar ${u.username}` : `Ativar ${u.username}`,
+                                title: lockActive ? "Administradores não podem ser desativados. Use \"Tornar usuário\" primeiro." : (u.active ? "Desativar" : "Ativar") });
+        sw.checked = !!u.active;
+        sw.disabled = lockActive;
+        sw.addEventListener("change", () => toggleActive(u.id, !u.active));
         const newRole = u.role === "admin" ? "operator" : "admin";
-        const roleLabel = u.role === "admin" ? "Tornar usuário" : "Tornar administrador";
-        tdAct.append(btn(roleLabel, () => changeRole(u.id, u.username, newRole)));
-        tr.append(td(u.id), td(u.username), td(_roleLabel(u.role)),
-                  td(u.active ? "sim" : "não"),
-                  td(fmtDate(u.created_at)), tdAct);
-        tbody.appendChild(tr);
+        const roleAction = u.role === "admin" ? "Tornar usuário" : "Tornar administrador";
+        tbody.appendChild(h("tr", { class: u.active ? null : "is-inactive" },
+            h("td", {}, h("span", { class: "user-cell" }, avatar(u.username, { size: "sm" }),
+                h("span", { class: "user-cell-stack" },
+                    h("span", { class: "user-cell-name", text: u.username }),
+                    h("span", { class: "cell-sub mono", text: `#${u.id}` })))),
+            h("td", {}, h("span", { class: u.role === "admin" ? "chip accent" : "chip", text: _roleLabel(u.role) })),
+            h("td", {}, h("label", { class: "switch-label" }, sw,
+                h("span", { class: u.active ? "text-ok" : "dim", text: u.active ? "Ativo" : "Desativado" }))),
+            h("td", {}, h("span", { class: "date-cell" },
+                h("span", { text: fmtDate(u.created_at).split(",")[0] || "—" }),
+                h("span", { class: "dim", text: relativeTime(u.created_at) }))),
+            h("td", { class: "col-actions" }, h("div", { class: "row-actions" },
+                menuButton(() => [{ label: roleAction, icon: u.role === "admin" ? "user" : "shield",
+                                     onClick: () => changeRole(u.id, u.username, newRole) }],
+                           `Ações de ${u.username}`)))));
     }
     table.appendChild(tbody);
-    host.appendChild(table);
+    host.appendChild(h("div", { class: "table-wrap" }, table));
 }
-
 async function openCreateUserModal() {
     const r = await promptForm({
         title: "Criar usuário",
@@ -2395,19 +2459,16 @@ async function toggleActive(userId, active) {
 // "Classe: <swatch> <nome>" line for the tile viewer of classification
 // projects. textContent only — class names are admin-entered data.
 function classificationLine(classId, projClasses) {
-    const p = document.createElement("p");
-    const label = document.createElement("b");
-    label.textContent = "Classe: ";
-    p.appendChild(label);
+    const p = h("p", { class: "viewer-class-line" });
+    p.appendChild(h("span", { class: "viewer-class-label", text: "Classe: " }));
     if (classId == null) {
-        p.append(document.createTextNode("— (ainda não classificado)"));
+        p.appendChild(h("span", { class: "dim", text: "— (ainda não classificado)" }));
         return p;
     }
     const cls = projClasses.find(c => c.id === classId);
-    const sw = document.createElement("span");
-    sw.className = "class-swatch-inline";
+    const sw = h("span", { class: "viewer-swatch" });
     sw.style.background = cls?.color || "var(--border-strong)";
-    p.append(sw, document.createTextNode(cls ? cls.name : `#${classId}`));
+    p.append(sw, h("strong", { text: cls ? cls.name : `#${classId}` }));
     return p;
 }
 
@@ -2418,37 +2479,38 @@ function classificationLine(classId, projClasses) {
 // backup) are CLI-only (backend/scripts/).
 
 async function renderMaintenance(root) {
-    root.innerHTML = `<div class="loading-text"><span class="loading"></span> Carregando…</div>`;
     const { overlay_cache: cache } = await apiGet("/api/admin/maintenance/overview");
-    root.innerHTML = `
-        <div class="maint-section">
-            <h3>Cache do overlay administrativo</h3>
-            <p class="muted">Tiles do mapa do admin são rasterizados sob demanda e armazenados aqui. A cache é invalidada automaticamente a cada mutação de máscara — limpe manualmente apenas após mudança de paleta ou importação em massa.</p>
-            <div class="maint-grid">
-                <div class="maint-card">
-                    <h4>Estado</h4>
-                    <dl class="maint-kv">
-                        <dt>Tiles renderizados</dt><dd>${cache.rendered_tiles.toLocaleString("pt-BR")}</dd>
-                        <dt>Tiles vazios cacheados</dt><dd>${cache.empty_tiles.toLocaleString("pt-BR")}</dd>
-                        <dt>Tamanho em disco</dt><dd>${fmtBytes(cache.file_size_bytes)}</dd>
-                        <dt>Zooms</dt><dd>${cache.min_zoom}–${cache.max_zoom}</dd>
-                        <dt>Arquivo</dt><dd><code>${escape(cache.path)}</code></dd>
-                    </dl>
-                </div>
-                <div class="maint-card">
-                    <h4>Ações</h4>
-                    <button id="maint-clear-cache" class="danger">Limpar cache</button>
-                    <button id="maint-refresh">Atualizar</button>
-                    <p class="muted maint-hint">A cache se reconstrói à medida que você navega no mapa do admin.</p>
-                </div>
-            </div>
-        </div>
-    `;
-    document.getElementById("maint-refresh").addEventListener("click", () => selectTab("maintenance"));
-    document.getElementById("maint-clear-cache").addEventListener("click", async () => {
+    if (!root.isConnected) return;  // tab changed while loading
+    root.textContent = "";
+    const clearBtn = button("Limpar cache", { id: "maint-clear-cache", icon: "trash-2", variant: "danger" });
+    const refreshBtn = button("Atualizar", { id: "maint-refresh", icon: "refresh-cw" });
+    const entries = cache.rendered_tiles + cache.empty_tiles;
+    root.append(
+        h("div", { class: "kpi-grid" },
+            kpi({ icon: "layout-grid", label: "Tiles renderizados", value: fmtInt(cache.rendered_tiles),
+                  sub: "com classificação desenhada", tone: "accent" }),
+            kpi({ icon: "square-dashed-mouse-pointer", label: "Tiles vazios", value: fmtInt(cache.empty_tiles),
+                  sub: "áreas sem máscara (cacheadas)", tone: "neutral" }),
+            kpi({ icon: "hard-drive", label: "Tamanho em disco", value: fmtBytes(cache.file_size_bytes),
+                  sub: `${fmtInt(entries)} entradas`, tone: "info" }),
+            kpi({ icon: "layers", label: "Faixa de zoom", value: `${cache.min_zoom}–${cache.max_zoom}`,
+                  sub: "níveis rasterizados", tone: "neutral" })),
+        h("div", { class: "maint-row" },
+            card({ title: "Cache do overlay administrativo", icon: "database",
+                   subtitle: "Tiles do mapa do admin são rasterizados sob demanda e guardados aqui." },
+                h("p", { class: "muted maint-lead",
+                    text: "A cache é invalidada automaticamente a cada mutação de máscara — limpe manualmente apenas após mudança de paleta ou importação em massa." }),
+                h("dl", { class: "maint-kv" },
+                    h("dt", { text: "Arquivo" }), h("dd", {}, h("code", { text: cache.path })),
+                    h("dt", { text: "Estado" }), h("dd", {}, h("span", { class: entries ? "chip ok" : "chip", text: entries ? "Em uso" : "Vazia" })))),
+            card({ title: "Ações", icon: "wrench", cls: "maint-actions-card" },
+                h("div", { class: "maint-actions" }, refreshBtn, clearBtn),
+                h("p", { class: "muted maint-hint", text: "A cache se reconstrói à medida que você navega no mapa do admin." }))));
+    refreshBtn.addEventListener("click", () => selectTab("maintenance"));
+    clearBtn.addEventListener("click", async () => {
         const r = await confirmDestructive({
             title: "Limpar cache do overlay?",
-            description: `Vai apagar ${cache.rendered_tiles + cache.empty_tiles} entrada(s) (${fmtBytes(cache.file_size_bytes)}). A próxima navegação no mapa do admin recria conforme a área visualizada.`,
+            description: `Vai apagar ${entries} entrada(s) (${fmtBytes(cache.file_size_bytes)}). A próxima navegação no mapa do admin recria conforme a área visualizada.`,
             confirmLabel: "Limpar",
             danger: true,
         });

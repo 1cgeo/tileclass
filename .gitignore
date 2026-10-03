@@ -41,3 +41,5 @@ backend/static_xyz/
 
 .env
 exported_masks_v2
+# Demo data (python -m tests.e2e.seed_demo)
+demo/

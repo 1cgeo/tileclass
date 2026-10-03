@@ -502,31 +502,62 @@
 
     </div>
 
-    <!-- Admin view -->
+    <!-- Admin view: left sidebar (brand + nav + user) and a main column with a
+         top bar (page title, project scope slot, actions) above #admin-content.
+         Tabs mount their project scope picker into #admin-scope-slot. -->
     <div id="view-admin" class="view hidden">
-        <header class="header">
-            <div class="header-left"><strong>TileClass · Admin</strong></div>
-            <div class="header-right">
-                <span id="admin-user-label"></span>
-                <button id="btn-go-editor" class="btn-view-toggle" title="Trabalhar como operador (classificar/revisar)">→ Trabalhar</button>
-                <button id="btn-admin-logout">Sair</button>
+        <div class="admin-shell">
+            <aside class="admin-sidebar" aria-label="Navegação do painel">
+                <div class="admin-sidebar-brand">
+                    <span class="brand">
+                        <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" class="bm-bg"/><rect x="8" y="8" width="7" height="7" rx="1.5" class="bm-cell bm-on"/><rect x="17" y="8" width="7" height="7" rx="1.5" class="bm-cell"/><rect x="8" y="17" width="7" height="7" rx="1.5" class="bm-cell"/><rect x="17" y="17" width="7" height="7" rx="1.5" class="bm-cell bm-on2"/></svg>
+                        <span class="brand-name">TileClass</span>
+                    </span>
+                    <span class="admin-sidebar-tag">Admin</span>
+                </div>
+                <nav class="admin-nav">
+                    <div class="admin-nav-label">Acompanhamento</div>
+                    <button type="button" data-tab="dashboard" class="active"><svg class="icon" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-layout-dashboard"/></svg><span>Dashboard</span></button>
+                    <button type="button" data-tab="tiles"><svg class="icon" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-layout-grid"/></svg><span>Tiles</span></button>
+                    <button type="button" data-tab="map"><svg class="icon" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-map"/></svg><span>Mapa</span></button>
+                    <button type="button" data-tab="problems"><svg class="icon" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-triangle-alert"/></svg><span>Problemas</span><span id="nav-problems-count" class="admin-nav-count hidden"></span></button>
+                    <div class="admin-nav-label">Gestão</div>
+                    <button type="button" data-tab="projects"><svg class="icon" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-folder"/></svg><span>Projetos</span></button>
+                    <button type="button" data-tab="users"><svg class="icon" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-users"/></svg><span>Usuários</span></button>
+                    <button type="button" data-tab="maintenance"><svg class="icon" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-wrench"/></svg><span>Manutenção</span></button>
+                </nav>
+                <div class="admin-sidebar-foot">
+                    <span id="admin-user-avatar" class="avatar" aria-hidden="true"></span>
+                    <span class="admin-user-meta">
+                        <span id="admin-user-label" class="admin-user-name"></span>
+                        <span class="admin-user-role">Administrador</span>
+                    </span>
+                    <button id="btn-admin-logout" type="button" class="ghost icon-btn btn-sm" title="Sair" aria-label="Sair"><svg class="icon" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-log-out"/></svg></button>
+                </div>
+            </aside>
+
+            <div class="admin-main">
+                <header class="admin-topbar">
+                    <div class="admin-topbar-titles">
+                        <h1 id="admin-page-title">Dashboard</h1>
+                        <p id="admin-page-subtitle" class="admin-page-subtitle"></p>
+                    </div>
+                    <div class="admin-topbar-actions">
+                        <div id="admin-scope-slot" class="admin-scope-slot"></div>
+                        <div id="admin-page-actions" class="admin-page-actions"></div>
+                        <span class="admin-topbar-sep" aria-hidden="true"></span>
+                        <button type="button" class="ghost icon-btn theme-toggle" data-theme-toggle title="Alternar tema" aria-label="Alternar tema"><svg class="icon" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-moon"/></svg></button>
+                        <button id="btn-go-editor" type="button" class="primary btn-go-editor" title="Trabalhar como operador (classificar/revisar)"><svg class="icon" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-play"/></svg>Trabalhar</button>
+                    </div>
+                </header>
+                <main id="admin-content"></main>
             </div>
-        </header>
-        <nav class="admin-nav">
-            <button data-tab="dashboard" class="active">Dashboard</button>
-            <button data-tab="projects">Projetos</button>
-            <button data-tab="tiles">Tiles</button>
-            <button data-tab="map">Mapa</button>
-            <button data-tab="problems">Problemas</button>
-            <button data-tab="users">Usuários</button>
-            <button data-tab="maintenance">Manutenção</button>
-        </nav>
-        <main id="admin-content"></main>
+        </div>
 
         <div id="modal-confirm" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
-            <div class="modal-box">
+            <div class="modal-box modal-box-md">
                 <h2 id="confirm-title">Confirmar</h2>
-                <p id="confirm-description"></p>
+                <p id="confirm-description" class="modal-lead"></p>
                 <div id="confirm-ids" class="confirm-ids"></div>
                 <label class="confirm-reason-label">Motivo (opcional, fica registrado no log):
                     <textarea id="confirm-reason" rows="2" maxlength="500"
@@ -534,27 +565,27 @@
                 </label>
                 <div class="hint">Ctrl+Enter para confirmar</div>
                 <div class="modal-actions">
-                    <button id="confirm-cancel">Cancelar</button>
-                    <button id="confirm-ok" class="danger">Confirmar</button>
+                    <button id="confirm-cancel" type="button">Cancelar</button>
+                    <button id="confirm-ok" type="button" class="danger">Confirmar</button>
                 </div>
             </div>
         </div>
 
         <div id="modal-assign" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="assign-title">
-            <div class="modal-box">
+            <div class="modal-box modal-box-md">
                 <h2 id="assign-title">Atribuir tile</h2>
-                <p id="assign-description" class="hint"></p>
-                <label style="display:block;margin-top:var(--space-2);">
-                    Operador:
-                    <select id="assign-user" style="width:100%;margin-top:4px;"></select>
+                <p id="assign-description" class="modal-lead"></p>
+                <label class="field">
+                    <span class="field-label">Usuário</span>
+                    <select id="assign-user"></select>
                 </label>
-                <label class="confirm-reason-label" style="margin-top:var(--space-2);">
-                    Motivo (opcional):
+                <label class="field">
+                    <span class="field-label">Motivo <span class="muted">(opcional)</span></span>
                     <textarea id="assign-reason" rows="2" maxlength="500"></textarea>
                 </label>
                 <div class="modal-actions">
-                    <button id="assign-cancel">Cancelar</button>
-                    <button id="assign-ok" class="primary">Atribuir</button>
+                    <button id="assign-cancel" type="button">Cancelar</button>
+                    <button id="assign-ok" type="button" class="primary">Atribuir</button>
                 </div>
             </div>
         </div>
@@ -568,8 +599,8 @@
                 <h2 id="shell-title"></h2>
                 <div id="shell-body" class="modal-shell-body"></div>
                 <div class="modal-actions">
-                    <button id="shell-cancel">Cancelar</button>
-                    <button id="shell-ok" class="primary">Salvar</button>
+                    <button id="shell-cancel" type="button">Cancelar</button>
+                    <button id="shell-ok" type="button" class="primary">Salvar</button>
                 </div>
             </div>
         </div>
@@ -579,25 +610,30 @@
              admin tabs (Usuários, Projetos, …) so adding a new entity dialog
              stays a one-call change. -->
         <div id="modal-form" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="form-title">
-            <div class="modal-box">
+            <div class="modal-box modal-box-md">
                 <h2 id="form-title"></h2>
-                <p id="form-description" class="hint"></p>
+                <p id="form-description" class="modal-lead"></p>
                 <div id="form-fields" class="modal-form-fields"></div>
                 <div class="hint">Ctrl+Enter para confirmar</div>
                 <div class="modal-actions">
-                    <button id="form-cancel">Cancelar</button>
-                    <button id="form-ok" class="primary">Salvar</button>
+                    <button id="form-cancel" type="button">Cancelar</button>
+                    <button id="form-ok" type="button" class="primary">Salvar</button>
                 </div>
             </div>
         </div>
 
+        <!-- Tile viewer: imagery on the left, metadata/actions/history on the
+             right (layout built by renderTileInfo). -->
         <div id="modal-view-tile" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="view-tile-title">
-            <div class="modal-box" style="min-width:800px">
-                <h2 id="view-tile-title">Tile</h2>
-                <div id="view-tile-body"></div>
-                <div class="modal-actions">
-                    <button id="view-tile-close" class="primary">Fechar</button>
+            <div class="modal-box viewer-modal-box">
+                <div class="viewer-modal-head">
+                    <div class="viewer-modal-titles">
+                        <h2 id="view-tile-title">Tile</h2>
+                        <p id="view-tile-subtitle" class="viewer-modal-sub"></p>
+                    </div>
+                    <button id="view-tile-close" type="button" class="ghost icon-btn" title="Fechar (Esc)" aria-label="Fechar"><svg class="icon" aria-hidden="true"><use href="/static/vendor/lucide/icons.svg#i-x"/></svg></button>
                 </div>
+                <div id="view-tile-body"></div>
             </div>
         </div>
     </div>
