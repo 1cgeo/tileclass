@@ -168,3 +168,65 @@ def test_merge_refuses_same_file(tmp_path):
             merge_db.main()
     finally:
         sys.argv = old
+
+
+def _seed_cache_row(pid):
+    """Pretend the admin map already visited (and cached-as-empty) an area."""
+    from backend import mask_tile_service as mts
+    conn = mts._open_cache(pid)
+    try:
+        conn.execute("INSERT OR REPLACE INTO tiles(zoom_level,tile_column,tile_row,tile_data) "
+                     "VALUES (14, 1, 1, NULL)")
+    finally:
+        conn.close()
+
+
+def _cache_rows(pid):
+    from backend import mask_tile_service as mts
+    if not mts.cache_path(pid).exists():
+        return 0
+    conn = sqlite3.connect(mts.cache_path(pid))
+    try:
+        return conn.execute("SELECT COUNT(*) FROM tiles").fetchone()[0]
+    finally:
+        conn.close()
+
+
+def test_merge_clears_overlay_cache_of_affected_projects(app_env, tmp_path):
+    """Merged classified tiles must show up on the admin map: cached-empty rows
+    for the receiving project are dropped; untouched projects keep theirs."""
+    pri, sec = tmp_path / "pri.db", tmp_path / "sec.db"
+    _new_db(pri); _new_db(sec)
+    pc = sqlite3.connect(pri)
+    _user(pc, "alice", "admin")
+    hit = _project(pc, "shared")
+    other = _project(pc, "untouched")
+    pc.commit(); pc.close()
+    sc = sqlite3.connect(sec)
+    spid = _project(sc, "shared")
+    _tile(sc, spid, "new", (0.0, 0.0, 0.1, 0.1), status="classified", data_png=b"x")
+    sc.commit(); sc.close()
+    _seed_cache_row(hit); _seed_cache_row(other)
+
+    _run_merge(pri, sec)
+
+    assert _cache_rows(hit) == 0
+    assert _cache_rows(other) == 1
+
+
+def test_merge_dry_run_keeps_overlay_cache(app_env, tmp_path):
+    pri, sec = tmp_path / "pri.db", tmp_path / "sec.db"
+    _new_db(pri); _new_db(sec)
+    pc = sqlite3.connect(pri); hit = _project(pc, "shared"); pc.commit(); pc.close()
+    sc = sqlite3.connect(sec)
+    _tile(sc, _project(sc, "shared"), "new", (0.0, 0.0, 0.1, 0.1), status="classified")
+    sc.commit(); sc.close()
+    _seed_cache_row(hit)
+    from backend.scripts import merge_db
+    old = sys.argv
+    sys.argv = ["merge_db", "--primary", str(pri), "--secondary", str(sec), "--dry-run"]
+    try:
+        merge_db.main()
+    finally:
+        sys.argv = old
+    assert _cache_rows(hit) == 1

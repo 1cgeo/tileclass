@@ -12,22 +12,14 @@ so projects with different palettes never share cache rows.
 """
 import io
 import math
-import os
 import sqlite3
 import threading
 from pathlib import Path
 
-# Windows ships up to 3 conflicting proj.db installs (PostgreSQL/PostGIS,
-# pyproj, rasterio); point PROJ_DATA at rasterio's bundled directory before
-# anything imports CRS code. Override (not setdefault): a poisoned system
-# PROJ_LIB would otherwise break every reproject.
-import importlib.util as _iu
-_spec = _iu.find_spec("rasterio")
-if _spec and _spec.origin:
-    _RASTERIO_PROJ = Path(_spec.origin).parent / "proj_data"
-    if _RASTERIO_PROJ.exists():
-        os.environ["PROJ_DATA"] = str(_RASTERIO_PROJ)
-        os.environ["PROJ_LIB"] = str(_RASTERIO_PROJ)
+# Point PROJ at rasterio's proj.db before anything imports CRS code (Windows
+# ships conflicting proj.db installs) — see backend/proj_env.py.
+from .proj_env import configure_proj_data
+configure_proj_data()
 
 import numpy as np
 from PIL import Image
@@ -56,6 +48,27 @@ _DEFAULT_CACHE_REL = "data/mask_overlay_cache.mbtiles"
 
 _cache_base: Path | None = None
 _cache_lock = threading.Lock()
+
+# Per-project invalidation generation. get_tile() captures it before reading
+# the main DB and only caches its render if no invalidation happened since —
+# otherwise a mutation committed (and invalidated) mid-render would leave the
+# stale PNG cached forever. In-process is enough: the app runs one process
+# (CLI tools that mutate tiles clear the cache file directly). `_gen_lock`
+# makes "check generation + INSERT" atomic w.r.t. "bump generation"; every
+# invalidator bumps BEFORE deleting rows, so a render that wins the lock
+# writes a row the subsequent DELETE then removes.
+_gen: dict[int, int] = {}
+_gen_lock = threading.Lock()
+
+
+def _generation(project_id: int) -> int:
+    with _gen_lock:
+        return _gen.get(project_id, 0)
+
+
+def _bump_generation(project_id: int) -> None:
+    with _gen_lock:
+        _gen[project_id] = _gen.get(project_id, 0) + 1
 
 
 def _config_section() -> dict:
@@ -204,16 +217,11 @@ def _transparent_png() -> bytes:
 
 
 def _render_tile(project_id: int, z: int, x: int, y: int) -> bytes | None:
-    """Dispatch by project kind: raster reprojects PNG masks, vector
-    rasterizes LineStrings, classification draws a class-name label per tile."""
+    """Dispatch by project kind: raster reprojects PNG masks, classification
+    draws a class-name label per tile."""
     proj = project_service.get_project(project_id)
-    kind = (proj or {}).get("kind")
-    if kind == "vector":
-        return _render_vector_tile(project_id, z, x, y, proj)
-    if kind == "classification":
+    if (proj or {}).get("kind") == "classification":
         return _render_classification_tile(project_id, z, x, y, proj)
-    if kind == "detection":
-        return _render_detection_tile(project_id, z, x, y, proj)
     return _render_raster_tile(project_id, z, x, y)
 
 
@@ -296,8 +304,8 @@ def _render_raster_tile(project_id: int, z: int, x: int, y: int) -> bytes | None
 
 def _make_lonlat_to_pixel(z: int, x: int, y: int):
     """Build a lon/lat → XYZ-tile pixel projector for a given WM tile.
-    Returns (project_fn, span_ok). Reused by vector + classification overlays
-    so the spherical-Mercator math lives in one place."""
+    Returns (project_fn, span_ok). Used by the classification overlay; kept
+    separate so the spherical-Mercator math lives in one place."""
     left_3857, bottom_3857, right_3857, top_3857 = wm_tile_bounds_3857(z, x, y)
     span_x = right_3857 - left_3857
     span_y = top_3857 - bottom_3857
@@ -318,108 +326,6 @@ def _hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
     already validated at write time."""
     h = hex_color.lstrip("#")
     return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
-
-
-def _render_vector_tile(project_id: int, z: int, x: int, y: int,
-                        proj: dict) -> bytes | None:
-    """Rasterize the project's tile features into a 256x256 RGBA PNG.
-
-    Each LineString draws as a 2px stroke. Color comes from a project-level
-    convention: if there is a `direction` attribute we color by direction
-    (forward=blue, reverse=red, both=gray); otherwise we use the first
-    enum attribute's options as a categorical palette; otherwise fall back
-    to a single accent color.
-
-    The implicit cycle this avoids: redrawing the lat/lon → 3857 transform
-    on each line. We project the WM tile's lat/lon corners once, then
-    map every coordinate via straight linear interpolation in the local
-    bbox — fine because tile size is small relative to global curvature."""
-    import json
-    from PIL import ImageDraw
-
-    west, south, east, north = wm_tile_bounds_4326(z, x, y)
-    placeholders = ",".join("?" * len(_VISIBLE_STATUSES))
-    conn = connect_main()
-    try:
-        rows = conn.execute(
-            f"""SELECT bbox_west, bbox_south, bbox_east, bbox_north, data_geojson
-                FROM tiles
-                WHERE project_id=?
-                  AND status IN ({placeholders})
-                  AND data_geojson IS NOT NULL
-                  AND bbox_west < ? AND bbox_east > ?
-                  AND bbox_south < ? AND bbox_north > ?""",
-            (project_id, *_VISIBLE_STATUSES, east, west, north, south),
-        ).fetchall()
-    finally:
-        conn.close()
-    if not rows:
-        return None
-
-    img = Image.new("RGBA", (XYZ_TILE_PX, XYZ_TILE_PX), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-    color_for = _vector_color_resolver(proj)
-    has_any = False
-
-    # Use Web Mercator pixel coordinates so straight lines look straight on
-    # the map (lat/lon → linear pixel would skew at high latitudes).
-    lonlat_to_pixel, span_ok = _make_lonlat_to_pixel(z, x, y)
-    if not span_ok:
-        return None
-
-    for r in rows:
-        try:
-            doc = json.loads(r["data_geojson"])
-        except (TypeError, ValueError):
-            continue
-        for f in doc.get("features", []) or []:
-            geom = f.get("geometry") or {}
-            if geom.get("type") != "LineString":
-                continue
-            coords = geom.get("coordinates") or []
-            if len(coords) < 2:
-                continue
-            pixels = [lonlat_to_pixel(c[0], c[1]) for c in coords if len(c) >= 2]
-            if len(pixels) < 2:
-                continue
-            color = color_for(f.get("properties") or {})
-            draw.line(pixels, fill=color, width=2, joint="curve")
-            has_any = True
-    if not has_any:
-        return None
-    buf = io.BytesIO()
-    img.save(buf, format="PNG", optimize=True)
-    return buf.getvalue()
-
-
-_DIR_COLORS = {
-    "forward": (55, 126, 184, 230),
-    "reverse": (228, 26, 28, 230),
-    "both": (160, 160, 160, 230),
-}
-_FALLBACK_COLOR = (228, 26, 28, 230)
-
-
-def _vector_color_resolver(proj: dict):
-    """Return f(properties) → (R,G,B,A). Picks a palette by the project's
-    attribute schema: direction-attribute first (graph projects), else the
-    first enum's options, else a single accent."""
-    attrs = proj.get("attributes") or []
-    if any(a["key"] == "direction" for a in attrs):
-        return lambda p: _DIR_COLORS.get(p.get("direction", "both"), _FALLBACK_COLOR)
-    enum = next((a for a in attrs if a["type"] == "enum"), None)
-    if enum and enum.get("options"):
-        # Stable categorical palette (ColorBrewer Set1, alpha 230).
-        palette = [
-            (228, 26, 28), (55, 126, 184), (77, 175, 74),
-            (152, 78, 163), (255, 127, 0), (255, 255, 51),
-            (166, 86, 40), (247, 129, 191),
-        ]
-        mapping = {opt: (*palette[i % len(palette)], 230)
-                   for i, opt in enumerate(enum["options"])}
-        key = enum["key"]
-        return lambda p: mapping.get(p.get(key), _FALLBACK_COLOR)
-    return lambda p: _FALLBACK_COLOR
 
 
 def _render_classification_tile(project_id: int, z: int, x: int, y: int,
@@ -497,76 +403,13 @@ def _render_classification_tile(project_id: int, z: int, x: int, y: int,
     return buf.getvalue()
 
 
-def _render_detection_tile(project_id: int, z: int, x: int, y: int,
-                           proj: dict) -> bytes | None:
-    """Rasterize detection boxes into a 256×256 RGBA PNG: each box is an
-    axis-aligned rectangle outlined (+translucent fill) in its class color."""
-    import json
-    from PIL import ImageDraw
-
-    west, south, east, north = wm_tile_bounds_4326(z, x, y)
-    placeholders = ",".join("?" * len(_VISIBLE_STATUSES))
-    conn = connect_main()
-    try:
-        rows = conn.execute(
-            f"""SELECT data_geojson FROM tiles
-                WHERE project_id=?
-                  AND status IN ({placeholders})
-                  AND data_geojson IS NOT NULL
-                  AND bbox_west < ? AND bbox_east > ?
-                  AND bbox_south < ? AND bbox_north > ?""",
-            (project_id, *_VISIBLE_STATUSES, east, west, north, south),
-        ).fetchall()
-    finally:
-        conn.close()
-    if not rows:
-        return None
-
-    lonlat_to_pixel, span_ok = _make_lonlat_to_pixel(z, x, y)
-    if not span_ok:
-        return None
-
-    img = Image.new("RGBA", (XYZ_TILE_PX, XYZ_TILE_PX), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-    classes_by_id = {c["id"]: c for c in (proj.get("classes") or [])}
-    has_any = False
-
-    for r in rows:
-        try:
-            doc = json.loads(r["data_geojson"])
-        except (TypeError, ValueError):
-            continue
-        for f in doc.get("features", []) or []:
-            geom = f.get("geometry") or {}
-            if geom.get("type") != "Polygon":
-                continue
-            rings = geom.get("coordinates") or []
-            if not rings or len(rings[0]) < 4:
-                continue
-            ring = rings[0]
-            xs = [c[0] for c in ring if len(c) >= 2]
-            ys = [c[1] for c in ring if len(c) >= 2]
-            if not xs or not ys:
-                continue
-            cls = classes_by_id.get((f.get("properties") or {}).get("class_id"))
-            rgb = _hex_to_rgb(cls["color"]) if cls else (228, 26, 28)
-            x0, y0 = lonlat_to_pixel(min(xs), max(ys))
-            x1, y1 = lonlat_to_pixel(max(xs), min(ys))
-            draw.rectangle([x0, y0, x1, y1], fill=(*rgb, 40), outline=(*rgb, 230), width=2)
-            has_any = True
-    if not has_any:
-        return None
-    buf = io.BytesIO()
-    img.save(buf, format="PNG", optimize=True)
-    return buf.getvalue()
-
-
 # ---- Public API ----
 
 def get_tile(project_id: int, z: int, x: int, y: int) -> bytes:
     """PNG for (z,x,y) in `project_id`. Renders + caches on miss; returns the
     transparent PNG when the cache says the tile has no data."""
     row_tms = _tms_row(z, y)
+    gen = _generation(project_id)
     conn = _open_cache(project_id)
     try:
         row = conn.execute(
@@ -579,11 +422,15 @@ def get_tile(project_id: int, z: int, x: int, y: int) -> bytes:
         png = _render_tile(project_id, z, x, y)
         # Empty regions cached as NULL so the existence of the row is the
         # "we already checked, nothing here" signal — avoids re-rendering.
-        conn.execute(
-            "INSERT OR REPLACE INTO tiles(zoom_level, tile_column, tile_row, tile_data) "
-            "VALUES (?,?,?,?)",
-            (z, x, row_tms, png),
-        )
+        # Skipped when an invalidation raced this render (see `_gen`): the
+        # response may be stale, but the cache never is.
+        with _gen_lock:
+            if _gen.get(project_id, 0) == gen:
+                conn.execute(
+                    "INSERT OR REPLACE INTO tiles(zoom_level, tile_column, tile_row, tile_data) "
+                    "VALUES (?,?,?,?)",
+                    (z, x, row_tms, png),
+                )
         return png if png is not None else _transparent_png()
     finally:
         conn.close()
@@ -615,6 +462,7 @@ def _invalidate_bbox_in(conn: sqlite3.Connection, west: float, south: float,
 
 def invalidate_bbox(project_id: int, west: float, south: float,
                     east: float, north: float) -> int:
+    _bump_generation(project_id)
     conn = _open_cache(project_id)
     try:
         return _invalidate_bbox_in(conn, west, south, east, north)
@@ -685,6 +533,7 @@ def safe_invalidate_tiles(tile_ids: list[int]) -> None:
         for r in rows:
             by_project.setdefault(r["project_id"], []).append(r)
         for pid, batch in by_project.items():
+            _bump_generation(pid)
             cache = _open_cache(pid)
             try:
                 for r in batch:
@@ -722,6 +571,8 @@ def clear_cache_for_project(project_id: int) -> int:
     underlying mbtiles source — none of which the per-tile invalidation paths
     cover. Returns the row count deleted; silent no-op when the cache file
     doesn't exist yet."""
+    # Bump even when the file is missing: a first render may be in flight.
+    _bump_generation(project_id)
     path = cache_path(project_id)
     if not path.exists():
         return 0
@@ -741,6 +592,7 @@ def delete_cache_for_project(project_id: int) -> None:
     `clear_cache_for_project` would leave reserved (DELETE keeps the SQLite
     pages allocated until VACUUM). Best-effort: a stray cache file is never
     a correctness issue."""
+    _bump_generation(project_id)
     path = cache_path(project_id)
     for suffix in ("", "-wal", "-shm"):
         p = path.with_name(path.name + suffix) if suffix else path

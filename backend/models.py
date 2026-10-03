@@ -32,6 +32,9 @@ class ClassOut(BaseModel):
 
 class TileOut(BaseModel):
     id: int
+    # Clients resolve the project's kind/palette from this (admin viewer);
+    # leaving it out made every tile look like the default raster kind.
+    project_id: int
     name: str
     bbox_west: float
     bbox_south: float
@@ -123,20 +126,10 @@ class ProjectClassIn(BaseModel):
     color: str = Field(pattern=r"^#[0-9A-Fa-f]{6}$")
 
 
-class ProjectAttributeIn(BaseModel):
-    key: str = Field(min_length=1, max_length=40, pattern=r"^[a-z][a-z0-9_]*$")
-    label: str = Field(min_length=1, max_length=80)
-    type: Literal["text", "number", "enum", "boolean"]
-    required: bool = False
-    options: Optional[list[str]] = None  # required for type=enum
-
-
 class ProjectCreateIn(BaseModel):
     name: str = Field(min_length=1, max_length=64)
     description: str = ""
-    kind: Literal["raster", "vector", "classification", "detection"] = "raster"
-    topology_required: bool = False
-    box_required: bool = False
+    kind: Literal["raster", "classification"] = "raster"
     mask_complete_required: bool = True
     # Tile geometry (defaults match the historical 256×256 @ 2.5 m/px = 640 m
     # tile). Range validated by project_service._validate_tile_geometry too,
@@ -148,19 +141,15 @@ class ProjectCreateIn(BaseModel):
     tertiary_mbtiles: Optional[str] = None
     ref_mask_primary_mbtiles: Optional[str] = None
     ref_mask_secondary_mbtiles: Optional[str] = None
-    # Mutual exclusion enforced server-side: raster wants `classes`,
-    # vector wants `attributes`. Both lists optional at the schema layer
-    # so the rejection is structured (not a Pydantic 422).
+    # Optional at the schema layer so a missing list gets the structured
+    # 400 no_classes from project_service (not a Pydantic 422).
     classes: Optional[list[ProjectClassIn]] = None
-    attributes: Optional[list[ProjectAttributeIn]] = None
 
 
 class ProjectUpdateIn(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     mask_complete_required: Optional[bool] = None
-    topology_required: Optional[bool] = None
-    box_required: Optional[bool] = None
     # Editable only while the project has no tiles (mask bytes / bbox are
     # otherwise tied to the original geometry). Server returns 409
     # tile_geometry_locked if the project already has tiles.
@@ -176,10 +165,6 @@ class ProjectUpdateIn(BaseModel):
 
 class ProjectClassesIn(BaseModel):
     classes: list[ProjectClassIn] = Field(min_length=1)
-
-
-class ProjectAttributesIn(BaseModel):
-    attributes: list[ProjectAttributeIn] = Field(min_length=0)
 
 
 class ProjectMemberIn(BaseModel):

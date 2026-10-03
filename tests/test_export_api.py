@@ -1,13 +1,12 @@
 """Admin export endpoint: GET /api/admin/projects/{id}/export streams a ZIP of
-the project's finished data, format following the project kind. Covers all four
-kinds (raster, vector, classification, detection), the status filter, the
-admin-only gate, and the empty-project case."""
+the project's finished data, format following the project kind. Covers both
+kinds (raster, classification), the status filter, the admin-only gate, and
+the empty-project case."""
 import io
-import json
 import zipfile
 
 from tests.conftest import token
-from tests._vector_helpers import auth as h, make_real_mbtiles
+from tests._helpers import auth as h, make_real_mbtiles
 
 
 def _adm(client, admin_user):
@@ -34,19 +33,6 @@ def _insert(pid, **cols):
         conn.close()
 
 
-def _box_fc(class_id=1):
-    return json.dumps({"type": "FeatureCollection", "features": [{
-        "type": "Feature", "properties": {"class_id": class_id},
-        "geometry": {"type": "Polygon",
-                     "coordinates": [[[-50.0, -25.0], [-49.99, -25.0], [-49.99, -24.99], [-50.0, -24.99], [-50.0, -25.0]]]}}]})
-
-
-def _line_fc():
-    return json.dumps({"type": "FeatureCollection", "features": [{
-        "type": "Feature", "properties": {"tipo": "rio"},
-        "geometry": {"type": "LineString", "coordinates": [[-50.0, -25.0], [-49.99, -24.99]]}}]})
-
-
 # ---- per-kind happy paths --------------------------------------------------
 
 def test_export_raster_zip(client, admin_user, tiles):
@@ -62,21 +48,6 @@ def test_export_raster_zip(client, admin_user, tiles):
     assert "manifest.csv" in names
     assert any(n.endswith(".tif") for n in names)
     assert r.headers["x-tile-count"] == "1"
-
-
-def test_export_vector_zip(client, admin_user, tmp_path):
-    adm = _adm(client, admin_user)
-    proj = client.post("/api/admin/projects", json={
-        "name": "vexp", "kind": "vector",
-        "primary_mbtiles": make_real_mbtiles(tmp_path, "vexp.mbtiles"),
-        "attributes": [{"key": "tipo", "label": "Tipo", "type": "text"}],
-    }, headers=h(adm)).json()
-    _insert(proj["id"], name="vt", status="reviewed", data_geojson=_line_fc(),
-            feature_count=1, reviewed_at="2026-01-01T00:00:00+00:00")
-    r = client.get(f"/api/admin/projects/{proj['id']}/export?status=reviewed", headers=h(adm))
-    assert r.status_code == 200
-    names = _names(r)
-    assert "manifest.csv" in names and any(n.endswith(".geojson") for n in names)
 
 
 def test_export_classification_zip(client, admin_user, tmp_path):
@@ -95,25 +66,6 @@ def test_export_classification_zip(client, admin_user, tmp_path):
     # The CSV carries the class row.
     csv_text = zipfile.ZipFile(io.BytesIO(r.content)).read("classifications.csv").decode()
     assert "ct" in csv_text
-
-
-def test_export_detection_zip(client, admin_user, tmp_path):
-    adm = _adm(client, admin_user)
-    proj = client.post("/api/admin/projects", json={
-        "name": "dexp", "kind": "detection",
-        "primary_mbtiles": make_real_mbtiles(tmp_path, "dexp.mbtiles"),
-        "classes": [{"id": 1, "name": "carro", "color": "#e41a1c"}],
-    }, headers=h(adm)).json()
-    _insert(proj["id"], name="dt", status="reviewed", data_geojson=_box_fc(1),
-            feature_count=1, reviewed_at="2026-01-01T00:00:00+00:00")
-    r = client.get(f"/api/admin/projects/{proj['id']}/export?status=reviewed", headers=h(adm))
-    assert r.status_code == 200
-    names = _names(r)
-    assert "manifest.csv" in names and any(n.endswith(".geojson") for n in names)
-    # The exported box is a Polygon.
-    gj = next(n for n in names if n.endswith(".geojson"))
-    doc = json.loads(zipfile.ZipFile(io.BytesIO(r.content)).read(gj).decode())
-    assert doc["features"][0]["geometry"]["type"] == "Polygon"
 
 
 # ---- status filter ---------------------------------------------------------

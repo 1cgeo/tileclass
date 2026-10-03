@@ -144,10 +144,10 @@ export async function apiGetWithHeaders(url) {
     return { json: await res.json(), headers: res.headers };
 }
 
-export async function apiPostJson(url, body) {
+export async function apiPostJson(url, body, extraHeaders = {}) {
     return apiJson(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...extraHeaders },
         body: JSON.stringify(body),
     });
 }

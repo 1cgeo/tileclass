@@ -107,8 +107,9 @@ describe("paintLine (Bresenham)", () => {
 describe("floodFill", () => {
     it("fills the entire mask from a single seed when all EMPTY", () => {
         const m = newMask();
-        const { touched, deltaFilled } = floodFill(m, 128, 128, 1);
-        expect(touched.size).toBe(PIXELS);
+        const { positions, prevValues, deltaFilled } = floodFill(m, 128, 128, 1);
+        expect(positions.length).toBe(PIXELS);
+        expect(prevValues.length).toBe(PIXELS);
         expect(deltaFilled).toBe(PIXELS);
         for (let i = 0; i < PIXELS; i++) expect(m[i]).toBe(1);
     });
@@ -116,8 +117,9 @@ describe("floodFill", () => {
     it("no-op when target == replacement", () => {
         const m = newMask();
         paintAt(m, 10, 10, 2, 0);
-        const { touched } = floodFill(m, 10, 10, 2);
-        expect(touched.size).toBe(0);
+        const { positions, deltaFilled } = floodFill(m, 10, 10, 2);
+        expect(positions.length).toBe(0);
+        expect(deltaFilled).toBe(0);
     });
 
     it("respects boundaries — does not cross a wall of different color", () => {
@@ -129,6 +131,79 @@ describe("floodFill", () => {
         expect(m[50 * TILE + 50]).toBe(3);
         // Below wall should still be EMPTY
         expect(m[150 * TILE + 50]).toBe(EMPTY);
+    });
+
+    it("returns the CLAUDE.md undo format (Uint32Array positions + Uint8Array prevValues)", () => {
+        const m = newMask();
+        const res = floodFill(m, 0, 0, 2);
+        expect(res.positions).toBeInstanceOf(Uint32Array);
+        expect(res.prevValues).toBeInstanceOf(Uint8Array);
+        expect(res.touched).toBeUndefined();
+        // The entry is directly consumable by applyPatch (undo).
+        const { deltaFilled } = applyPatch(m, res);
+        expect(deltaFilled).toBe(-PIXELS);
+        expect(m.every(v => v === EMPTY)).toBe(true);
+    });
+
+    // Naive reference: the original per-pixel array stack + Map implementation.
+    function naiveFill(mask, cx, cy, replacement, tp) {
+        const target = mask[cy * tp + cx];
+        const touched = new Map();
+        if (target === replacement) return { touched, deltaFilled: 0 };
+        let delta = 0;
+        const stack = [[cx, cy]];
+        while (stack.length) {
+            const [x, y] = stack.pop();
+            if (x < 0 || x >= tp || y < 0 || y >= tp) continue;
+            const i = y * tp + x;
+            if (mask[i] !== target) continue;
+            touched.set(i, target);
+            if (target === EMPTY && replacement !== EMPTY) delta++;
+            else if (target !== EMPTY && replacement === EMPTY) delta--;
+            mask[i] = replacement;
+            stack.push([x + 1, y], [x - 1, y], [x, y + 1], [x, y - 1]);
+        }
+        return { touched, deltaFilled: delta };
+    }
+
+    it("is equivalent to the naive reference on random masks (4-connectivity, edges)", () => {
+        let seed = 12345;
+        const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+        for (let trial = 0; trial < 60; trial++) {
+            const tp = 8 + Math.floor(rnd() * 40);
+            const palette = [EMPTY, 1, 2, 3];
+            const base = new Uint8Array(tp * tp);
+            // Few colors → large irregular regions with diagonal-only contacts.
+            for (let i = 0; i < base.length; i++) base[i] = palette[Math.floor(rnd() * (trial % 2 ? 2 : 4))];
+            const cx = Math.floor(rnd() * tp), cy = Math.floor(rnd() * tp);
+            const repl = palette[Math.floor(rnd() * palette.length)];
+            const a = base.slice(), b = base.slice();
+            const ref = naiveFill(a, cx, cy, repl, tp);
+            const got = floodFill(b, cx, cy, repl, tp);
+            expect(Array.from(b)).toEqual(Array.from(a));
+            expect(got.deltaFilled).toBe(ref.deltaFilled);
+            expect(got.positions.length).toBe(ref.touched.size);
+            const refPos = [...ref.touched.keys()].sort((x, y) => x - y);
+            const gotPos = Array.from(got.positions).sort((x, y) => x - y);
+            expect(gotPos).toEqual(refPos);
+            for (let i = 0; i < got.positions.length; i++) {
+                expect(got.prevValues[i]).toBe(ref.touched.get(got.positions[i]));
+            }
+        }
+    });
+
+    it("fills a 2048² empty mask with compact typed arrays", () => {
+        const TP = 2048;
+        const m = new Uint8Array(TP * TP).fill(EMPTY);
+        const t0 = Date.now();
+        const res = floodFill(m, 1000, 1000, 4, TP);
+        expect(Date.now() - t0).toBeLessThan(5000);
+        expect(res.positions).toBeInstanceOf(Uint32Array);
+        expect(res.prevValues).toBeInstanceOf(Uint8Array);
+        expect(res.positions.length).toBe(TP * TP);
+        expect(res.deltaFilled).toBe(TP * TP);
+        expect(m[0]).toBe(4);
+        expect(m[TP * TP - 1]).toBe(4);
     });
 });
 

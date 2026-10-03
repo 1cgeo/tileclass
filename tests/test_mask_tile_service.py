@@ -414,32 +414,6 @@ def test_set_classes_clears_overlay_cache(app_env, admin_user):
     assert _cache_row_count(pid) == 0
 
 
-def test_set_attributes_clears_overlay_cache(app_env, admin_user):
-    """Vector overlays color by attribute schema (direction → preset, else
-    first enum → palette). Schema change ⇒ stale overlay colors."""
-    from backend import project_service
-    conn = connect()
-    try:
-        conn.execute(
-            "INSERT INTO projects(id,name,kind,tile_px,meters_per_pixel,"
-            "mask_complete_required,primary_mbtiles,active,created_at) "
-            "VALUES (3,'v1','vector',256,2.5,0,'',1,'2026-01-01T00:00:00+00:00')"
-        )
-        conn.execute(
-            "INSERT INTO project_attributes(project_id,key,label,type,required,options_json,ordering) "
-            "VALUES (3,'kind','Tipo','enum',0,'[\"a\",\"b\"]',0)"
-        )
-    finally:
-        conn.close()
-    mts.get_tile(3, 14, 100, 100)
-    assert _cache_row_count(3) == 1
-    project_service.set_attributes(3, [
-        {"key": "kind", "label": "Tipo", "type": "enum",
-         "required": False, "options": ["a", "b", "c"]},
-    ], updated_by=admin_user["id"])
-    assert _cache_row_count(3) == 0
-
-
 def test_update_project_layer_change_clears_cache(app_env, admin_user):
     """Swapping primary_mbtiles or geometry flips the raster pipeline output —
     cached PNGs are no longer faithful renders."""
@@ -478,3 +452,62 @@ def test_endpoint_404_for_missing_project(client, admin_user):
     t = token(client, admin_user["username"], admin_user["password"])
     r = client.get("/api/admin/mask-tiles/999/14/100/100.png", headers=h(t))
     assert r.status_code == 404
+
+
+# ---- Render/invalidate race --------------------------------------------------
+
+def _is_color(arr, hex_color):
+    r, g, b = (int(hex_color[i:i + 2], 16) for i in (1, 3, 5))
+    return ((arr[..., 0] == r) & (arr[..., 1] == g) & (arr[..., 2] == b)
+            & (arr[..., 3] == 255)).any()
+
+
+def _set_class(tile_id, cls):
+    raw = bytes([cls]) * (TILE_SIZE * TILE_SIZE)
+    conn = connect()
+    try:
+        conn.execute("UPDATE tiles SET data_png=? WHERE id=?", (encode_mask(raw), tile_id))
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("invalidator", ["tile", "bbox", "bulk", "clear_project"])
+def test_invalidation_during_render_is_not_lost(app_env, monkeypatch, invalidator):
+    """A mutation committed + invalidated while a render is in flight (after the
+    renderer read the old rows, before it caches the PNG) must not leave the
+    stale PNG cached forever. Forced deterministically by mutating inside the
+    render."""
+    tid = _insert_classified("race", _BBOX, fill_class=1)  # blue #377eb8
+    z, x, y = _wm_tile_for(_BBOX, 14)
+    real = mts._render_tile
+    fired = {"n": 0}
+
+    def render_then_mutate(pid, zz, xx, yy):
+        png = real(pid, zz, xx, yy)          # rows read: still class 1
+        if fired["n"] == 0:
+            fired["n"] += 1
+            _set_class(tid, 2)               # red #e41a1c, committed
+            if invalidator == "tile":
+                mts.safe_invalidate_tile(tid)
+            elif invalidator == "bbox":
+                mts.safe_invalidate_bbox(_PID, *_BBOX)
+            elif invalidator == "bulk":
+                mts.safe_invalidate_tiles([tid])
+            else:
+                mts.clear_cache_for_project(_PID)
+        return png
+
+    monkeypatch.setattr(mts, "_render_tile", render_then_mutate)
+    first = _png_array(mts.get_tile(_PID, z, x, y))
+    assert _is_color(first, "#377eb8")  # in-flight response may be stale…
+    # …but it must not have been cached: the next request shows the new class.
+    second = _png_array(mts.get_tile(_PID, z, x, y))
+    assert _is_color(second, "#e41a1c") and not _is_color(second, "#377eb8")
+
+
+def test_render_without_invalidation_still_caches(app_env, monkeypatch):
+    """The generation guard must not disable caching in the common case."""
+    _insert_classified("t1", _BBOX, fill_class=1)
+    z, x, y = _wm_tile_for(_BBOX, 14)
+    mts.get_tile(_PID, z, x, y)
+    assert _cache_row_count(_PID) == 1

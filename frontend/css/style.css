@@ -1154,7 +1154,7 @@ input[type="range"] {
 }
 /* Class breakdown card: a thicker left border tinted with the class color so
    admins can scan by palette. `--swatch-color` falls back when the JS doesn't
-   set it (e.g. vector attribute values, which have no palette of their own). */
+   set it. */
 .stat-card-class {
     --swatch-color: var(--border-strong);
     position: relative; padding-left: calc(var(--space-4) + 4px);
@@ -1532,45 +1532,6 @@ input[type="range"] {
     }
 }
 
-/* ---------- Vector editor (project.kind=vector) ---------- */
-
-.map-vector {
-    position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    background: #1f2630;
-}
-
-.vector-attr-panel {
-    position: fixed;
-    top: var(--header-h);
-    right: 0;
-    width: 280px;
-    height: calc(100vh - var(--header-h));
-    background: var(--bg-1);
-    border-left: 1px solid var(--bg-3);
-    padding: var(--space-3);
-    overflow-y: auto;
-    z-index: 50;
-}
-.vector-attr-panel h3 { margin: 0 0 var(--space-2); font-size: 13px; }
-.vec-tools { display: flex; gap: 4px; margin-bottom: 8px; }
-.vec-tool {
-    flex: 1; padding: 6px 8px; font-size: 12px;
-    background: var(--bg-2); color: var(--text); border: 1px solid var(--bg-3);
-    border-radius: var(--radius-sm); cursor: pointer;
-}
-.vec-tool.active { background: var(--accent); color: var(--bg-0); border-color: var(--accent); }
-.vec-hint { font-size: 11px; color: var(--text-muted); margin-bottom: var(--space-2); line-height: 1.3; }
-.vec-meta { font-size: 11px; color: var(--text-muted); margin-top: var(--space-2); }
-.vector-attr-form { margin-top: var(--space-3); padding-top: var(--space-2); border-top: 1px solid var(--bg-3); }
-.vector-attr-form h4 { font-size: 12px; margin: 0 0 var(--space-2); }
-.vector-attr-form .field { display: flex; flex-direction: column; gap: 2px; margin-bottom: var(--space-2); font-size: 12px; }
-.vector-attr-form .field span { color: var(--text-muted); font-size: 11px; }
-.vector-attr-form input, .vector-attr-form select { padding: 4px 6px; font-size: 12px; }
-
-
 /* ---------- Classification editor (project.kind=classification) ---------- */
 
 .map-classification {
@@ -1613,47 +1574,20 @@ input[type="range"] {
     border: 1px solid rgba(255,255,255,0.15);
 }
 .classification-name { flex: 1; }
-
-
-/* ---------- Detection editor (project.kind=detection) ---------- */
-
-/* The detection panel reuses .vector-attr-panel for layout/position; only
-   the class-picker buttons need their own styling. Each button shows the
-   class name plus a thick color bar on the left (set inline from JS) so the
-   palette stays readable without depending on swatches in the label. */
-.det-active-label {
-    margin: var(--space-3) 0 var(--space-1);
-    font-size: var(--text-xs); color: var(--text-muted);
-    text-transform: uppercase; letter-spacing: 0.04em;
+.class-swatch-inline {
+    display: inline-block; width: 12px; height: 12px; margin-right: 6px;
+    vertical-align: middle; border-radius: 3px; border: 1px solid var(--border);
 }
-.det-classes {
-    display: flex; flex-direction: column; gap: 4px;
-}
-.det-class {
-    display: block; width: 100%; text-align: left;
-    padding: 6px 10px; font-size: var(--text-md);
-    background: var(--bg-2); color: var(--text);
-    border: 1px solid var(--bg-3); border-radius: var(--radius-sm);
-    cursor: pointer;
-    transition: background var(--transition), border-color var(--transition);
-}
-.det-class:hover:not(:disabled) {
-    background: var(--bg-3);
-}
-.det-class.active {
-    background: var(--accent-soft);
-    border-color: var(--accent);
-    box-shadow: inset 0 0 0 1px var(--accent);
-}
+.classification-hint { font-size: 11px; color: var(--text-muted); margin-bottom: var(--space-2); line-height: 1.3; }
+.classification-meta { font-size: 11px; color: var(--text-muted); margin-top: var(--space-2); }
 
 
 /* ---------- Per-kind chrome (data-kind on #view-editor) ---------- */
 
-/* Raster-only sidebars and footer controls don't apply to vector/
-   classification/detection — the kind editors render their own panel
-   on the right. Without this rule the raster sidebar leaks into other
-   kinds (operator sees Pincel/Borracha/Opacidade controls that do
-   nothing for a vector tile). */
+/* Raster-only sidebars and footer controls don't apply to classification —
+   its editor renders its own panel on the right. Without this rule the
+   raster sidebar leaks in (operator sees Pincel/Borracha/Opacidade controls
+   that do nothing for a classification tile). */
 #view-editor:not([data-kind="raster"]) .sidebar-left,
 #view-editor:not([data-kind="raster"]) .sidebar-right,
 #view-editor:not([data-kind="raster"]) #btn-undo,
@@ -1662,7 +1596,7 @@ input[type="range"] {
 }
 /* Classification is single-click: backend rejects pause with 409.
    Hiding the button stops the operator from discovering the limit
-   via an error toast. Vector and detection support pause normally. */
+   via an error toast. */
 #view-editor[data-kind="classification"] #btn-pause {
     display: none;
 }

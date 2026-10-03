@@ -54,8 +54,8 @@ def add_points(project_id: int, points, block: int = 1) -> dict:
         raise LookupError("project_not_found")
     tile_px = int(proj.get("tile_px", 256))
     tile_meters = float(proj.get("tile_meters", tile_px * float(proj.get("meters_per_pixel", 2.5))))
-    # Only raster tiles carry a data_png seed; vector/detection/classification
-    # leave the body NULL (read endpoints return an empty body for NULL).
+    # Only raster tiles carry a data_png seed; classification leaves the
+    # body NULL (read endpoints return an empty body for NULL).
     empty_png = empty_mask_png(tile_px) if proj.get("kind", "raster") == "raster" else None
 
     radius = block // 2

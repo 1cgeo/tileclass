@@ -47,24 +47,11 @@ def admin_class_distribution(project_id: int | None = Query(default=None, ge=1))
     return admin_service.class_distribution(project_id=project_id)
 
 
-@router.get("/feature-distribution")
-def admin_feature_distribution(project_id: int | None = Query(default=None, ge=1)):
-    """Vector counterpart of class-distribution: occurrences per
-    (attribute_key, value) for enum/boolean attributes. The dashboard
-    renders one section per attribute key, with bars per value."""
-    return admin_service.feature_distribution(project_id=project_id)
-
-
 @router.get("/tile-class-distribution")
 def admin_tile_class_distribution(project_id: int | None = Query(default=None, ge=1)):
     """Classification counterpart: tile counts per assigned class id."""
     return admin_service.tile_class_distribution(project_id=project_id)
 
-
-@router.get("/detection-distribution")
-def admin_detection_distribution(project_id: int | None = Query(default=None, ge=1)):
-    """Detection counterpart: bounding-box counts per assigned class id."""
-    return admin_service.detection_distribution(project_id=project_id)
 
 
 @router.get("/projects-stats")

@@ -66,7 +66,7 @@ _PROJECT_CACHE: dict[int, dict] = {}
 
 def _invalidate(project_id: int | None = None, *, drop_overlay_cache: bool = False) -> None:
     """Drop the project LRU + mbtiles reader pool. Pass
-    `drop_overlay_cache=True` when palette/attribute/layer-source changed —
+    `drop_overlay_cache=True` when palette/layer-source changed —
     the admin overlay caches the rendered PNG (already with the palette
     baked in), so it doesn't refresh from per-tile invalidation alone."""
     with _CACHE_LOCK:
@@ -103,8 +103,6 @@ def _row_to_project(row) -> dict:
         "name": row["name"],
         "description": row["description"] or "",
         "kind": row["kind"] if "kind" in keys else "raster",
-        "topology_required": bool(row["topology_required"]) if "topology_required" in keys else False,
-        "box_required": bool(row["box_required"]) if "box_required" in keys else False,
         "mask_complete_required": bool(row["mask_complete_required"]),
         "tile_px": tile_px,
         "meters_per_pixel": mpp,
@@ -165,37 +163,11 @@ def get_project(project_id: int) -> dict | None:
             {"id": c["id"], "name": c["name"], "color": c["color"]}
             for c in classes
         ]
-        attrs = conn.execute(
-            "SELECT key, label, type, required, options_json, ordering "
-            "FROM project_attributes WHERE project_id=? "
-            "ORDER BY ordering, key",
-            (project_id,),
-        ).fetchall()
-        proj["attributes"] = [
-            {
-                "key": a["key"],
-                "label": a["label"],
-                "type": a["type"],
-                "required": bool(a["required"]),
-                "options": _parse_options(a["options_json"]),
-            }
-            for a in attrs
-        ]
     finally:
         conn.close()
     with _CACHE_LOCK:
         _PROJECT_CACHE[project_id] = proj
     return proj
-
-
-def _parse_options(raw: str | None) -> list:
-    if not raw:
-        return []
-    try:
-        v = __import__("json").loads(raw)
-        return v if isinstance(v, list) else []
-    except (TypeError, ValueError):
-        return []
 
 
 def list_projects_for_user(user_id: int, *, is_admin: bool = False) -> list[dict]:
@@ -276,6 +248,9 @@ def list_members(project_id: int) -> list[dict]:
 # ---- Mutations --------------------------------------------------------------
 
 _PROJECT_ROLES = ("operator", "reviewer")
+# Supported annotation kinds. The DB CHECK on projects.kind still lists the
+# retired 'vector'/'detection' kinds (legacy schema); creation is gated here.
+PROJECT_KINDS = ("raster", "classification")
 _ALLOWED_LAYER_FIELDS = {
     "primary_mbtiles", "secondary_mbtiles", "tertiary_mbtiles",
     "ref_mask_primary_mbtiles", "ref_mask_secondary_mbtiles",
@@ -316,8 +291,7 @@ def _validate_layer_path(stored: str, *, required: bool) -> None:
 
 def create_project(
     *, name: str, description: str = "",
-    kind: str = "raster", topology_required: bool = False,
-    box_required: bool = False,
+    kind: str = "raster",
     mask_complete_required: bool = True,
     tile_px: int = 256, meters_per_pixel: float = 2.5,
     primary_mbtiles: str, secondary_mbtiles: str | None = None,
@@ -325,39 +299,21 @@ def create_project(
     ref_mask_primary_mbtiles: str | None = None,
     ref_mask_secondary_mbtiles: str | None = None,
     classes: list[dict] | None = None,
-    attributes: list[dict] | None = None,
     created_by: int,
 ) -> dict:
     name = (name or "").strip()
     if not name:
         raise HTTPException(400, detail={"error": "invalid_name"})
-    if kind not in ("raster", "vector", "classification", "detection"):
+    if kind not in PROJECT_KINDS:
         raise HTTPException(400, detail={"error": "invalid_kind"})
     _validate_tile_geometry(tile_px, meters_per_pixel)
-    # Mutual exclusion: raster/classification/detection expect `classes`
-    # (each box/tile/pixel carries a class); vector expects `attributes`.
-    # Mixing is rejected so a payload with both never silently picks one.
-    if kind in ("raster", "classification", "detection"):
-        if attributes:
-            raise HTTPException(400, detail={
-                "error": "attributes_not_supported",
-                "message": f"Projeto {kind} não aceita attributes; use classes.",
-            })
-        if not classes:
-            raise HTTPException(400, detail={"error": "no_classes"})
-        try:
-            validate_classes(classes)
-        except ValueError as e:
-            raise HTTPException(400, detail={"error": "invalid_classes",
-                                              "message": str(e)})
-    else:
-        if classes:
-            raise HTTPException(400, detail={
-                "error": "classes_on_vector",
-                "message": "Projeto vetorial não aceita classes; use attributes.",
-            })
-        attributes = attributes or []
-        _validate_attribute_schema(attributes)
+    if not classes:
+        raise HTTPException(400, detail={"error": "no_classes"})
+    try:
+        validate_classes(classes)
+    except ValueError as e:
+        raise HTTPException(400, detail={"error": "invalid_classes",
+                                          "message": str(e)})
     _validate_layer_path(primary_mbtiles, required=True)
     for opt in (secondary_mbtiles, tertiary_mbtiles,
                 ref_mask_primary_mbtiles, ref_mask_secondary_mbtiles):
@@ -367,14 +323,13 @@ def create_project(
         if exists:
             raise HTTPException(409, detail={"error": "name_taken"})
         conn.execute(
-            """INSERT INTO projects(name, description, kind, topology_required,
-               box_required, mask_complete_required, tile_px, meters_per_pixel,
+            """INSERT INTO projects(name, description, kind,
+               mask_complete_required, tile_px, meters_per_pixel,
                primary_mbtiles, secondary_mbtiles,
                tertiary_mbtiles, ref_mask_primary_mbtiles, ref_mask_secondary_mbtiles,
                active, created_by, created_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)""",
-            (name, description, kind, 1 if topology_required else 0,
-             1 if box_required else 0,
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,1,?,?)""",
+            (name, description, kind,
              1 if mask_complete_required else 0,
              int(tile_px), float(meters_per_pixel),
              primary_mbtiles, secondary_mbtiles or None, tertiary_mbtiles or None,
@@ -382,72 +337,15 @@ def create_project(
              created_by, now_iso()),
         )
         pid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        if kind in ("raster", "classification", "detection"):
-            for ord_idx, c in enumerate(classes):
-                conn.execute(
-                    """INSERT INTO project_classes(project_id, class_id, name, color, ordering)
-                       VALUES(?,?,?,?,?)""",
-                    (pid, c["id"], c["name"], c["color"], ord_idx),
-                )
-        else:
-            for ord_idx, a in enumerate(attributes):
-                conn.execute(
-                    """INSERT INTO project_attributes(project_id, key, label, type,
-                       required, options_json, ordering) VALUES(?,?,?,?,?,?,?)""",
-                    (pid, a["key"], a["label"], a["type"],
-                     1 if a.get("required") else 0,
-                     _serialize_options(a.get("options")),
-                     ord_idx),
-                )
+        for ord_idx, c in enumerate(classes):
+            conn.execute(
+                """INSERT INTO project_classes(project_id, class_id, name, color, ordering)
+                   VALUES(?,?,?,?,?)""",
+                (pid, c["id"], c["name"], c["color"], ord_idx),
+            )
         log_action(conn, created_by, None, "project_create", name)
     _invalidate(pid)
     return get_project(pid)
-
-
-_ATTR_KEY_RE = __import__("re").compile(r"^[a-z][a-z0-9_]{0,40}$")
-
-
-def _validate_attribute_schema(attrs: list[dict]) -> None:
-    """Sanity-check the attribute schema before insert. Keys are
-    snake_case (frontend uses them as form names + payload keys)."""
-    seen: set[str] = set()
-    for a in attrs:
-        key = (a.get("key") or "").strip()
-        if not _ATTR_KEY_RE.match(key):
-            raise HTTPException(400, detail={
-                "error": "invalid_attribute_key",
-                "key": key,
-                "message": "key precisa ser snake_case (a-z, 0-9, _)",
-            })
-        if key in seen:
-            raise HTTPException(400, detail={
-                "error": "duplicate_attribute_key", "key": key,
-            })
-        seen.add(key)
-        if not (a.get("label") or "").strip():
-            raise HTTPException(400, detail={
-                "error": "missing_attribute_label", "key": key,
-            })
-        from .vector_utils import ALLOWED_ATTR_TYPES
-        if a.get("type") not in ALLOWED_ATTR_TYPES:
-            raise HTTPException(400, detail={
-                "error": "invalid_attribute_type", "key": key,
-                "allowed": list(ALLOWED_ATTR_TYPES),
-            })
-        if a["type"] == "enum":
-            opts = a.get("options") or []
-            if not (isinstance(opts, list) and len(opts) >= 2
-                    and all(isinstance(o, str) and o for o in opts)):
-                raise HTTPException(400, detail={
-                    "error": "enum_needs_options", "key": key,
-                    "message": "enum precisa ≥2 opções string",
-                })
-
-
-def _serialize_options(options) -> str | None:
-    if not options:
-        return None
-    return __import__("json").dumps(options, ensure_ascii=False)
 
 
 def clone_project(source_id: int, *, new_name: str | None, by_user: int) -> dict:
@@ -462,16 +360,14 @@ def clone_project(source_id: int, *, new_name: str | None, by_user: int) -> dict
         if conn.execute("SELECT 1 FROM projects WHERE name=?", (name,)).fetchone():
             raise HTTPException(409, detail={"error": "name_taken"})
         conn.execute(
-            """INSERT INTO projects(name, description, kind, topology_required,
-               box_required, mask_complete_required, tile_px, meters_per_pixel,
+            """INSERT INTO projects(name, description, kind,
+               mask_complete_required, tile_px, meters_per_pixel,
                primary_mbtiles, secondary_mbtiles,
                tertiary_mbtiles, ref_mask_primary_mbtiles, ref_mask_secondary_mbtiles,
                active, created_by, created_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)""",
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,1,?,?)""",
             (name, source["description"],
              source.get("kind", "raster"),
-             1 if source.get("topology_required") else 0,
-             1 if source.get("box_required") else 0,
              1 if source["mask_complete_required"] else 0,
              int(source.get("tile_px", 256)),
              float(source.get("meters_per_pixel", 2.5)),
@@ -487,15 +383,6 @@ def clone_project(source_id: int, *, new_name: str | None, by_user: int) -> dict
                    VALUES(?,?,?,?,?)""",
                 (new_id, c["id"], c["name"], c["color"], ord_idx),
             )
-        for ord_idx, a in enumerate(source.get("attributes") or []):
-            conn.execute(
-                """INSERT INTO project_attributes(project_id, key, label, type,
-                   required, options_json, ordering) VALUES(?,?,?,?,?,?,?)""",
-                (new_id, a["key"], a["label"], a["type"],
-                 1 if a.get("required") else 0,
-                 _serialize_options(a.get("options")),
-                 ord_idx),
-            )
         log_action(conn, by_user, None, "project_clone", f"{source_id}->{new_id}")
     _invalidate(new_id)
     return get_project(new_id)
@@ -504,12 +391,12 @@ def clone_project(source_id: int, *, new_name: str | None, by_user: int) -> dict
 def update_project(project_id: int, *, fields: dict, updated_by: int) -> dict:
     """Patch a subset of fields. Validates layer paths if present.
 
-    `kind` is intentionally NOT in the allow-list — flipping raster↔vector
-    on an existing project would orphan every tile body. Admins must clone
+    `kind` is intentionally NOT in the allow-list — flipping
+    raster↔classification on an existing project would orphan every tile body. Admins must clone
     or recreate to switch kinds."""
     cols_allowed = {
         "name", "description", "mask_complete_required", "active",
-        "topology_required", "box_required", "tile_px", "meters_per_pixel",
+        "tile_px", "meters_per_pixel",
         "primary_mbtiles", "secondary_mbtiles", "tertiary_mbtiles",
         "ref_mask_primary_mbtiles", "ref_mask_secondary_mbtiles",
     }
@@ -525,7 +412,7 @@ def update_project(project_id: int, *, fields: dict, updated_by: int) -> dict:
         if k in fields:
             _validate_layer_path(fields[k], required=False)
     for k, v in fields.items():
-        if k in ("mask_complete_required", "active", "topology_required", "box_required"):
+        if k in ("mask_complete_required", "active"):
             v = 1 if v else 0
         if k == "tile_px":
             v = int(v)
@@ -622,88 +509,6 @@ def set_classes(project_id: int, classes: list[dict], *, updated_by: int) -> dic
     # already-cached PNGs still hold the old colors until cleared.
     _invalidate(project_id, drop_overlay_cache=True)
     return get_project(project_id)
-
-
-def set_attributes(project_id: int, attributes: list[dict], *, updated_by: int) -> dict:
-    """Replace the project's attribute schema (vector projects only).
-
-    Adding/renaming/relabeling is free. Removing a key is rejected when any
-    feature in the project's tiles references it — the cached body would
-    silently keep stale properties otherwise. Type changes for an existing
-    key are allowed (operators get re-validation on next submit) but the
-    UI should warn since old values may not coerce cleanly."""
-    proj = get_project(project_id)
-    if not proj:
-        raise HTTPException(404, detail={"error": "project_not_found"})
-    if proj.get("kind") != "vector":
-        raise HTTPException(400, detail={
-            "error": "not_vector_project",
-            "message": "Atributos só existem em projetos vetoriais.",
-        })
-    _validate_attribute_schema(attributes)
-    new_keys = {a["key"] for a in attributes}
-    with transaction("IMMEDIATE") as conn:
-        existing = {
-            r["key"] for r in conn.execute(
-                "SELECT key FROM project_attributes WHERE project_id=?",
-                (project_id,),
-            ).fetchall()
-        }
-        removed = existing - new_keys
-        if removed:
-            in_use = _attribute_keys_in_use(conn, project_id, removed)
-            if in_use:
-                raise HTTPException(409, detail={
-                    "error": "attribute_in_use",
-                    "removed": sorted(in_use),
-                    "message": "Atributos referenciados por features existentes não podem ser removidos.",
-                })
-        conn.execute(
-            "DELETE FROM project_attributes WHERE project_id=?", (project_id,),
-        )
-        for ord_idx, a in enumerate(attributes):
-            conn.execute(
-                """INSERT INTO project_attributes(project_id, key, label, type,
-                   required, options_json, ordering) VALUES(?,?,?,?,?,?,?)""",
-                (project_id, a["key"], a["label"], a["type"],
-                 1 if a.get("required") else 0,
-                 _serialize_options(a.get("options")),
-                 ord_idx),
-            )
-        log_action(conn, updated_by, None, "project_attributes_update", str(project_id))
-    # Vector overlay colors come from the attribute schema (direction → preset,
-    # else first enum → palette). Schema change ⇒ stale overlay colors.
-    _invalidate(project_id, drop_overlay_cache=True)
-    return get_project(project_id)
-
-
-def _attribute_keys_in_use(conn, project_id: int, keys: set) -> set:
-    """Walk every tile.data_geojson in the project and return the subset of
-    `keys` that appears in at least one feature's properties."""
-    if not keys:
-        return set()
-    rows = conn.execute(
-        "SELECT data_geojson FROM tiles "
-        "WHERE project_id=? AND data_geojson IS NOT NULL",
-        (project_id,),
-    ).fetchall()
-    if not rows:
-        return set()
-    import json
-    found: set[str] = set()
-    for r in rows:
-        try:
-            doc = json.loads(r["data_geojson"])
-        except (TypeError, ValueError):
-            continue
-        for f in doc.get("features", []) or []:
-            props = f.get("properties") or {}
-            for k in keys:
-                if k in props and props[k] not in (None, ""):
-                    found.add(k)
-        if found == keys:
-            break
-    return found
 
 
 def add_member(project_id: int, user_id: int, role: str, *, by_user: int) -> None:

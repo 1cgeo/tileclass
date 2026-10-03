@@ -2,7 +2,7 @@
 // (mask + cursor) sit georeferenced on top of the tile bbox.
 import { apiGet, apiGetBlob, apiPostBytes, apiPostJson, onSessionWarning, logout as apiLogout } from "./api.js";
 import { showToast } from "./toast.js";
-import { createLockedMap, setMapBbox, setOverlayVisible } from "./maplib.js";
+import { createLockedMap, disposeMap, setMapBbox, setOverlayVisible } from "./maplib.js";
 
 // Context view shows CONTEXT_FACTOR × CONTEXT_FACTOR tiles around the
 // paintable center (paintable is the central 1/CONTEXT_FACTOR). The CSS
@@ -28,19 +28,16 @@ import {
 } from "./mask-core.js";
 import { saveBackup as bkSave, loadBackup as bkLoad, clearBackup as bkClear } from "./backup.js";
 import {
-    enterVectorTile, exitVectorTile, getCurrentBody as getVectorBody,
-    validateForSubmit as validateVector,
-} from "./editor-vector.js";
+    resolveShortcut, gridGeometry, canReusePreload, heartbeatNeedsResume,
+    topmostOpenModal, isAnyModalOpen, modalCancelControl,
+    KEY_TO_OVERLAY, MAX_NUMBER_SHORTCUTS,
+} from "./editor-core.js";
 import {
     enterClassificationTile, exitClassificationTile,
     getCurrentBody as getClassificationBody,
     validateForSubmit as validateClassification,
+    handleKeyDown as classificationKeyDown,
 } from "./editor-classification.js";
-import {
-    enterDetectionTile, exitDetectionTile,
-    getCurrentBody as getDetectionBody,
-    validateForSubmit as validateDetection,
-} from "./editor-detection.js";
 
 // Tile geometry is per-project (project.tile_px). These are mutated on
 // project load via setTileGeometry. DISPLAY is the on-screen canvas size
@@ -50,10 +47,9 @@ const DISPLAY = 768;
 let SCALE = DISPLAY / TILE;
 let PIXELS = TILE * TILE;
 const BRUSH_SIZES = [1, 3, 5, 7, 11];
-// How many class-selection number shortcuts are bound (1..6). Classes beyond
-// the 6th are clickable but don't get a key badge — the handler in onKeyDown
-// only matches keys "1"–"6".
-const MAX_NUMBER_SHORTCUTS = 6;
+// Ground size of one mask pixel (projects.meters_per_pixel) — drives the grid
+// line thickness. Set in setTileGeometry.
+let METERS_PER_PIXEL = 2.5;
 
 // --- State ---
 let currentTile = null;
@@ -79,13 +75,19 @@ let tileserverMaxZoom = 22;
 // for layers the project has not configured.
 const overlayCfg = { secondary: null, tertiary: null, ref_primary: null, ref_secondary: null };
 const overlayHeld = { secondary: false, tertiary: false, ref_primary: false, ref_secondary: false };
-const KEY_TO_OVERLAY = { d: "secondary", r: "tertiary", t: "ref_primary", y: "ref_secondary" };
 let activeProjectId = null;
 let maskCompleteRequired = true;
 let todayCount = 0;
 
-// Preload cache for the "next" tile while user paints
+// Preload cache for the "next" tile while user paints. `_preloadToken` is
+// bumped whenever the cache is invalidated so an in-flight preload that
+// started before a pause/problem/switch can't repopulate it afterwards.
 let preloadedNext = null;
+let _preloadToken = 0;
+function clearPreload() {
+    preloadedNext = null;
+    _preloadToken++;
+}
 
 // Test hook only — never gate production logic on this.
 let _tileReady = false;
@@ -119,8 +121,9 @@ const offCanvas = document.createElement("canvas");
 offCanvas.width = TILE; offCanvas.height = TILE;
 const offCtx = offCanvas.getContext("2d");
 
-function setTileGeometry(px) {
+function setTileGeometry(px, metersPerPixel = 2.5) {
     TILE = px;
+    METERS_PER_PIXEL = metersPerPixel > 0 ? metersPerPixel : 2.5;
     PIXELS = TILE * TILE;
     SCALE = DISPLAY / TILE;
     maskImageData = ctxMask.createImageData(TILE, TILE);
@@ -133,6 +136,11 @@ function setTileGeometry(px) {
 }
 
 let satMap = null;
+// Config the live satMap was built from (see currentMapKey).
+let satMapKey = null;
+function currentMapKey() {
+    return JSON.stringify([tileserverUrl, tileserverMaxZoom, overlayCfg]);
+}
 
 // Zoom/pan state for the canvas-stack. zoom=1 fits the paintable area in the
 // viewport; higher values zoom into the 256x256 tile. panX/panY are in CSS
@@ -155,12 +163,10 @@ let panStart = null;  // { clientX, clientY, panX, panY }
 
 const canvasGrid = document.getElementById("canvas-grid");
 const ctxGrid = canvasGrid.getContext("2d");
-// Paint-pixel grid: one line every 2.5 m (= every paint pixel). Line thickness
-// is 0.5 m on the ground so each cell has a visible frame and the interior is
-// what gets colored. Purely visual — painting is still 256×256.
-const GRID_LINE_METERS = 0.5;
-const GRID_CELL_METERS = 2.5;
-const GRID_LINE_DISPLAY = SCALE * (GRID_LINE_METERS / GRID_CELL_METERS); // in DISPLAY units
+// Paint-pixel grid: one line per mask pixel, ~0.5 m thick on the ground.
+// Geometry (cell, line width, visibility at the current zoom) comes from
+// editor-core.gridGeometry, recomputed on every draw so tile_px /
+// meters_per_pixel changes and zoom are always reflected.
 
 let _editorInitialized = false;
 
@@ -188,6 +194,21 @@ export async function initEditor(user) {
                 return !!el && !el.classList.contains("hidden");
             },
             get tileReady() { return _tileReady; },
+            // Primary imagery URL / overlay layers of the live MapLibre map
+            // (read from the map's style, not from module config).
+            get satSourceUrl() {
+                try { return satMap?.getStyle()?.sources?.sat?.tiles?.[0] ?? null; }
+                catch { return null; }
+            },
+            get satOverlayKeys() {
+                try {
+                    return Object.keys(satMap?.getStyle()?.sources || {}).filter(k => k !== "sat");
+                } catch { return []; }
+            },
+            // Fire the heartbeat now instead of waiting for the interval.
+            heartbeatNow() {
+                return currentTile ? sendHeartbeat(currentTile.id) : Promise.resolve();
+            },
         };
     }
     document.getElementById("user-label").textContent = user.username;
@@ -204,7 +225,7 @@ export async function initEditor(user) {
     applySecondaryButtonLabels();
     // Expose to non-raster editors so they can refresh the submit button
     // after every state mutation without importing this module (avoids the
-    // circular import: editor.js already imports from editor-{vector,...}.js).
+    // circular import: editor.js already imports editor-classification.js).
     window.tcRefreshSubmit = refreshSubmitState;
     _editorInitialized = true;
     await enterEditor();
@@ -254,6 +275,8 @@ async function _switchProject(newId, { autoLoadNext = false } = {}) {
     activeProjectId = newId;
     try { localStorage.setItem(LS_ACTIVE_PROJECT, String(newId)); } catch {}
     currentTile = null;
+    stopHeartbeat();
+    clearPreload();
     // Tear down the previous project's per-kind editor before swapping
     // config (avoids a leaked MapLibre map / hidden raster canvas).
     exitActiveKindEditor();
@@ -351,12 +374,12 @@ async function loadProjectConfig(projectId) {
     maskCompleteRequired = !!proj.mask_complete_required;
     // Apply per-project tile geometry. setTileGeometry rebuilds the mask
     // and offscreen surfaces — must run before any blit/paint code reads TILE.
-    setTileGeometry(proj.tile_px || 256);
+    setTileGeometry(proj.tile_px || 256, proj.meters_per_pixel);
     const layers = proj.layers || {};
     const primary = layers.primary;
     tileserverUrl = primary?.url || "";
     tileserverMaxZoom = primary?.max_zoom ?? 22;
-    // editor-vector reads these from window — keeps that module decoupled
+    // editor-classification reads these from window — keeps that module decoupled
     // from this file's module-scoped state.
     window.tileclassPrimaryUrl = tileserverUrl;
     window.tileclassPrimaryMaxZoom = tileserverMaxZoom;
@@ -366,6 +389,14 @@ async function loadProjectConfig(projectId) {
         overlayCfg[k] = info && info.url
             ? { url: info.url, minZoom: info.min_zoom ?? 0, maxZoom: info.max_zoom ?? 22 }
             : null;
+    }
+    // The satellite map bakes the primary URL / max zoom / overlay sources
+    // into its style at creation. Another project's imagery needs a fresh
+    // map — renderSatellite recreates it on the next tile.
+    if (satMap && satMapKey !== currentMapKey()) {
+        for (const key of Object.keys(overlayHeld)) releaseOverlay(key);
+        satMap = disposeMap(satMap);
+        satMapKey = null;
     }
     // data-kind drives CSS: hides raster-only chrome (sidebars, undo/redo,
     // pause-in-classification) when the project isn't raster.
@@ -479,9 +510,6 @@ function buildClassPanel() {
         li.addEventListener("click", () => setActiveClass(c.id));
         ul.appendChild(li);
     });
-    // Vector projects expose no classes (their schema lives in
-    // project_attributes), so the panel is empty and there's no default to
-    // activate. Same guard covers any future kind that drops project_classes.
     if (classes.length) setActiveClass(classes[0].id);
 }
 
@@ -500,38 +528,47 @@ function setActiveClass(id) {
 // --- Loading / saving ---
 async function loadNext() {
     clearCanvasFlash();
+    // Take the cache and invalidate it up front: whatever /next returns, the
+    // old preload is consumed (or discarded) exactly once.
+    const cached = preloadedNext;
+    clearPreload();
     try {
-        let t;
-        if (preloadedNext) {
-            t = preloadedNext.tile;
-            // We still must call /next to actually assign. Preloaded PNG may differ.
-            const real = await apiGet(withProjectParam("/api/tiles/next", activeProjectId));
-            if (!real) {
-                preloadedNext = null;
-                if (await _tryFallbackToOtherProject()) return;
-                showNoTilesScreen();
-                return;
-            }
-            if (real.id === t.id) {
-                await loadTile(real, preloadedNext.maskBytes);
-            } else {
-                await loadTile(real);
-            }
-            preloadedNext = null;
-        } else {
-            t = await apiGet(withProjectParam("/api/tiles/next", activeProjectId));
-            if (!t) {
-                if (await _tryFallbackToOtherProject()) return;
-                showNoTilesScreen();
-                return;
-            }
-            await loadTile(t);
+        let t = await apiGet(withProjectParam("/api/tiles/next", activeProjectId));
+        if (!t) {
+            if (await _tryFallbackToOtherProject()) return;
+            showNoTilesScreen();
+            return;
         }
+        let maskBytes = null;
+        if (t.paused_at) {
+            // /next keeps a manual pause intact and hands the paused tile
+            // back. "Iniciar tile" is the operator's explicit go-ahead, so
+            // resume it the same way the paused-resume prompt does.
+            ({ tile: t, maskBytes } = await resumeWithMask(t.id));
+        } else if (canReusePreload(cached, t)) {
+            // Same tile at the same version: the preloaded mask is current.
+            maskBytes = cached.maskBytes;
+        }
+        await loadTile(t, maskBytes);
         // Fire and forget preload of the next candidate
         preloadNext();
     } catch (e) {
         showToast(`Erro ao carregar: ${e.message}`, "error");
     }
+}
+
+// POST /resume and fetch the saved mask in parallel (halves resume latency).
+// Classification has no mask (/image → 415). A failed mask fetch is
+// non-fatal: /resume already unpaused the tile (a retry would 409), and
+// loadTile() fetches the mask itself when none is preloaded.
+async function resumeWithMask(tileId) {
+    const [tile, maskBlob] = await Promise.all([
+        apiPostJson(`/api/tiles/${tileId}/resume`, {}),
+        isClassificationProject()
+            ? Promise.resolve(null)
+            : apiGetBlob(`/api/tiles/${tileId}/image`, { retries: 1 }).catch(() => null),
+    ]);
+    return { tile, maskBytes: maskBlob ? await maskFromBlob(maskBlob) : null };
 }
 
 // Guard against re-entrant fallback: a single "no tiles" doesn't bounce us
@@ -563,45 +600,43 @@ async function _tryFallbackToOtherProject() {
 }
 
 async function preloadNext() {
+    const token = ++_preloadToken;
+    preloadedNext = null;
+    // Exclude the open tile: it is assigned to us, so the peek's resume
+    // branch would otherwise return it (with its initial mask) as "next".
+    let url = withProjectParam("/api/tiles/next-preview", activeProjectId);
+    if (currentTile) url += `${url.includes("?") ? "&" : "?"}exclude_tile_id=${currentTile.id}`;
     try {
-        const peek = await apiGet(withProjectParam("/api/tiles/next-preview", activeProjectId));
-        if (!peek) { preloadedNext = null; return; }
+        const peek = await apiGet(url);
+        if (token !== _preloadToken) return;
+        if (!peek) return;
+        // Classification has no mask body (/image is raster-only → 415).
+        if (isClassificationProject()) {
+            preloadedNext = { tile: peek, maskBytes: null };
+            return;
+        }
         const blob = await apiGetBlob(`/api/tiles/${peek.id}/image`, { retries: 2, timeout: 8_000 });
-        const img = await blobToImage(blob);
-        const tmp = document.createElement("canvas");
-        tmp.width = TILE; tmp.height = TILE;
-        tmp.getContext("2d").drawImage(img, 0, 0, TILE, TILE);
-        const data = tmp.getContext("2d").getImageData(0, 0, TILE, TILE).data;
-        const m = new Uint8Array(PIXELS);
-        for (let i = 0; i < PIXELS; i++) m[i] = data[i*4];
-        preloadedNext = { tile: peek, maskBytes: m };
+        const maskBytes = await maskFromBlob(blob);
+        if (token !== _preloadToken) return;
+        preloadedNext = { tile: peek, maskBytes };
     } catch (e) {
+        if (token !== _preloadToken) return;
         preloadedNext = null;
         if (e?.timeout) showToast("Não foi possível pré-carregar o próximo tile.", "warn", 4000);
     }
-}
-
-function isVectorProject() {
-    return window.tileclassActiveProject?.kind === "vector";
 }
 
 function isClassificationProject() {
     return window.tileclassActiveProject?.kind === "classification";
 }
 
-function isDetectionProject() {
-    return window.tileclassActiveProject?.kind === "detection";
-}
-
-// Tear down any active per-kind editor (MapLibre map + listeners) and restore
-// the raster canvas-stack. Each exit*() is idempotent (guards on its own
-// state), so calling all three is safe regardless of the previous kind. Called
-// before loading a tile and before switching projects, so a project/kind
-// change never leaks a WebGL context or leaves the canvas hidden.
+// Tear down the classification editor (MapLibre map + listeners) and restore
+// the raster canvas-stack. exitClassificationTile() is idempotent, so this is
+// safe regardless of the previous kind. Called before loading a tile and
+// before switching projects, so a project/kind change never leaks a WebGL
+// context or leaves the canvas hidden.
 function exitActiveKindEditor() {
-    exitVectorTile();
     exitClassificationTile();
-    exitDetectionTile();
 }
 
 async function loadTile(t, preloadedMask = null) {
@@ -635,29 +670,9 @@ async function loadTile(t, preloadedMask = null) {
             modePill.classList.add("mode-classify");
         }
     }
-    if (isVectorProject()) {
-        // Vector projects swap the canvas-stack for a MapLibre editor.
-        await enterVectorTile(t, window.tileclassActiveProject);
-        refreshRequestChangesButton(t);
-        loadReviewNoteBanner(t.id);
-        startHeartbeat(t.id);
-        refreshSubmitState();
-        _tileReady = true;
-        return;
-    }
     if (isClassificationProject()) {
         // Classification: MapLibre satellite + class-picker sidebar; no canvas.
         await enterClassificationTile(t, window.tileclassActiveProject);
-        refreshRequestChangesButton(t);
-        loadReviewNoteBanner(t.id);
-        startHeartbeat(t.id);
-        refreshSubmitState();
-        _tileReady = true;
-        return;
-    }
-    if (isDetectionProject()) {
-        // Detection: MapLibre satellite + draw-box tool; no canvas.
-        await enterDetectionTile(t, window.tileclassActiveProject);
         refreshRequestChangesButton(t);
         loadReviewNoteBanner(t.id);
         startHeartbeat(t.id);
@@ -689,22 +704,57 @@ async function loadTile(t, preloadedMask = null) {
 
 
 // ---- Heartbeat: keeps the auto-pause sweep aware that the tile is alive.
-// 60s cadence is well below the server's 5min timeout. We deliberately
-// fire-and-forget — a failed ping just means the next /next sweep may
-// reclaim the tile, which is the correct behaviour if the user dropped
-// connectivity.
+// One ping right on load, then every 60s (well below the server's 5min
+// timeout), plus one when the page becomes visible again (laptop wake).
+// A failed ping is ignored — the next one retries. If the server answers
+// `not_active` (it auto-paused the tile while the machine slept, or an admin
+// paused it) the tile is still ours: /resume it and adopt the new version,
+// otherwise every later submit would fail with 409 tile_modified. The local
+// mask is kept as is.
 let _heartbeatTimer = null;
 
 function startHeartbeat(tileId) {
     stopHeartbeat();
+    sendHeartbeat(tileId);
     _heartbeatTimer = setInterval(() => {
         if (!currentTile || currentTile.id !== tileId) {
             stopHeartbeat();
             return;
         }
-        apiPostJson(`/api/tiles/${tileId}/heartbeat`, {}).catch(() => {});
+        sendHeartbeat(tileId);
     }, 60_000);
 }
+
+let _heartbeatInFlight = null;
+function sendHeartbeat(tileId) {
+    if (_heartbeatInFlight) return _heartbeatInFlight;
+    _heartbeatInFlight = _heartbeatOnce(tileId).finally(() => { _heartbeatInFlight = null; });
+    return _heartbeatInFlight;
+}
+
+async function _heartbeatOnce(tileId) {
+    const stillOpen = () => currentTile && currentTile.id === tileId;
+    if (!stillOpen()) return;
+    let resp;
+    try { resp = await apiPostJson(`/api/tiles/${tileId}/heartbeat`, {}); }
+    catch { return; }
+    if (!stillOpen() || !heartbeatNeedsResume(resp)) return;
+    let refreshed;
+    try { refreshed = await apiPostJson(`/api/tiles/${tileId}/resume`, {}); }
+    catch { return; }  // no longer ours / not paused: the submit path reports it
+    if (!stillOpen() || !refreshed || refreshed.id !== tileId) return;
+    // Keep client-only fields (e.g. classified_by_username), take the
+    // server's status/version/paused_at.
+    currentTile = { ...currentTile, ...refreshed };
+    saveBackup();  // re-stamp the backup with the new version
+    showToast("Tile retomado após inatividade.", "info", 4000);
+}
+
+document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && currentTile && _heartbeatTimer) {
+        sendHeartbeat(currentTile.id);
+    }
+});
 
 function stopHeartbeat() {
     if (_heartbeatTimer) {
@@ -737,16 +787,21 @@ async function loadReviewNoteBanner(tileId) {
     }
 }
 
-async function loadMaskFromServer(tileId) {
-    const blob = await apiGetBlob(`/api/tiles/${tileId}/image`);
+// Decode a single-band PNG mask blob into a TILE² Uint8Array (red channel).
+async function maskFromBlob(blob) {
     const img = await blobToImage(blob);
     const tmp = document.createElement("canvas");
     tmp.width = TILE; tmp.height = TILE;
     const tctx = tmp.getContext("2d");
     tctx.drawImage(img, 0, 0, TILE, TILE);
     const data = tctx.getImageData(0, 0, TILE, TILE).data;
-    mask = new Uint8Array(PIXELS);
-    for (let i = 0; i < PIXELS; i++) mask[i] = data[i * 4];
+    const m = new Uint8Array(PIXELS);
+    for (let i = 0; i < PIXELS; i++) m[i] = data[i * 4];
+    return m;
+}
+
+async function loadMaskFromServer(tileId) {
+    mask = await maskFromBlob(await apiGetBlob(`/api/tiles/${tileId}/image`));
 }
 
 function tryRestoreBackup() {
@@ -754,7 +809,7 @@ function tryRestoreBackup() {
     // just loaded, overwrite in-memory mask silently. Backups only exist when
     // the user had unsynced work (F5, browser crash); the canonical save+clear
     // path makes server == backup any other time. Caller re-renders.
-    const restored = bkLoad(currentTile.id, PIXELS);
+    const restored = bkLoad(backupId(), PIXELS);
     if (!restored) return;
     // Collect diffs once: lets us skip a no-op restore AND seed an undo entry
     // that reverts to the server state (Ctrl+Z right after a restore).
@@ -769,12 +824,20 @@ function tryRestoreBackup() {
     showToast("Trabalho local restaurado.", "success", 2500);
 }
 
-function saveBackup() {
-    if (!currentTile) return;
-    bkSave(currentTile.id, mask);
+// Backups are keyed by (user, tile) and stamped with the tile version, so a
+// backup from another user or an earlier assignment cycle never resurfaces.
+function backupId(tile = currentTile) {
+    return { userId: currentUser?.id ?? null, tileId: tile?.id, version: tile?.version ?? null };
 }
 
-function clearBackup() { bkClear(); }
+function saveBackup() {
+    if (!currentTile) return;
+    bkSave(backupId(), mask);
+}
+
+function clearBackup(tile = currentTile) {
+    if (tile) bkClear(backupId(tile));
+}
 
 function recountFilled() {
     let c = 0;
@@ -839,16 +902,14 @@ function updateSubmitButton(missing) {
     }
 }
 
-// Non-raster kinds drive their own state and don't go through updateProgress.
+// Classification drives their own state and don't go through updateProgress.
 // They call window.tcRefreshSubmit?.() after each mutation so the footer's
 // submit button mirrors the validity of the current state.
 function refreshSubmitState() {
     if (!currentTile) return;
     let issues = [];
     try {
-        if (isVectorProject()) issues = validateVector();
-        else if (isClassificationProject()) issues = validateClassification();
-        else if (isDetectionProject()) issues = validateDetection();
+        if (isClassificationProject()) issues = validateClassification();
         else return;  // raster goes through updateSubmitButton
     } catch { issues = []; }
     const base = _baseSubmitLabel();
@@ -899,8 +960,12 @@ function renderSatellite(t) {
     const warnEl = document.getElementById("map-warning");
     if (warnEl) warnEl.classList.add("hidden");
     _mapErrorCount = 0;
+    if (satMap && satMapKey !== currentMapKey()) {
+        satMap = disposeMap(satMap);
+    }
     if (!satMap) {
         satMap = createLockedMap("map-satellite", tileserverUrl, bbox, tileserverMaxZoom, overlayCfg);
+        satMapKey = currentMapKey();
         satMap.on("error", (e) => {
             // Multiple consecutive tile errors → surface a banner so the
             // operator knows the satellite background is missing (pure
@@ -1011,16 +1076,20 @@ function paintLine(x0, y0, x1, y1) {
 function floodFill(cx, cy) {
     const replacement = activeClass;
     const res = coreFloodFill(mask, cx, cy, replacement, TILE);
-    if (res.touched.size === 0) return;
+    if (res.positions.length === 0) return;
     filledCount += res.deltaFilled;
-    pushUndo(res.touched);
+    pushUndoEntry({ positions: res.positions, prevValues: res.prevValues });
     renderMaskFull();
     updateProgress();
     saveBackup();
 }
 
 function pushUndo(touchedMap) {
-    undoStack.push(toUndoEntry(touchedMap));
+    pushUndoEntry(toUndoEntry(touchedMap));
+}
+
+function pushUndoEntry(entry) {
+    undoStack.push(entry);
     if (undoStack.length > MAX_UNDO) undoStack.shift();
     redoStack.length = 0;
     updateUndoRedoButtons();
@@ -1164,9 +1233,11 @@ function attachEvents() {
     window.addEventListener("keyup", onKeyUp);
     // Losing focus mid-chord (e.g. Alt+Tab during Ctrl+Z) drops the keyup,
     // leaving zSuppressed stuck. Reset on blur so the next session is clean.
+    // Same for Space: its keyup never arrives, so undo everything the
+    // keydown did (hidden mask + grab cursor), not just the flag.
     window.addEventListener("blur", () => {
         zSuppressed = false;
-        spaceHeld = false;
+        releaseSpace();
         for (const key of Object.keys(overlayHeld)) releaseOverlay(key);
     });
 }
@@ -1175,9 +1246,21 @@ function isTextFocused() {
     const el = document.activeElement;
     return el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA");
 }
+// Any visible .modal (problem, request-changes, project switcher shell,
+// action confirm…) blocks editor shortcuts.
 function isModalOpen() {
-    return !document.getElementById("modal-problem").classList.contains("hidden")
-        || !document.getElementById("modal-action-confirm").classList.contains("hidden");
+    return isAnyModalOpen(document);
+}
+
+// Escape dismisses the topmost modal through its own cancel control so
+// promise-based modals (openModal/confirmAction) resolve and clean up.
+function closeTopmostModal() {
+    const modal = topmostOpenModal(document);
+    if (!modal) return false;
+    const cancel = modalCancelControl(modal);
+    if (cancel) cancel.click();
+    else modal.classList.add("hidden");
+    return true;
 }
 
 function confirmAction({ title = "Confirmar", message, okLabel = "Confirmar", cancelLabel = "Cancelar" }) {
@@ -1370,13 +1453,19 @@ function resetView() {
 // pixel thick on screen regardless of zoom level.
 function drawGrid() {
     ctxGrid.clearRect(0, 0, DISPLAY, DISPLAY);
+    // offsetWidth is the untransformed CSS size; zoom is applied on top.
+    const g = gridGeometry({
+        tilePx: TILE, metersPerPixel: METERS_PER_PIXEL, display: DISPLAY,
+        cssSize: canvasGrid.offsetWidth || DISPLAY, zoom,
+    });
+    // Below ~3 CSS px per mask pixel the lines would just cover the imagery.
+    if (!g.visible) return;
     ctxGrid.save();
-    // 2.5 m cell grid with 0.5 m thick borders — always visible.
-    ctxGrid.lineWidth = GRID_LINE_DISPLAY;
+    ctxGrid.lineWidth = g.lineWidth;
     ctxGrid.strokeStyle = "rgba(0, 0, 0, 0.85)";
     ctxGrid.beginPath();
     for (let i = 0; i <= TILE; i++) {
-        const p = i * SCALE;
+        const p = i * g.cell;
         ctxGrid.moveTo(p, 0); ctxGrid.lineTo(p, DISPLAY);
         ctxGrid.moveTo(0, p); ctxGrid.lineTo(DISPLAY, p);
     }
@@ -1430,10 +1519,13 @@ function onKeyDown(ev) {
     // Listeners stay attached when admin toggles to the panel — gate so editor
     // shortcuts (e.g. Z/X opacity) don't fire against a hidden canvas.
     if (document.getElementById("view-editor").classList.contains("hidden")) return;
+    const sc = resolveShortcut(ev);
+    // Ctrl+S never opens the browser's "save page" dialog inside the editor.
+    if (sc?.action === "submit") ev.preventDefault();
     // Ctrl+P opens the project switcher regardless of focus / kind — single
     // shortcut for all project types. Skip when a modal is already open so
     // it doesn't stack dialogs.
-    if (ev.ctrlKey && (ev.key === "p" || ev.key === "P") && !isModalOpen()) {
+    if (sc?.action === "switch-project" && !isModalOpen()) {
         const btn = document.getElementById("btn-switch-project");
         if (btn && !btn.classList.contains("hidden")) {
             ev.preventDefault();
@@ -1441,73 +1533,79 @@ function onKeyDown(ev) {
             return;
         }
     }
-    if (isTextFocused() || isModalOpen()) {
+    if (isModalOpen()) {
         if (ev.key === "Escape") {
-            document.getElementById("modal-problem").classList.add("hidden");
+            ev.preventDefault();
+            closeTopmostModal();
         }
+        return;
+    }
+    if (isTextFocused()) return;
+    if (sc?.action === "submit") {
+        if (!ev.repeat) submit();
         return;
     }
     // Raster shortcuts (1–6, Q/W/E/A/S, Z/X, Space, Ctrl+Z/Y…) only apply to the
-    // canvas editor. Vector/classification/detection editors register their own
-    // keyboard handlers — running these too would fire against a hidden canvas
-    // and double-handle Ctrl+Z/Y.
-    if (isVectorProject() || isClassificationProject() || isDetectionProject()) return;
-    const k = ev.key;
-    if (ev.ctrlKey && (k === "z" || k === "Z")) {
-        ev.preventDefault();
-        zSuppressed = true;
-        if (!ev.repeat) {
-            if (ev.shiftKey) redo(); else undo();
-        }
+    // canvas editor. Classification has its own (digits 1–9 pick a class);
+    // running the raster ones too would fire against a hidden canvas. Chords
+    // (Ctrl/Meta/Alt) are never letter/digit shortcuts in either editor.
+    if (isClassificationProject()) {
+        if (!ev.ctrlKey && !ev.metaKey && !ev.altKey) classificationKeyDown(ev);
         return;
     }
-    if (ev.ctrlKey && (k === "y" || k === "Y")) {
-        ev.preventDefault();
-        if (!ev.repeat) redo();
-        return;
+    if (!sc) return;
+    switch (sc.action) {
+        case "undo":
+            ev.preventDefault();
+            zSuppressed = true;
+            if (!ev.repeat) undo();
+            return;
+        case "redo":
+            ev.preventDefault();
+            if (ev.key === "z" || ev.key === "Z") zSuppressed = true;
+            if (!ev.repeat) redo();
+            return;
+        case "class":
+            if (classes[sc.arg]) setActiveClass(classes[sc.arg].id);
+            return;
+        case "tool": setTool(sc.arg); return;
+        case "brush": adjustBrushSize(sc.arg); return;
+        case "opacity":
+            // Ignore Z still held from a prior Ctrl+Z chord — otherwise the
+            // autorepeat that fires after Ctrl is released would shift opacity.
+            if (sc.arg < 0 && zSuppressed) return;
+            adjustOpacity(sc.arg);
+            return;
+        case "next-missing": jumpToNextMissing(); return;
+        case "overlay": pressOverlay(sc.arg); return;
+        case "toggle-missing":
+            missingHighlight = !missingHighlight;
+            blitMask();
+            return;
+        case "hide-mask":
+            ev.preventDefault();
+            if (!spaceHeld) {
+                spaceHeld = true;
+                document.getElementById("canvas-viewport").classList.add("space-held");
+            }
+            if (!maskHidden) { maskHidden = true; blitMask(); }
+            return;
     }
-    if (k >= "1" && k <= "6") {
-        const idx = Number(k) - 1;
-        if (classes[idx]) setActiveClass(classes[idx].id);
-        return;
-    }
-    // Left-hand ergonomic layout on QWE / ASD / ZXC.
-    const low = k.toLowerCase();
-    if (low === "q") { setTool("brush"); return; }
-    if (low === "w") { setTool("eraser"); return; }
-    if (low === "e") { setTool("fill"); return; }
-    if (low === "a") { adjustBrushSize(-1); return; }
-    if (low === "s") { adjustBrushSize(1); return; }
-    if (low === "z") {
-        // Ignore if Z is still held down from a prior Ctrl+Z chord — otherwise
-        // the autorepeat that fires after Ctrl is released would shift opacity.
-        if (zSuppressed) return;
-        adjustOpacity(-0.1);
-        return;
-    }
-    if (low === "x") { adjustOpacity(0.1); return; }
-    if (low === "c") { jumpToNextMissing(); return; }
-    if (KEY_TO_OVERLAY[low]) { pressOverlay(KEY_TO_OVERLAY[low]); return; }
-    if (low === "f") { missingHighlight = !missingHighlight; blitMask(); return; }
-    if (k === " ") {
-        ev.preventDefault();
-        if (!spaceHeld) {
-            spaceHeld = true;
-            document.getElementById("canvas-viewport").classList.add("space-held");
-        }
-        if (!maskHidden) { maskHidden = true; blitMask(); }
-        return;
-    }
+}
+
+// Undo the Space hold: flag, grab cursor and hidden mask. Shared by keyup
+// and window blur (where the keyup never arrives).
+function releaseSpace() {
+    const wasHidden = maskHidden;
+    spaceHeld = false;
+    document.getElementById("canvas-viewport").classList.remove("space-held");
+    maskHidden = false;
+    if (wasHidden) blitMask();
 }
 
 function onKeyUp(ev) {
     if (document.getElementById("view-editor").classList.contains("hidden")) return;
-    if (ev.key === " ") {
-        spaceHeld = false;
-        document.getElementById("canvas-viewport").classList.remove("space-held");
-        maskHidden = false;
-        blitMask();
-    }
+    if (ev.key === " ") releaseSpace();
     const upLow = ev.key.toLowerCase();
     if (KEY_TO_OVERLAY[upLow]) releaseOverlay(KEY_TO_OVERLAY[upLow]);
     if (ev.key === "z" || ev.key === "Z") zSuppressed = false;
@@ -1533,22 +1631,10 @@ function adjustOpacity(delta) {
 let _submitting = false;
 async function submit() {
     if (!currentTile || _submitting) return;
-    if (isVectorProject()) {
-        const errs = validateVector();
-        if (errs.length) {
-            showToast(`Não foi possível submeter:\n${errs.slice(0, 3).join("\n")}`, "error", 6000);
-            return;
-        }
-    } else if (isClassificationProject()) {
+    if (isClassificationProject()) {
         const errs = validateClassification();
         if (errs.length) {
             showToast(errs[0], "error");
-            return;
-        }
-    } else if (isDetectionProject()) {
-        const errs = validateDetection();
-        if (errs.length) {
-            showToast(`Não foi possível submeter:\n${errs.slice(0, 3).join("\n")}`, "error", 6000);
             return;
         }
     } else if (maskCompleteRequired && filledCount < PIXELS) {
@@ -1579,17 +1665,10 @@ async function submit() {
     try {
         const version = currentTile.version != null ? String(currentTile.version) : "";
         const versionHeaders = version ? { "X-Tile-Version": version } : {};
-        if (isVectorProject()) {
-            await apiPostJson(
-                `/api/tiles/${currentTile.id}/classify`, JSON.parse(getVectorBody()),
-            );
-        } else if (isClassificationProject()) {
+        if (isClassificationProject()) {
             await apiPostJson(
                 `/api/tiles/${currentTile.id}/classify`, JSON.parse(getClassificationBody()),
-            );
-        } else if (isDetectionProject()) {
-            await apiPostJson(
-                `/api/tiles/${currentTile.id}/classify`, JSON.parse(getDetectionBody()),
+                versionHeaders,
             );
         } else {
             await apiPostBytes(
@@ -1603,9 +1682,7 @@ async function submit() {
         // Clear the canvas immediately instead of waiting out the flash — the
         // operator shouldn't see the previous tile's painted mask lingering
         // while they decide whether to pull the next one.
-        if (isVectorProject()) exitVectorTile();
         if (isClassificationProject()) exitClassificationTile();
-        if (isDetectionProject()) exitDetectionTile();
         flashSuccess();
         showIdleScreen("Tile enviado ✓", "Verificando próximo tile...", { previewNext: true });
     } catch (e) {
@@ -1805,6 +1882,7 @@ async function confirmProblem() {
     try {
         await apiPostJson(`/api/tiles/${currentTile.id}/report-problem`, { note });
         clearBackup();
+        clearPreload();
         closeProblemModal();
         showToast("Problema reportado.", "success");
         await loadNext();
@@ -1828,6 +1906,7 @@ async function confirmRequestChanges() {
     try {
         await apiPostJson(`/api/tiles/${currentTile.id}/request-changes`, { note });
         clearBackup();
+        clearPreload();
         closeRequestChangesModal();
         showToast("Tile devolvido ao classificador.", "success");
         showIdleScreen("Ajuste solicitado ✓", "Verificando próximo tile...", { previewNext: true });
@@ -1882,31 +1961,29 @@ async function pauseTile() {
     if (btn) btn.disabled = true;
     try {
         const version = currentTile.version != null ? String(currentTile.version) : "";
-        if (isVectorProject()) {
-            await apiPostJson(
-                `/api/tiles/${currentTile.id}/pause`, JSON.parse(getVectorBody()),
-            );
-        } else if (isDetectionProject()) {
-            await apiPostJson(
-                `/api/tiles/${currentTile.id}/pause`, JSON.parse(getDetectionBody()),
-            );
-        } else {
-            await apiPostBytes(
-                `/api/tiles/${currentTile.id}/pause`, mask,
-                version ? { "X-Tile-Version": version } : {},
-            );
-        }
+        await apiPostBytes(
+            `/api/tiles/${currentTile.id}/pause`, mask,
+            version ? { "X-Tile-Version": version } : {},
+        );
         clearBackup();
-        if (isVectorProject()) exitVectorTile();
+        // The pause bumped the tile's version and changed its mask; any
+        // preload is stale (and must never stand in for this tile).
+        clearPreload();
         if (isClassificationProject()) exitClassificationTile();
-        if (isDetectionProject()) exitDetectionTile();
         showToast("Tile pausado. Suas alterações foram salvas no servidor.", "success");
         showIdleScreen("Tile pausado ⏸", "Faça login depois para continuar de onde parou.");
     } catch (e) {
-        const err = e.body?.detail?.error;
+        const detail = e.body?.detail;
+        const err = detail?.error;
         if (err === "tile_modified") {
             showToast("Outro dispositivo modificou este tile. Recarregando...", "warn");
             setTimeout(() => location.reload(), 1500);
+        } else if (err === "unfilled_pixels") {
+            // Pausing a review requires a complete mask (mask_complete_required):
+            // same feedback as an incomplete submit.
+            const missing = detail.missing ?? (PIXELS - filledCount);
+            showToast(detail.message || `Faltam ${missing} pixels.`, "error", 5000);
+            flashMissing();
         } else {
             showToast(`Erro ao pausar: ${e.message}`, "error");
         }
@@ -1948,20 +2025,9 @@ async function continuePausedTile() {
     if (!id) return;
     btn.disabled = true;
     try {
-        // Fetch the saved mask in parallel with /resume to halve resume latency.
-        const [refreshed, maskBlob] = await Promise.all([
-            apiPostJson(`/api/tiles/${id}/resume`, {}),
-            apiGetBlob(`/api/tiles/${id}/image`, { retries: 1 }),
-        ]);
-        const img = await blobToImage(maskBlob);
-        const tmp = document.createElement("canvas");
-        tmp.width = TILE; tmp.height = TILE;
-        tmp.getContext("2d").drawImage(img, 0, 0, TILE, TILE);
-        const data = tmp.getContext("2d").getImageData(0, 0, TILE, TILE).data;
-        const preloaded = new Uint8Array(PIXELS);
-        for (let i = 0; i < PIXELS; i++) preloaded[i] = data[i * 4];
+        const { tile: refreshed, maskBytes } = await resumeWithMask(id);
         hidePausedResumeScreen();
-        await loadTile(refreshed, preloaded);
+        await loadTile(refreshed, maskBytes);
         preloadNext();
     } catch (e) {
         showToast(`Erro ao retomar: ${e.message}`, "error");

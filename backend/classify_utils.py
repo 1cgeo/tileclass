@@ -1,5 +1,5 @@
 """Validation for classification-tile submissions. Sibling of mask_utils
-(raster) and vector_utils (vector): a single class id per tile, payload is
+(raster): a single class id per tile, payload is
 `{"class_id": int}` JSON. All functions DB-free for editor-side reuse."""
 from __future__ import annotations
 import json

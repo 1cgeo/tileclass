@@ -15,11 +15,8 @@ def _stub_mbtiles(tmp_path, name="stub.mbtiles"):
 
 
 def _create_project(client, adm, tmp_path, kind="raster", name="ing"):
-    body = {"name": name, "kind": kind, "primary_mbtiles": _stub_mbtiles(tmp_path)}
-    if kind == "vector":
-        body["attributes"] = [{"key": "tipo", "type": "text", "label": "Tipo"}]
-    else:
-        body["classes"] = [{"id": 1, "name": "a", "color": "#112233"}]
+    body = {"name": name, "kind": kind, "primary_mbtiles": _stub_mbtiles(tmp_path),
+            "classes": [{"id": 1, "name": "a", "color": "#112233"}]}
     r = client.post("/api/admin/projects", json=body, headers=h(adm))
     assert r.status_code == 200, r.text
     return r.json()["id"]
@@ -70,18 +67,18 @@ def test_dedup_skips_same_bbox_on_reimport(client, admin_user, tmp_path):
     assert _count(pid) == 1
 
 
-def test_vector_project_seeds_null_body(client, admin_user, tmp_path):
+def test_classification_project_seeds_null_body(client, admin_user, tmp_path):
     adm = token(client, admin_user["username"], admin_user["password"])
-    pid = _create_project(client, adm, tmp_path, kind="vector", name="ingvec")
+    pid = _create_project(client, adm, tmp_path, kind="classification", name="ingcls")
     client.post(f"/api/admin/projects/{pid}/tiles", headers=h(adm),
-                json={"points": [{"lat": 1.0, "lon": 1.0, "name": "v"}]})
+                json={"points": [{"lat": 1.0, "lon": 1.0, "name": "c"}]})
     from backend.database import connect
     conn = connect()
     try:
-        row = conn.execute("SELECT data_png, data_geojson FROM tiles WHERE project_id=?", (pid,)).fetchone()
+        row = conn.execute("SELECT data_png, data_class_id FROM tiles WHERE project_id=?", (pid,)).fetchone()
     finally:
         conn.close()
-    assert row["data_png"] is None and row["data_geojson"] is None
+    assert row["data_png"] is None and row["data_class_id"] is None
 
 
 def test_csv_style_bulk_points(client, admin_user, tmp_path):

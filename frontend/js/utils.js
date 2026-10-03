@@ -86,13 +86,10 @@ export function statusLabel(status, paused = false) {
 }
 
 // pt-BR display names for project kinds. DB stays in English; only the UI
-// swaps. Centralised so editor/admin/dashboard never drift on label spelling
-// (we had "Vector" vs "Vetorial" inconsistencies before).
+// swaps. Centralised so editor/admin/dashboard never drift on label spelling.
 export const KIND_LABELS = {
     raster: "Segmentação",
-    vector: "Vetorial",
     classification: "Classificação",
-    detection: "Detecção",
 };
 export function kindLabel(kind) { return KIND_LABELS[kind] || kind || ""; }
 

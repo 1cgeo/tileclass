@@ -6,13 +6,12 @@ Complements test_export_api.py (HTTP layer) and the per-kind suites by locking
 the actual bytes/values agents consume."""
 import csv
 import io
-import json
 import zipfile
 
 import numpy as np
 
 from tests.conftest import token
-from tests._vector_helpers import auth as h, make_real_mbtiles
+from tests._helpers import auth as h, make_real_mbtiles
 
 
 # ---- helpers ---------------------------------------------------------------
@@ -45,27 +44,13 @@ def _create(client, adm, body):
     return r.json()
 
 
-def _seed_geojson(pid, name, doc, status="reviewed"):
-    from backend.database import connect
-    conn = connect()
-    try:
-        conn.execute(
-            """INSERT INTO tiles(project_id,name,bbox_west,bbox_south,bbox_east,bbox_north,
-                                 status,data_geojson,feature_count,reviewed_at)
-               VALUES (?,?,?,?,?,?,?,?,?,datetime('now'))""",
-            (pid, name, -50.0, -25.0, -49.99, -24.99, status, json.dumps(doc),
-             len(doc.get("features", []))),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-
 # ---- raster GeoTIFF content ------------------------------------------------
 
 def test_raster_export_applies_edgv_remap(client, admin_user, tiles, tmp_path):
-    """Default export remaps TileClass IDs → EDGV (1→0, 3→4, 6→2). Reopen the
-    GeoTIFF and assert the pixel values, NODATA, CRS, dtype and band count."""
+    """Default (remap=auto) remaps TileClass IDs → EDGV (1→0, 3→4, 6→2) because
+    the default project uses the legacy {1..6} palette (custom palettes stay
+    raw — see test_export_hardening.py). Reopen the GeoTIFF and assert the
+    pixel values, NODATA, CRS, dtype and band count."""
     import rasterio
     from backend.scripts import export_tiles
     # Mask: top half class 1 (água), bottom half class 3 (floresta).
@@ -132,40 +117,38 @@ def test_raster_export_honours_non_256_tile_px(client, admin_user, tmp_path):
 
 def test_exporters_isolate_by_kind(client, admin_user, tiles, tmp_path):
     """Each exporter must pick ONLY its own kind on a mixed-kind DB — running
-    export_tiles must not choke on a vector/detection tile (NULL data_png)."""
-    from backend.scripts import (export_tiles, export_features,
-                                  export_classifications, export_detections)
+    export_tiles must not choke on a classification tile (NULL data_png)."""
+    from backend.scripts import export_tiles, export_classifications
+    from backend.database import connect
     adm = _adm(client, admin_user)
     # Default project (id=1) is raster — give it a reviewed tile.
     _seed_raster(1, "r_tile", np.full(65536, 1, dtype=np.uint8).tobytes())
-    vec = _create(client, adm, {"name": "vk", "kind": "vector",
-                                "primary_mbtiles": make_real_mbtiles(tmp_path, "vk.mbtiles"),
-                                "attributes": [{"key": "t", "label": "T", "type": "text"}]})
-    _seed_geojson(vec["id"], "v_tile", {"type": "FeatureCollection", "features": [
-        {"type": "Feature", "properties": {"t": "x"},
-         "geometry": {"type": "LineString", "coordinates": [[-50, -25], [-49.99, -24.99]]}}]})
-    det = _create(client, adm, {"name": "dk", "kind": "detection",
-                                "primary_mbtiles": make_real_mbtiles(tmp_path, "dk.mbtiles"),
+    cls = _create(client, adm, {"name": "ck", "kind": "classification",
+                                "primary_mbtiles": make_real_mbtiles(tmp_path, "ck.mbtiles"),
                                 "classes": [{"id": 1, "name": "c", "color": "#e41a1c"}]})
-    _seed_geojson(det["id"], "d_tile", {"type": "FeatureCollection", "features": [
-        {"type": "Feature", "properties": {"class_id": 1},
-         "geometry": {"type": "Polygon", "coordinates": [[[-50, -25], [-49.99, -25], [-49.99, -24.99], [-50, -24.99], [-50, -25]]]}}]})
+    conn = connect()
+    try:
+        conn.execute(
+            """INSERT INTO tiles(project_id,name,bbox_west,bbox_south,bbox_east,bbox_north,
+                                 status,data_class_id,reviewed_at)
+               VALUES (?,?,?,?,?,?,'reviewed',1,datetime('now'))""",
+            (cls["id"], "c_tile", -50.0, -25.0, -49.99, -24.99),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
     # export_tiles over ALL projects: only the raster tile, no crash on the
-    # others. Multi-project export prefixes the filename with p<project_id>.
+    # classification one. Multi-project export prefixes the filename with
+    # p<project_id>.
     n_raster = export_tiles.run(tmp_path / "rt", status="reviewed", project_id=None)
     assert n_raster == 1
     tifs = [p.name for p in (tmp_path / "rt").glob("gt_*.tif")]
     assert len(tifs) == 1 and "r_tile" in tifs[0] and tifs[0].startswith("gt_p")
-    # Each vector/detection exporter sees only its own kind.
-    assert export_features.run(tmp_path / "ft", status="reviewed", project_id=None) == 1
-    gj_v = [p.name for p in (tmp_path / "ft").glob("gt_*.geojson")]
-    assert len(gj_v) == 1 and "v_tile" in gj_v[0]
-    assert export_detections.run(tmp_path / "dt", status="reviewed", project_id=None) == 1
-    gj_d = [p.name for p in (tmp_path / "dt").glob("gt_*.geojson")]
-    assert len(gj_d) == 1 and "d_tile" in gj_d[0]
-    # Classification exporter finds nothing here (no classification tiles).
-    assert export_classifications.run(tmp_path / "ct", status="reviewed", project_id=None) == 0
+    # The classification exporter sees only its own tile.
+    assert export_classifications.run(tmp_path / "ct", status="reviewed", project_id=None) == 1
+    csv_text = (tmp_path / "ct" / "classifications.csv").read_text(encoding="utf-8")
+    assert "c_tile" in csv_text and "r_tile" not in csv_text
 
 
 # ---- manifest content ------------------------------------------------------

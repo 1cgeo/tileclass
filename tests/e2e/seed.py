@@ -88,6 +88,148 @@ def main(db_path: str) -> None:
                    VALUES (?,?,?,?,?,?,'pending',?)""",
                 (pid, f"e2e_{i:03d}", i * 0.1, 0.0, (i + 1) * 0.1, 0.1, empty),
             )
+
+        # Classification project (id=2). Its operators are members of this
+        # project only, so login lands straight on it (no picker). Class ids
+        # are deliberately not 1..N so digit shortcuts must map by position.
+        conn.execute(
+            "INSERT INTO projects(id, name, description, kind, tile_px, meters_per_pixel, "
+            "mask_complete_required, primary_mbtiles, active, created_at) "
+            "VALUES (2,'classif','','classification',256,2.5,0,'',1,?)",
+            (now,),
+        )
+        for ordering, (cid, cname, color) in enumerate([
+            (10, "Urbano", "#e41a1c"), (20, "Água", "#377eb8"), (30, "Solo", "#ff7f00"),
+        ]):
+            conn.execute(
+                "INSERT INTO project_classes(project_id, class_id, name, color, ordering) "
+                "VALUES (2,?,?,?,?)",
+                (cid, cname, color, ordering),
+            )
+        cls_ids = {}
+        for uname in ("cls1", "cls_paused"):
+            conn.execute(
+                "INSERT INTO users(username, password_hash, role, active, created_at) "
+                "VALUES (?,?,'operator',1,?)",
+                (uname, hash_password("secret123"), now),
+            )
+            cls_ids[uname] = conn.execute(
+                "SELECT id FROM users WHERE username=?", (uname,)
+            ).fetchone()["id"]
+            conn.execute(
+                "INSERT INTO project_members(project_id, user_id, role) VALUES (2,?,'operator')",
+                (cls_ids[uname],),
+            )
+        for i in range(5):
+            conn.execute(
+                """INSERT INTO tiles(project_id, name,
+                                     bbox_west, bbox_south, bbox_east, bbox_north, status)
+                   VALUES (2,?,?,?,?,?,'pending')""",
+                (f"cls_{i:03d}", i * 0.1, 1.0, (i + 1) * 0.1, 1.1),
+            )
+        # A tile auto-paused by the heartbeat sweep while cls_paused was away:
+        # login must offer "Continuar" and resuming must open the editor.
+        conn.execute(
+            """INSERT INTO tiles(project_id, name,
+                                 bbox_west, bbox_south, bbox_east, bbox_north,
+                                 status, assigned_to, paused_at)
+               VALUES (2,'cls_paused_tile',0,2.0,0.1,2.1,'in_progress',?,?)""",
+            (cls_ids["cls_paused"], now),
+        )
+        # Already-classified tile (class 30 = "Solo") for the admin viewer.
+        conn.execute(
+            """INSERT INTO tiles(project_id, name,
+                                 bbox_west, bbox_south, bbox_east, bbox_north,
+                                 status, data_class_id, classified_by, classified_at)
+               VALUES (2,'cls_done',0.5,2.0,0.6,2.1,'classified',30,?,?)""",
+            (cls_ids["cls1"], now),
+        )
+
+        # Raster: a paused tile holding a partial mask (first 1000 px = class
+        # 2), for the resume-with-failed-mask-fetch scenario.
+        from backend.mask_utils import encode_mask
+        conn.execute(
+            "INSERT INTO users(username, password_hash, role, active, created_at) "
+            "VALUES ('op_paused',?,'operator',1,?)",
+            (hash_password("secret123"), now),
+        )
+        op_paused = conn.execute(
+            "SELECT id FROM users WHERE username='op_paused'"
+        ).fetchone()["id"]
+        conn.execute(
+            "INSERT INTO project_members(project_id, user_id, role) VALUES (1,?,'operator')",
+            (op_paused,),
+        )
+        partial = bytes([2]) * 1000 + bytes([255]) * (65536 - 1000)
+        conn.execute(
+            """INSERT INTO tiles(project_id, name,
+                                 bbox_west, bbox_south, bbox_east, bbox_north,
+                                 status, assigned_to, paused_at, data_png)
+               VALUES (1,'raster_paused_tile',0,3.0,0.1,3.1,'in_progress',?,?,?)""",
+            (op_paused, now, encode_mask(partial, 256)),
+        )
+
+        # Plain raster operators (project 1, role operator — never pulled into
+        # the review queue) for the pause→start, heartbeat-recovery and
+        # shortcut scenarios. Each gets its own user so tiles don't collide.
+        for uname in ("op_pr", "op_hb", "op_keys"):
+            conn.execute(
+                "INSERT INTO users(username, password_hash, role, active, created_at) "
+                "VALUES (?,?,'operator',1,?)",
+                (uname, hash_password("secret123"), now),
+            )
+            uid = conn.execute(
+                "SELECT id FROM users WHERE username=?", (uname,)
+            ).fetchone()["id"]
+            conn.execute(
+                "INSERT INTO project_members(project_id, user_id, role) VALUES (1,?,'operator')",
+                (uid,),
+            )
+
+        # Two raster projects with different (remote, unreachable) imagery so
+        # the project-switch scenario can assert the satellite map follows the
+        # active project. Project 4 also configures a secondary (D) overlay.
+        for proj_id, pname, primary, secondary in (
+            (3, "raster_a", "https://imagery-a.invalid/{z}/{x}/{y}.png", None),
+            (4, "raster_b", "https://imagery-b.invalid/{z}/{x}/{y}.png",
+             "https://imagery-b2.invalid/{z}/{x}/{y}.png"),
+        ):
+            conn.execute(
+                "INSERT INTO projects(id, name, description, kind, tile_px, meters_per_pixel, "
+                "mask_complete_required, primary_mbtiles, secondary_mbtiles, active, created_at) "
+                "VALUES (?,?,'','raster',256,2.5,1,?,?,1,?)",
+                (proj_id, pname, primary, secondary, now),
+            )
+            for ordering, (cid, cname, color) in enumerate([
+                (1, "Água", "#377eb8"), (2, "Edificado", "#e41a1c"),
+            ]):
+                conn.execute(
+                    "INSERT INTO project_classes(project_id, class_id, name, color, ordering) "
+                    "VALUES (?,?,?,?,?)",
+                    (proj_id, cid, cname, color, ordering),
+                )
+            for i in range(3):
+                conn.execute(
+                    """INSERT INTO tiles(project_id, name,
+                                         bbox_west, bbox_south, bbox_east, bbox_north,
+                                         status, data_png)
+                       VALUES (?,?,?,?,?,?,'pending',?)""",
+                    (proj_id, f"{pname}_{i:03d}", i * 0.1, 4.0 + proj_id,
+                     (i + 1) * 0.1, 4.1 + proj_id, empty),
+                )
+        conn.execute(
+            "INSERT INTO users(username, password_hash, role, active, created_at) "
+            "VALUES ('op_multi',?,'operator',1,?)",
+            (hash_password("secret123"), now),
+        )
+        op_multi = conn.execute(
+            "SELECT id FROM users WHERE username='op_multi'"
+        ).fetchone()["id"]
+        for proj_id in (3, 4):
+            conn.execute(
+                "INSERT INTO project_members(project_id, user_id, role) VALUES (?,?,'operator')",
+                (proj_id, op_multi),
+            )
     finally:
         conn.close()
     print("seeded")

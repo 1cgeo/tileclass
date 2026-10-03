@@ -354,14 +354,13 @@ def test_heartbeat_does_not_bump_version(client, admin_user, operators, tiles):
     assert v_after == v_before
 
 
-def test_auto_pause_bumps_version_so_pending_submit_fails_safely(client, admin_user, operators, tiles):
-    """If the operator was about to submit when their tile got auto-paused,
-    the version bump triggers tile_modified — the editor will save backup
-    instead of silently overwriting newer state."""
+def test_submit_after_auto_pause_succeeds_and_closes_the_pause(client, admin_user, operators, tiles):
+    """The tile stays assigned to the operator while auto-paused, so a submit
+    with the original version token succeeds. It logs an implicit `resume`
+    so the dashboard subtracts the away time from the cycle duration."""
     op_a = token(client, operators[0]["username"], operators[0]["password"])
     nxt = client.get("/api/tiles/next?project_id=1", headers=h(op_a)).json()
-    # Force auto-pause (backdate heartbeat, then trigger sweep via someone else).
-    from backend.database import transaction
+    from backend.database import transaction, connect
     past = (datetime.now(timezone.utc) - timedelta(seconds=400)).isoformat()
     with transaction("IMMEDIATE") as conn:
         conn.execute(
@@ -370,7 +369,6 @@ def test_auto_pause_bumps_version_so_pending_submit_fails_safely(client, admin_u
     op_b = token(client, operators[1]["username"], operators[1]["password"])
     client.get("/api/tiles/next?project_id=1", headers=h(op_b))  # triggers sweep
 
-    # op_a now tries to submit with the OLD version → 409 tile_modified.
     raw = bytes([1]) * 65536
     r = client.post(
         f"/api/tiles/{nxt['id']}/classify",
@@ -380,8 +378,17 @@ def test_auto_pause_bumps_version_so_pending_submit_fails_safely(client, admin_u
         },
         content=raw,
     )
-    assert r.status_code == 409
-    assert r.json()["detail"]["error"] == "tile_modified"
+    assert r.status_code == 200, r.text
+    conn = connect()
+    try:
+        row = conn.execute("SELECT status, paused_at FROM tiles WHERE id=?", (nxt["id"],)).fetchone()
+        actions = [(a["action"], a["detail"]) for a in conn.execute(
+            "SELECT action, detail FROM action_log WHERE tile_id=? ORDER BY id", (nxt["id"],))]
+    finally:
+        conn.close()
+    assert row["status"] == "classified" and row["paused_at"] is None
+    assert actions == [("assign_classify", None), ("pause", "auto"),
+                       ("resume", None), ("classify", None)]
 
 
 def test_auto_paused_tile_auto_resumes_via_next(client, admin_user, operators, tiles):

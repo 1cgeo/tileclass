@@ -33,22 +33,25 @@ async def _read_body_for_kind(request: Request, tile_id: int) -> tuple[bytes, di
     """Pick the right body reader by the project's kind and return both the
     body and the resolved project dict so callers can hand `proj` to
     tile_service without a second project_for_tile lookup. Raster expects
-    tile_px**2 raw bytes; vector accepts up to ~1.5 MB JSON; classification
-    accepts a small JSON envelope (`{"class_id": int}`)."""
+    tile_px**2 raw bytes; classification accepts a small JSON envelope
+    (`{"class_id": int}`)."""
     proj = tile_service.project_for_tile(tile_id)
-    kind = proj.get("kind")
-    if kind in ("vector", "detection"):
-        cl = request.headers.get("content-length")
-        if cl and cl.isdigit() and int(cl) > 1_500_000:
-            raise HTTPException(413, "geojson body too large")
-        return await request.body(), proj
-    if kind == "classification":
+    if proj.get("kind") == "classification":
         cl = request.headers.get("content-length")
         if cl and cl.isdigit() and int(cl) > 1024:
             raise HTTPException(413, "classification body too large")
         return await request.body(), proj
     tile_px = int(proj.get("tile_px", 256))
     return await _read_mask_body(request, tile_px * tile_px), proj
+
+
+def _require_tile_access(tile_id: int, user: auth.CurrentUser) -> dict:
+    """Read-side gate for per-tile endpoints: 404 when the tile is missing,
+    403 `not_project_member` when the caller isn't in the tile's project
+    (global admins pass). Returns the project so callers can reuse it."""
+    proj = tile_service.project_for_tile(tile_id)
+    project_service.require_membership(proj["id"], user)
+    return proj
 
 
 def _expected_version(request: Request) -> int | None:
@@ -134,11 +137,14 @@ def my_assigned_tile(
 @router.get("/tiles/next-preview")
 def next_tile_preview(
     project_id: int | None = Query(default=None),
+    exclude_tile_id: int | None = Query(default=None, ge=1),
     user: auth.CurrentUser = Depends(auth.get_current_user),
 ):
-    """Peek without assigning — used by the frontend to pre-load the next image."""
+    """Peek without assigning — used by the frontend to pre-load the next image.
+    The editor passes the open tile as `exclude_tile_id` so the peek returns
+    the tile that follows it, not the open tile itself."""
     pid = _resolve_project_id(project_id, user, required=True, enforce_active=True)
-    t = tile_service.peek_next_tile(user.id, pid)
+    t = tile_service.peek_next_tile(user.id, pid, exclude_tile_id=exclude_tile_id)
     if not t:
         return Response(status_code=204)
     return t
@@ -176,15 +182,17 @@ def queue_stats(
 
 @router.get("/tiles/{tile_id}/history")
 def tile_history(tile_id: int = Path(ge=1),
-                 _: auth.CurrentUser = Depends(auth.get_current_user)):
+                 user: auth.CurrentUser = Depends(auth.get_current_user)):
+    _require_tile_access(tile_id, user)
     return tile_service.tile_history(tile_id)
 
 
 @router.get("/tiles/{tile_id}/review-note")
 def tile_review_note(tile_id: int = Path(ge=1),
-                     _: auth.CurrentUser = Depends(auth.get_current_user)):
+                     user: auth.CurrentUser = Depends(auth.get_current_user)):
     """Most recent `request_changes` note for this tile, or 204 if none.
     The editor surfaces this as a banner when the classifier reopens the tile."""
+    _require_tile_access(tile_id, user)
     note = tile_service.latest_review_note(tile_id)
     if not note:
         return Response(status_code=204)
@@ -194,6 +202,7 @@ def tile_review_note(tile_id: int = Path(ge=1),
 @router.get("/tiles/{tile_id}", response_model=TileOut)
 def get_tile(tile_id: int = Path(ge=1),
              user: auth.CurrentUser = Depends(auth.get_current_user)):
+    _require_tile_access(tile_id, user)
     t = tile_service.get_tile(tile_id)
     if not t:
         raise HTTPException(404, "tile not found")
@@ -203,9 +212,9 @@ def get_tile(tile_id: int = Path(ge=1),
 @router.get("/tiles/{tile_id}/image")
 def get_tile_image(tile_id: int = Path(ge=1),
                    user: auth.CurrentUser = Depends(auth.get_current_user)):
-    """Raster body only. Vector/classification tiles use /features and
-    /classification respectively; calling /image on them returns 415."""
-    proj = tile_service.project_for_tile(tile_id)
+    """Raster body only. Classification tiles use /classification; calling
+    /image on them returns 415."""
+    proj = _require_tile_access(tile_id, user)
     if proj.get("kind") != "raster":
         raise HTTPException(415, detail={
             "error": "wrong_kind",
@@ -218,31 +227,12 @@ def get_tile_image(tile_id: int = Path(ge=1),
     return Response(content=img, media_type="image/png")
 
 
-@router.get("/tiles/{tile_id}/features")
-def get_tile_features(tile_id: int = Path(ge=1),
-                      user: auth.CurrentUser = Depends(auth.get_current_user)):
-    """GeoJSON body — returns the FeatureCollection JSON (LineStrings for
-    vector, box Polygons for detection), or the canonical empty FC if the tile
-    has never been submitted."""
-    proj = tile_service.project_for_tile(tile_id)
-    if proj.get("kind") not in ("vector", "detection"):
-        raise HTTPException(415, detail={
-            "error": "wrong_kind",
-            "kind": proj.get("kind"),
-            "message": "Endpoint /features só está disponível para tiles vetoriais/detection.",
-        })
-    text = tile_service.get_tile_geojson(tile_id)
-    if text is None:
-        raise HTTPException(404, "tile not found")
-    return Response(content=text, media_type="application/json")
-
-
 @router.get("/tiles/{tile_id}/classification")
 def get_tile_classification(tile_id: int = Path(ge=1),
                             user: auth.CurrentUser = Depends(auth.get_current_user)):
     """Classification body — returns `{"class_id": int}`, or 204 when the tile
     has not been classified yet."""
-    proj = tile_service.project_for_tile(tile_id)
+    proj = _require_tile_access(tile_id, user)
     if proj.get("kind") != "classification":
         raise HTTPException(415, detail={
             "error": "wrong_kind",
@@ -258,11 +248,14 @@ def get_tile_classification(tile_id: int = Path(ge=1),
 @router.get("/tiles/{tile_id}/satellite-thumbnail")
 def get_tile_satellite_thumbnail(tile_id: int = Path(ge=1),
                                  size: int = Query(256, ge=16, le=512),
-                                 _: auth.CurrentUser = Depends(auth.get_current_user)):
+                                 user: auth.CurrentUser = Depends(auth.get_current_user)):
+    _require_tile_access(tile_id, user)
     return Response(
         content=admin_service.tile_satellite_thumbnail(tile_id, size=size),
         media_type="image/png",
-        headers={"Cache-Control": "public, max-age=3600"},
+        # private: the body is membership-gated, so shared caches must not
+        # replay it to other users.
+        headers={"Cache-Control": "private, max-age=3600"},
     )
 
 

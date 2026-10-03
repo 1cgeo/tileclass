@@ -68,11 +68,14 @@ def class_distribution(project_id: int | None = None) -> list[dict]:
     backfills legacy DBs."""
     import json
     proj_clause, proj_args = _scope(project_id)
-    where_proj = ("WHERE 1=1" + proj_clause) if proj_clause else ""
     conn = connect()
     try:
+        # Only submitted work counts: a tile sent back to pending
+        # (request_changes) or blocked keeps its class_counts cache, but its
+        # pixels are not part of the dataset.
         rows = conn.execute(
-            f"SELECT project_id, class_counts FROM tiles {where_proj}",
+            f"""SELECT project_id, class_counts FROM tiles
+                WHERE status IN ('classified','in_review','reviewed'){proj_clause}""",
             proj_args,
         ).fetchall()
         # totals[(pid, class_id)] = pixels
@@ -119,85 +122,6 @@ def class_distribution(project_id: int | None = None) -> list[dict]:
     return out
 
 
-def feature_distribution(project_id: int | None = None) -> list[dict]:
-    """Vector counterpart to class_distribution: counts feature occurrences
-    by enum/boolean attribute value, scanning each tile's data_geojson once.
-
-    Returned shape:
-      [{project_id, attribute_key, value, count, pct}, ...]
-
-    Text/number attributes are skipped — they have unbounded value spaces
-    and the dashboard's bar chart needs a discrete vocabulary. Tiles whose
-    body is null or unparseable are silently ignored."""
-    import json
-    proj_clause, proj_args = _scope(project_id)
-    where_proj = ("WHERE 1=1" + proj_clause) if proj_clause else ""
-    conn = connect()
-    try:
-        # Pull the per-project schema so we know which keys are enum/boolean.
-        schema_rows = conn.execute(
-            f"""SELECT pa.project_id, pa.key, pa.type, pa.options_json
-                FROM project_attributes pa
-                JOIN projects p ON p.id=pa.project_id
-                WHERE p.kind='vector'
-                  AND pa.type IN ('enum','boolean')
-                  {('AND p.id=?' if project_id is not None else '')}""",
-            proj_args,
-        ).fetchall()
-        schema_by_pid: dict[int, list[tuple[str, str]]] = {}
-        for s in schema_rows:
-            schema_by_pid.setdefault(s["project_id"], []).append(
-                (s["key"], s["type"]),
-            )
-        # Tiles with non-null bodies for projects that have at least one
-        # countable attribute.
-        tile_rows = conn.execute(
-            f"""SELECT t.project_id, t.data_geojson FROM tiles t
-                JOIN projects p ON p.id=t.project_id
-                WHERE p.kind='vector' AND t.data_geojson IS NOT NULL
-                  {('AND t.project_id=?' if project_id is not None else '')}""",
-            proj_args,
-        ).fetchall()
-    finally:
-        conn.close()
-
-    counts: dict[tuple[int, str, str], int] = {}
-    project_totals: dict[tuple[int, str], int] = {}
-    for r in tile_rows:
-        pid = r["project_id"]
-        keys = schema_by_pid.get(pid)
-        if not keys:
-            continue
-        try:
-            doc = json.loads(r["data_geojson"])
-        except (TypeError, ValueError):
-            continue
-        for f in doc.get("features", []) or []:
-            props = f.get("properties") or {}
-            for key, _t in keys:
-                value = props.get(key)
-                if value is None or value == "":
-                    continue
-                # Stringify so booleans + enums share the same key shape.
-                v = str(value).lower() if isinstance(value, bool) else str(value)
-                counts[(pid, key, v)] = counts.get((pid, key, v), 0) + 1
-                project_totals[(pid, key)] = project_totals.get((pid, key), 0) + 1
-
-    out = []
-    for (pid, key, value), count in sorted(
-        counts.items(), key=lambda kv: (-kv[1],),
-    ):
-        denom = project_totals.get((pid, key), 1)
-        out.append({
-            "project_id": pid,
-            "attribute_key": key,
-            "value": value,
-            "count": count,
-            "pct": round(100.0 * count / denom, 2),
-        })
-    return out
-
-
 def tile_class_distribution(project_id: int | None = None) -> list[dict]:
     """Classification counterpart to class_distribution: counts tiles per
     assigned class_id, joined with project_classes for name + color.
@@ -239,69 +163,6 @@ def tile_class_distribution(project_id: int | None = None) -> list[dict]:
     ]
 
 
-def detection_distribution(project_id: int | None = None) -> list[dict]:
-    """Detection counterpart: counts bounding boxes per class id by walking
-    each tile's data_geojson once (boxes are Polygon features with
-    `properties.class_id`).
-
-    Returned shape mirrors class_distribution but uses `count` (boxes). Empty
-    bodies, parse errors, and features missing a class id are silently
-    skipped — they don't contribute to any class total."""
-    import json
-    proj_clause, proj_args = _scope(project_id, prefix="t.")
-    conn = connect()
-    try:
-        tile_rows = conn.execute(
-            f"""SELECT t.project_id, t.data_geojson FROM tiles t
-                JOIN projects p ON p.id=t.project_id
-                WHERE p.kind='detection' AND t.data_geojson IS NOT NULL
-                  {proj_clause}""",
-            proj_args,
-        ).fetchall()
-        # Build counts in Python so the same schema (Polygon + class_id) works
-        # regardless of how the operator structured the feature collection.
-        counts: dict[tuple[int, int], int] = {}
-        for r in tile_rows:
-            try:
-                doc = json.loads(r["data_geojson"])
-            except (TypeError, ValueError):
-                continue
-            for f in doc.get("features", []) or []:
-                cid = (f.get("properties") or {}).get("class_id")
-                if cid is None:
-                    continue
-                key = (r["project_id"], int(cid))
-                counts[key] = counts.get(key, 0) + 1
-        if not counts:
-            return []
-        # Resolve names/colors with one query per distinct project.
-        names: dict[tuple[int, int], tuple[str, str]] = {}
-        for pid in {pid for (pid, _) in counts}:
-            for c in conn.execute(
-                "SELECT class_id, name, color FROM project_classes WHERE project_id=?",
-                (pid,),
-            ).fetchall():
-                names[(pid, c["class_id"])] = (c["name"], c["color"])
-    finally:
-        conn.close()
-    # Per-project percentages (different projects = different palettes).
-    project_totals: dict[int, int] = {}
-    for (pid, _cid), n in counts.items():
-        project_totals[pid] = project_totals.get(pid, 0) + n
-    out = []
-    for (pid, cid), n in sorted(counts.items(), key=lambda kv: -kv[1]):
-        name, color = names.get((pid, cid), (f"#{cid}", "#888888"))
-        out.append({
-            "project_id": pid,
-            "class_id": cid,
-            "name": name,
-            "color": color,
-            "count": n,
-            "pct": round(100.0 * n / (project_totals[pid] or 1), 2),
-        })
-    return out
-
-
 def projects_stats() -> list[dict]:
     """One row per active project for the admin Projetos sidebar AND the
     cross-project breakdown on the dashboard. Bundles five aggregates in a
@@ -336,7 +197,10 @@ def projects_stats() -> list[dict]:
                LEFT JOIN (
                    SELECT project_id, COUNT(*) AS recent FROM tiles
                    WHERE status IN ('classified','in_review','reviewed')
-                     AND classified_at >= datetime('now','-7 days')
+                     -- julianday(): classified_at is ISO with 'T' + offset,
+                     -- datetime() is space-separated — string compare is wrong
+                     -- on the boundary day.
+                     AND julianday(classified_at) >= julianday('now','-7 days')
                    GROUP BY project_id
                ) r ON r.project_id = p.id
                ORDER BY p.id"""
@@ -472,7 +336,7 @@ def dashboard(project_id: int | None = None) -> dict:
         rate_row = conn.execute(
             f"""SELECT COUNT(*) c FROM tiles
                 WHERE status IN ('classified','in_review','reviewed')
-                  AND classified_at >= datetime('now','-7 days'){proj_clause}""",
+                  AND julianday(classified_at) >= julianday('now','-7 days'){proj_clause}""",
             proj_args,
         ).fetchone()
         rate_per_day = (rate_row["c"] or 0) / 7.0

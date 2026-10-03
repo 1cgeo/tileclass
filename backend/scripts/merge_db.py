@@ -11,6 +11,8 @@ Políticas (confirmadas):
   - Não mexe em rate_limit / token_blacklist / sqlite_sequence (transientes).
 
 Backup automático do primário antes de escrever. Suporta --dry-run.
+Após o commit, limpa o cache do overlay (mapa admin) dos projetos que
+receberam tiles — senão áreas já cacheadas como vazias seguem vazias.
 
 Uso:
   python -m backend.scripts.merge_db --primary backend/tileclass.db \\
@@ -284,13 +286,31 @@ def main() -> None:
                 pri.close()
         else:
             with transaction(path=args.primary) as pri:
-                _run(pri, sec)
+                affected = _run(pri, sec)
             print("[commit] merge aplicado")
+            _clear_overlay_cache(affected)
     finally:
         sec.close()
 
 
-def _run(pri: sqlite3.Connection, sec: sqlite3.Connection) -> None:
+def _clear_overlay_cache(project_ids: set[int]) -> None:
+    """Drop the admin-map overlay cache of every project that received tiles.
+    Without this, areas the map had cached as empty (NULL rows) stay empty
+    even though merged classified tiles now cover them. Best-effort: the merge
+    is already committed, a cache failure must not look like a merge failure."""
+    if not project_ids:
+        return
+    try:
+        from backend import mask_tile_service
+        n = sum(mask_tile_service.clear_cache_for_project(pid) for pid in sorted(project_ids))
+        print(f"[overlay] cache limpo para projetos {sorted(project_ids)} ({n} tiles)")
+    except Exception as e:  # noqa: BLE001
+        print(f"[overlay] aviso: falha ao limpar cache do overlay: {e}")
+
+
+def _run(pri: sqlite3.Connection, sec: sqlite3.Connection) -> set[int]:
+    """Run the merge inside the caller's transaction. Returns the primary
+    project ids that received new tiles (their overlay cache is stale)."""
     user_map, u_reused, u_new = build_user_map(pri, sec)
     print(f"[users] {u_new} novos, {u_reused} reusados (username ja existia)")
 
@@ -303,6 +323,16 @@ def _run(pri: sqlite3.Connection, sec: sqlite3.Connection) -> None:
 
     log_new, log_orphan = migrate_action_log(pri, sec, user_map, tile_map)
     print(f"[action_log] {log_new} migrados, {log_orphan} descartados (tile skipado ou user orfao)")
+
+    new_ids = list(tile_map.values())
+    affected: set[int] = set()
+    for i in range(0, len(new_ids), 500):  # stay under SQLite's variable limit
+        chunk = new_ids[i:i + 500]
+        affected.update(r[0] for r in pri.execute(
+            f"SELECT DISTINCT project_id FROM tiles WHERE id IN ({','.join('?' * len(chunk))})",
+            chunk,
+        ))
+    return affected
 
 
 if __name__ == "__main__":

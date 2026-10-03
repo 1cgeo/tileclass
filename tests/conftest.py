@@ -51,6 +51,10 @@ def app_env(monkeypatch, tmp_path):
     monkeypatch.setattr(mtsmod, "get_config", patched, raising=True)
     # admin_service, tile_service import config inside functions, so patching config_mod is enough
     monkeypatch.setattr(dbmod, "_DB_PATH", None, raising=True)
+    # Async export archives go to a per-test dir, never the dev server's
+    # %TEMP%/tileclass_exports (job ids restart at 1 per test DB → overwrites).
+    import backend.export_service as expmod
+    monkeypatch.setattr(expmod, "EXPORTS_DIR", tmp_path / "exports", raising=True)
     mtsmod.reset_cache_path()
     # Each test runs against a brand-new SQLite file but the project cache
     # and mbtiles reader pool live at module scope; flush them so a previous

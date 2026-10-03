@@ -992,9 +992,9 @@ async function renderTileInfo(targetBody, tileId, reload) {
         <div class="loading-text"><span class="loading"></span> Carregando tile...</div>
         <div class="viewer-skeleton"></div>`;
     try {
-        // Tile first so we can decide whether to fetch the raster mask: vector
-        // / classification / detection don't have a per-pixel PNG and the
-        // /image endpoint isn't meant for them.
+        // Tile first so we can decide whether to fetch the raster mask:
+        // classification doesn't have a per-pixel PNG and the /image endpoint
+        // isn't meant for it.
         const t = await apiGet(`/api/tiles/${tileId}`);
         const kind = projectsById[t.project_id]?.kind || "raster";
         // The mask exists only for raster projects, and only after the operator
@@ -1002,9 +1002,19 @@ async function renderTileInfo(targetBody, tileId, reload) {
         // nothing to toggle in those states.
         const hasMask = kind === "raster"
             && t.status !== "pending" && t.status !== "problem";
-        const [history, blob] = await Promise.all([
+        // Classification: the body is a single class id (null/204 when the
+        // tile was never submitted). Class names live on the project detail —
+        // only fetched when the palette isn't cached for this project yet.
+        const isClassification = kind === "classification";
+        const [history, blob, clsBody, projDetail] = await Promise.all([
             apiGet(`/api/tiles/${tileId}/history`),
             hasMask ? apiGetBlob(`/api/tiles/${tileId}/image`) : Promise.resolve(null),
+            isClassification
+                ? apiGet(`/api/tiles/${tileId}/classification`).catch(() => null)
+                : Promise.resolve(null),
+            isClassification && !projectsById[t.project_id]?.classes
+                ? apiGet(`/api/projects/${t.project_id}`).catch(() => null)
+                : Promise.resolve(null),
         ]);
         const img = blob ? await blobToImage(blob) : null;
         targetBody.innerHTML = "";
@@ -1030,6 +1040,10 @@ async function renderTileInfo(targetBody, tileId, reload) {
             statusLine.append(b);
         }
         meta.appendChild(statusLine);
+        if (isClassification) {
+            const projClasses = projectsById[t.project_id]?.classes || projDetail?.classes || [];
+            meta.appendChild(classificationLine(clsBody?.class_id ?? null, projClasses));
+        }
         const viewerActions = document.createElement("div");
         viewerActions.className = "viewer-actions";
         if (t.status === "pending" || t.status === "classified") {
@@ -1079,7 +1093,7 @@ async function renderTileInfo(targetBody, tileId, reload) {
             targetBody.appendChild(h);
         }
         // Mask toggle only appears for raster tiles with painted content —
-        // vector/classification/detection have no per-pixel mask to hide, and
+        // classification has no per-pixel mask to hide, and
         // `pending`/`problem` raster tiles have nothing painted.
         if (hasMask) {
             const stackTools = document.createElement("div");
@@ -1708,8 +1722,8 @@ function applyClassOverlayState(on) {
     renderClassLegend(on);
     // Polygons fade — but don't disappear — when the overlay is on so the
     // classification colors come through while the status cue stays visible
-    // (matters for vector/detection tiles that render transparent when they
-    // have no features yet). visibility=none would also drop the layer from
+    // (matters for tiles that render transparent while they have no
+    // classification yet). visibility=none would also drop the layer from
     // queryRenderedFeatures, breaking rectangle-select.
     if (mapView && mapView.getLayer("tiles-fill")) {
         mapView.setPaintProperty("tiles-fill", "fill-opacity", on ? 0.15 : 0.55);
@@ -2378,11 +2392,30 @@ async function toggleActive(userId, active) {
 }
 
 
+// "Classe: <swatch> <nome>" line for the tile viewer of classification
+// projects. textContent only — class names are admin-entered data.
+function classificationLine(classId, projClasses) {
+    const p = document.createElement("p");
+    const label = document.createElement("b");
+    label.textContent = "Classe: ";
+    p.appendChild(label);
+    if (classId == null) {
+        p.append(document.createTextNode("— (ainda não classificado)"));
+        return p;
+    }
+    const cls = projClasses.find(c => c.id === classId);
+    const sw = document.createElement("span");
+    sw.className = "class-swatch-inline";
+    sw.style.background = cls?.color || "var(--border-strong)";
+    p.append(sw, document.createTextNode(cls ? cls.name : `#${classId}`));
+    return p;
+}
+
 // ---------- Maintenance ----------
 // Operational view of the on-disk overlay cache. Domain config (layers,
 // palette, members) lives in /api/projects/* and is edited on the Projetos
 // tab — never duplicate it here. Heavier DB chores (recompute counts, verify,
-// backup) are CLI-only and documented in docs/funcionalidades.md.
+// backup) are CLI-only (backend/scripts/).
 
 async function renderMaintenance(root) {
     root.innerHTML = `<div class="loading-text"><span class="loading"></span> Carregando…</div>`;

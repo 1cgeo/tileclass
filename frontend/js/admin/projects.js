@@ -20,11 +20,8 @@ const LAYER_FIELDS = [
 // KIND_LABELS comes from utils.js — shared with editor and dashboard.
 const KIND_HINTS = {
     raster: "Máscara per-pixel (1 byte por pixel).",
-    vector: "Features vetoriais (LineStrings) com atributos por feature.",
     classification: "Uma classe por tile inteiro.",
-    detection: "Caixas (bounding boxes) com classe por caixa.",
 };
-const ATTR_TYPES = ["text", "number", "enum", "boolean"];
 
 // View state (kept across renders so filters/sort/selection survive when the
 // admin leaves the tab and comes back).
@@ -121,9 +118,7 @@ function _drawKindFilters() {
     const opts = [
         ["all", "Todos"],
         ["raster", KIND_LABELS.raster],
-        ["vector", KIND_LABELS.vector],
         ["classification", KIND_LABELS.classification],
-        ["detection", KIND_LABELS.detection],
     ];
     for (const [value, label] of opts) {
         const btn = document.createElement("button");
@@ -326,7 +321,7 @@ async function _renderDetailView(root, projectId) {
     root.innerHTML = "";
     root.appendChild(_renderBackBar(proj));
     root.appendChild(_renderOverviewSection(proj));
-    root.appendChild(_renderClassesOrAttributesSection(proj));
+    root.appendChild(_renderClassesSection(proj));
     root.appendChild(_renderMembersSection(proj, members));
     root.appendChild(_renderExportSection(proj));
 }
@@ -438,31 +433,26 @@ function _metaItem(label, value) {
     return item;
 }
 
-function _renderClassesOrAttributesSection(proj) {
+function _renderClassesSection(proj) {
     const sec = document.createElement("section");
     sec.className = "project-section";
     const h = document.createElement("h4");
-    if (proj.kind === "vector") {
-        h.append(_titleText("Atributos"),
-                 _action("Editar atributos", () => openEditAttributesModal(proj), "primary"));
-    } else {
-        // Raster mask bytes encode class ids — once tiles exist, any class
-        // edit (rename/recolor/remove) risks orphaning painted pixels.
-        // Backend already blocks removal, but we lock the whole editor for
-        // raster to keep the UX coherent: "if it's locked, don't tempt the
-        // admin". Classification/detection still allow rename/recolor.
-        const classesLocked = proj.kind === "raster" && proj.tile_geometry_locked;
-        const btn = _action(
-            "Editar classes",
-            () => openEditClassesModal(proj),
-            "primary",
-        );
-        if (classesLocked) {
-            btn.disabled = true;
-            btn.title = "Projetos de segmentação não permitem editar classes depois do primeiro tile — os bytes da máscara guardam o id da classe e mudar quebra dados existentes.";
-        }
-        h.append(_titleText("Classes"), btn);
+    // Raster mask bytes encode class ids — once tiles exist, any class
+    // edit (rename/recolor/remove) risks orphaning painted pixels.
+    // Backend already blocks removal, but we lock the whole editor for
+    // raster to keep the UX coherent: "if it's locked, don't tempt the
+    // admin". Classification still allows rename/recolor.
+    const classesLocked = proj.kind === "raster" && proj.tile_geometry_locked;
+    const btn = _action(
+        "Editar classes",
+        () => openEditClassesModal(proj),
+        "primary",
+    );
+    if (classesLocked) {
+        btn.disabled = true;
+        btn.title = "Projetos de segmentação não permitem editar classes depois do primeiro tile — os bytes da máscara guardam o id da classe e mudar quebra dados existentes.";
     }
+    h.append(_titleText("Classes"), btn);
     sec.appendChild(h);
     if (proj.kind === "raster" && proj.tile_geometry_locked) {
         const p = document.createElement("p");
@@ -470,9 +460,7 @@ function _renderClassesOrAttributesSection(proj) {
         p.textContent = "Classes estão travadas porque o projeto já possui tiles. Para mudar a paleta, clone o projeto.";
         sec.appendChild(p);
     }
-    sec.appendChild(proj.kind === "vector"
-        ? _renderAttributesReadonly(proj.attributes || [])
-        : _renderClassesReadonly(proj.classes || []));
+    sec.appendChild(_renderClassesReadonly(proj.classes || []));
     return sec;
 }
 
@@ -502,28 +490,6 @@ function _renderClassesReadonly(classes) {
         const code = document.createElement("code"); code.textContent = c.color;
         colorTd.append(swatch, code);
         tr.append(idTd, nameTd, colorTd);
-        tbody.appendChild(tr);
-    }
-    table.appendChild(tbody);
-    return table;
-}
-
-function _renderAttributesReadonly(attrs) {
-    if (!attrs.length) return _emptyP("Nenhum atributo cadastrado.");
-    const table = document.createElement("table");
-    table.className = "admin-table";
-    const thead = document.createElement("thead");
-    thead.innerHTML = "<tr><th>Chave</th><th>Label</th><th>Tipo</th><th>Obrigatório</th><th>Opções</th></tr>";
-    table.appendChild(thead);
-    const tbody = document.createElement("tbody");
-    for (const a of attrs) {
-        const tr = document.createElement("tr");
-        for (const v of [a.key, a.label, a.type, a.required ? "sim" : "não",
-                         (a.options || []).join(", ")]) {
-            const td = document.createElement("td");
-            td.textContent = v;
-            tr.appendChild(td);
-        }
         tbody.appendChild(tr);
     }
     table.appendChild(tbody);
@@ -604,12 +570,35 @@ function _renderExportSection(proj) {
         o.value = v; o.textContent = label;
         select.appendChild(o);
     }
+    bar.append(select);
+    // Raster only: the EDGV remap LUT is meaningful only for the legacy
+    // 6-class palette (ids 1..6). "auto" lets the backend decide per project.
+    let remapSelect = null;
+    if (proj.kind !== "classification") {
+        const remapLabel = document.createElement("label");
+        remapLabel.className = "muted";
+        remapLabel.htmlFor = "export-remap";
+        remapLabel.textContent = "Remapeamento de classes";
+        remapSelect = document.createElement("select");
+        remapSelect.id = "export-remap";
+        remapSelect.title = "Automático: aplica o remap EDGV só quando a paleta do projeto é exatamente as classes 1..6";
+        for (const [v, label] of [
+            ["auto", "Automático (padrão)"],
+            ["edgv", "EDGV"],
+            ["raw", "IDs originais"],
+        ]) {
+            const o = document.createElement("option");
+            o.value = v; o.textContent = label;
+            remapSelect.appendChild(o);
+        }
+        bar.append(remapLabel, remapSelect);
+    }
     const btn = document.createElement("button");
     btn.id = "btn-export";
     btn.className = "primary";
     btn.textContent = "Gerar export (ZIP)";
-    btn.onclick = () => runExportJob(proj.id, select.value, btn);
-    bar.append(select, btn);
+    btn.onclick = () => runExportJob(proj.id, select.value, remapSelect ? remapSelect.value : null, btn);
+    bar.append(btn);
     sec.appendChild(bar);
     const line = document.createElement("p");
     line.className = "muted";
@@ -619,13 +608,11 @@ function _renderExportSection(proj) {
 }
 
 function exportFormatLabel(kind) {
-    if (kind === "vector") return "GeoJSON (.geojson) + manifest.csv";
     if (kind === "classification") return "CSV (classifications.csv)";
-    if (kind === "detection") return "GeoJSON de caixas (.geojson) + manifest.csv";
-    return "GeoTIFF (.tif, EDGV) + manifest.csv";
+    return "GeoTIFF (.tif) + manifest.csv";
 }
 
-// ---- Modais (create / edit / clone / members / classes / attrs) -----------
+// ---- Modais (create / edit / clone / members / classes) -------------------
 
 async function openCreateProjectModal() {
     const result = await openModal({
@@ -710,14 +697,6 @@ function _renderProjectFormBody(host, proj) {
                     <span><input type="checkbox" id="pf-mask-required"
                                  ${proj?.mask_complete_required !== false ? "checked" : ""}> Exigir máscara completa</span>
                 </label>
-                <label class="modal-form-field hidden" id="pf-topo-row">
-                    <span><input type="checkbox" id="pf-topology-required"
-                                 ${proj?.topology_required ? "checked" : ""}> Validar topologia (grafo de drenagem)</span>
-                </label>
-                <label class="modal-form-field hidden" id="pf-box-row">
-                    <span><input type="checkbox" id="pf-box-required"
-                                 ${proj?.box_required ? "checked" : ""}> Exigir ≥1 caixa para submeter</span>
-                </label>
             </fieldset>
 
             <fieldset class="modal-form-fieldset">
@@ -760,15 +739,6 @@ function _renderProjectFormBody(host, proj) {
                         : "Adicione no mínimo 1 classe."}
                 </span>
             </fieldset>
-            <fieldset class="modal-form-fieldset hidden" id="pf-attrs-block">
-                <legend>Atributos iniciais</legend>
-                <div id="pf-attrs-editor"></div>
-                <span class="modal-form-help">
-                    ${isEdit
-                        ? "Use \"Editar atributos\" no painel para alterar depois."
-                        : "Adicione no mínimo 1 atributo."}
-                </span>
-            </fieldset>
         </div>
     `;
     const kindSel = host.querySelector("#pf-kind");
@@ -776,17 +746,7 @@ function _renderProjectFormBody(host, proj) {
         const kind = kindSel.value;
         const hint = host.querySelector("#pf-kind-hint");
         if (hint) hint.textContent = KIND_HINTS[kind] || "";
-        const isVector = kind === "vector";
-        const isClassification = kind === "classification";
-        const isDetection = kind === "detection";
-        host.querySelector("#pf-mask-row").classList.toggle(
-            "hidden", isVector || isClassification || isDetection);
-        host.querySelector("#pf-topo-row").classList.toggle("hidden", !isVector);
-        host.querySelector("#pf-box-row").classList.toggle("hidden", !isDetection);
-        if (!isEdit) {
-            host.querySelector("#pf-classes-block").classList.toggle("hidden", isVector);
-            host.querySelector("#pf-attrs-block").classList.toggle("hidden", !isVector);
-        }
+        host.querySelector("#pf-flags").classList.toggle("hidden", kind !== "raster");
     };
     kindSel.onchange = refreshKindUI;
     refreshKindUI();
@@ -810,8 +770,6 @@ function _renderProjectFormBody(host, proj) {
     if (!isEdit) {
         _renderClassesEditor(host.querySelector("#pf-classes-editor"),
                              [{ id: 1, name: "classe_1", color: "#377eb8" }]);
-        _renderAttributesEditor(host.querySelector("#pf-attrs-editor"),
-                                [{ key: "tipo", label: "Tipo", type: "text", required: false, options: [] }]);
     }
 }
 
@@ -843,14 +801,6 @@ function _readProjectFormBody(host, proj) {
         const mc = host.querySelector("#pf-mask-required");
         if (mc) body.mask_complete_required = mc.checked;
     }
-    if (kind === "vector") {
-        const tr = host.querySelector("#pf-topology-required");
-        if (tr) body.topology_required = tr.checked;
-    }
-    if (kind === "detection") {
-        const br = host.querySelector("#pf-box-required");
-        if (br) body.box_required = br.checked;
-    }
     for (const f of LAYER_FIELDS) {
         const el = host.querySelector(`[data-layer="${f.key}"]`);
         const v = el ? el.value.trim() : "";
@@ -864,18 +814,10 @@ function _readProjectFormBody(host, proj) {
         }
     }
     if (!isEdit) {
-        if (kind === "vector") {
-            body.attributes = _readAttributesEditor(host.querySelector("#pf-attrs-editor"));
-            if (!body.attributes.length) {
-                showToast("Adicione pelo menos 1 atributo.", "error");
-                return null;
-            }
-        } else {
-            body.classes = _readClassesEditor(host.querySelector("#pf-classes-editor"));
-            if (!body.classes.length) {
-                showToast("Adicione pelo menos 1 classe.", "error");
-                return null;
-            }
+        body.classes = _readClassesEditor(host.querySelector("#pf-classes-editor"));
+        if (!body.classes.length) {
+            showToast("Adicione pelo menos 1 classe.", "error");
+            return null;
         }
     }
     return body;
@@ -970,25 +912,6 @@ async function openEditClassesModal(proj) {
     }
 }
 
-async function openEditAttributesModal(proj) {
-    const result = await openModal({
-        title: `Atributos — ${proj.name}`,
-        size: "lg",
-        submitLabel: "Salvar atributos",
-        render: (host) => _renderAttributesEditor(host, proj.attributes || []),
-        onSubmit: (host) => ({ attributes: _readAttributesEditor(host) }),
-    });
-    if (!result.confirmed) return;
-    try {
-        await apiPutJson(`/api/admin/projects/${proj.id}/attributes`, result.payload);
-        showToast("Atributos salvos.", "success");
-        await refreshProjectList();
-        await renderProjects(document.getElementById("admin-content"));
-    } catch (e) {
-        showToast(`Falha: ${e.message}`, "error", 6000);
-    }
-}
-
 function _renderClassesEditor(host, initial) {
     host.innerHTML = `
         <table class="admin-table editor-table">
@@ -1031,59 +954,6 @@ function _readClassesEditor(host) {
         const name = r.querySelector('[data-cf="name"]').value.trim();
         const color = r.querySelector('[data-cf="color"]').value;
         if (Number.isFinite(id) && name) out.push({ id, name, color });
-    }
-    return out;
-}
-
-function _renderAttributesEditor(host, initial) {
-    host.innerHTML = `
-        <table class="admin-table editor-table">
-            <thead><tr>
-                <th>Chave</th><th>Label</th><th style="width:8em">Tipo</th><th style="width:5em">Obrig.</th>
-                <th>Opções (enum, vírgula)</th><th style="width:7em"></th>
-            </tr></thead>
-            <tbody></tbody>
-        </table>
-        <button type="button" data-act="add-attr" class="add-row-btn">+ Adicionar atributo</button>
-    `;
-    const tbody = host.querySelector("tbody");
-    const addRow = (a) => {
-        const tr = document.createElement("tr");
-        tr.innerHTML = `
-            <td><input type="text" data-af="key" value="${escapeHtml(a.key || "")}" placeholder="snake_case"></td>
-            <td><input type="text" data-af="label" value="${escapeHtml(a.label || "")}"></td>
-            <td>
-                <select data-af="type">
-                    ${ATTR_TYPES.map(t => `<option value="${t}" ${a.type === t ? "selected" : ""}>${t}</option>`).join("")}
-                </select>
-            </td>
-            <td><input type="checkbox" data-af="required" ${a.required ? "checked" : ""}></td>
-            <td><input type="text" data-af="options"
-                       value="${escapeHtml((a.options || []).join(","))}"
-                       placeholder="opc1,opc2 (enum)"></td>
-            <td><button type="button" class="danger" data-act="remove">Remover</button></td>
-        `;
-        tr.querySelector('[data-act="remove"]').onclick = () => tr.remove();
-        tbody.appendChild(tr);
-    };
-    for (const a of initial) addRow(a);
-    host.querySelector('[data-act="add-attr"]').onclick = () =>
-        addRow({ key: "", label: "", type: "text", required: false, options: [] });
-}
-
-function _readAttributesEditor(host) {
-    const out = [];
-    for (const r of host.querySelectorAll("tbody tr")) {
-        const key = r.querySelector('[data-af="key"]').value.trim();
-        const label = r.querySelector('[data-af="label"]').value.trim();
-        const type = r.querySelector('[data-af="type"]').value;
-        const required = r.querySelector('[data-af="required"]').checked;
-        const optStr = r.querySelector('[data-af="options"]').value.trim();
-        const options = optStr ? optStr.split(",").map(s => s.trim()).filter(Boolean) : null;
-        if (!key || !label) continue;
-        const a = { key, label, type, required };
-        if (options) a.options = options;
-        out.push(a);
     }
     return out;
 }
@@ -1140,15 +1010,17 @@ async function deleteProject(projectId, projectName) {
 
 // ---- Export job -----------------------------------------------------------
 
-async function runExportJob(projectId, status, btn) {
+async function runExportJob(projectId, status, remap, btn) {
     const line = document.getElementById("export-status-line");
     const prev = btn.textContent;
     btn.disabled = true;
     btn.textContent = "Gerando...";
     const setLine = (t) => { if (line) line.textContent = t; };
     try {
+        const qs = new URLSearchParams({ status });
+        if (remap) qs.set("remap", remap);
         const job = await apiPostJson(
-            `/api/admin/projects/${projectId}/export-jobs?status=${status}`, {});
+            `/api/admin/projects/${projectId}/export-jobs?${qs}`, {});
         setLine("Export em andamento...");
         const done = await _pollExportJob(job.id, setLine);
         if (done.state === "error") throw new Error(done.error || "falha no processamento");

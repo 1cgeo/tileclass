@@ -8,7 +8,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.gzip import GZipMiddleware
 
-from . import mbtiles_service
+from . import export_service, mbtiles_service
 from .database import init_db
 from .routers import admin as admin_router
 from .routers import auth as auth_router
@@ -45,6 +45,9 @@ FRONTEND_DIR = FsPath(__file__).parent.parent / "frontend"
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    # Export worker threads die with the process; jobs they left behind would
+    # poll forever. Fail them so the admin sees a clear message.
+    export_service.fail_interrupted_jobs()
     _prewarm_primary_readers()
     try:
         yield

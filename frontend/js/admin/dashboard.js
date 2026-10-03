@@ -2,9 +2,9 @@
 //  - Generic: totals, completion %, ritmo/ETA, médias, per-operator, daily.
 //    These apply to every project kind so they always render.
 //  - Kind-specific: rendered only when a single project is selected. Each kind
-//    has its own "Por classe" / "Por atributo" breakdown sourced from the
-//    matching distribution endpoint. Cross-project view skips it — palettes
-//    and units (pixels vs features vs boxes) don't share a denominator.
+//    has its own "Por classe" breakdown sourced from the matching
+//    distribution endpoint. Cross-project view skips it — palettes and units
+//    (pixels vs tiles) don't share a denominator.
 import { apiGet } from "../api.js";
 import { withProjectParam, KIND_LABELS, kindLabel } from "../utils.js";
 
@@ -28,19 +28,13 @@ const _KIND_BREAKDOWN = {
         sectionTitle: "Distribuição por classe",
         valueSuffix: "",
     },
-    detection: {
-        endpoint: "/api/admin/detection-distribution",
-        field: "count",
-        sectionTitle: "Distribuição por classe",
-        valueSuffix: "",
-    },
 };
 
 // `_KIND_ORDER` controls the rendering order of the "by-kind" cards
 // (lifecycle: most common raster first, niche kinds last). Labels come
 // from utils.js (`KIND_LABELS` / `kindLabel`) so editor, dashboard, and
 // projects stay in sync.
-const _KIND_ORDER = ["raster", "vector", "classification", "detection"];
+const _KIND_ORDER = ["raster", "classification"];
 
 export async function renderDashboard(root, {
     projectId = null, projectsById = {}, onSelectProject = null,
@@ -77,7 +71,7 @@ export async function renderDashboard(root, {
     // Cross-project warning suffix for metrics that average across projects
     // with different kinds/scales. Shown as a title tooltip on the value —
     // the number is still computed correctly, it's just that "average ETA
-    // across raster + classification + vector" is rarely what the admin
+    // across raster + classification" is rarely what the admin
     // really wants to know.
     const aggregatedTooltip = projectId == null
         ? "Métrica agregada de todos os projetos — pode misturar perfis diferentes (kinds, velocidades). Filtre um projeto na barra superior para ver o número real."
@@ -135,9 +129,7 @@ export async function renderDashboard(root, {
     // a single project is picked — cross-project mixes incompatible palettes.
     if (projectId != null) {
         const kind = d.project_kind || projectsById[projectId]?.kind;
-        if (kind === "vector") {
-            await renderVectorBreakdown(root, projectId);
-        } else if (_KIND_BREAKDOWN[kind]) {
+        if (_KIND_BREAKDOWN[kind]) {
             await renderClassBreakdown(root, kind, projectId);
         }
     }
@@ -256,7 +248,7 @@ function statCard(label, value, { tooltip = "" } = {}) {
 }
 
 // One card per class, with a color swatch on the left edge. Used for raster
-// (pixels), classification (tiles), and detection (boxes) breakdowns.
+// (pixels) and classification (tiles) breakdowns.
 function classStatCard(name, color, count, pct, valueSuffix = "") {
     const card = document.createElement("div");
     card.className = "stat-card stat-card-class";
@@ -430,33 +422,4 @@ async function renderClassBreakdown(root, kind, projectId) {
         );
     }
     root.appendChild(grid);
-}
-
-async function renderVectorBreakdown(root, projectId) {
-    let items = [];
-    try { items = await apiGet(withProjectParam("/api/admin/feature-distribution", projectId)); }
-    catch { return; }
-    if (!items.length) return;
-    // Group by attribute_key — backend already orders within each key.
-    const groups = new Map();
-    for (const e of items) {
-        if (!groups.has(e.attribute_key)) groups.set(e.attribute_key, []);
-        groups.get(e.attribute_key).push(e);
-    }
-    const top = document.createElement("h3");
-    top.textContent = "Distribuição por atributo";
-    top.style.marginTop = "16px";
-    root.appendChild(top);
-    for (const [key, entries] of groups) {
-        const sub = document.createElement("h4");
-        sub.className = "dashboard-subhead";
-        sub.textContent = key;
-        root.appendChild(sub);
-        const grid = document.createElement("div");
-        grid.className = "stats-grid";
-        for (const e of entries) {
-            grid.appendChild(classStatCard(e.value, null, e.count, e.pct));
-        }
-        root.appendChild(grid);
-    }
 }

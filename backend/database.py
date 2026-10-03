@@ -60,17 +60,15 @@ CREATE TABLE IF NOT EXISTS projects (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT UNIQUE NOT NULL,
     description TEXT,
-    -- 'raster' (pixel-mask flow), 'vector' (GeoJSON LineStrings),
-    -- 'classification' (single class_id per tile), or 'detection' (GeoJSON
-    -- axis-aligned bounding boxes, one class per box). Immutable after
-    -- creation: changing kind would orphan every tile body.
+    -- 'raster' (pixel-mask flow) or 'classification' (single class_id per
+    -- tile). Immutable after creation: changing kind would orphan every tile
+    -- body. 'vector'/'detection' are retired kinds kept in the CHECK only so
+    -- legacy DBs stay valid; project_service.PROJECT_KINDS gates creation.
     kind TEXT NOT NULL DEFAULT 'raster'
         CHECK (kind IN ('raster','vector','classification','detection')),
-    -- Vector projects only: when 1, submits run validate_topology
-    -- (each LineString has direction; endpoints snap; no cycles).
+    -- Legacy (retired vector/detection kinds). Unused; kept so the
+    -- migration chain and merge_db still copy old rows verbatim.
     topology_required INTEGER NOT NULL DEFAULT 0,
-    -- Detection projects only: when 1, submit requires ≥1 box (a tile with
-    -- zero boxes is rejected). When 0, an empty tile is a valid negative.
     box_required INTEGER NOT NULL DEFAULT 0,
     -- Tile geometry. tile_meters = tile_px * meters_per_pixel; mask body
     -- size = tile_px². Locked once any tile exists (mask bytes assume the
@@ -97,9 +95,8 @@ CREATE TABLE IF NOT EXISTS project_classes (
     PRIMARY KEY (project_id, class_id)
 );
 
--- Vector projects' attribute schema (per-feature properties form). Mutually
--- exclusive with project_classes by kind: raster uses classes, vector uses
--- attributes.
+-- Legacy: attribute schema of the retired 'vector' kind. Unused by the app;
+-- kept so legacy DBs and merge_db keep working.
 CREATE TABLE IF NOT EXISTS project_attributes (
     project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     key TEXT NOT NULL,
@@ -143,14 +140,11 @@ CREATE TABLE IF NOT EXISTS tiles (
     -- class-distribution panel without re-decoding masks.
     class_counts TEXT,
     last_heartbeat_at TEXT,
-    -- Vector tiles only: GeoJSON FeatureCollection serialized as TEXT.
-    -- Mutually exclusive with data_png — the project's `kind` column
-    -- decides which body is populated.
+    -- Legacy body of the retired vector/detection kinds. Unused by the app.
     data_geojson TEXT,
-    -- Cached number of features in data_geojson; null when never submitted.
     feature_count INTEGER,
     -- Classification tiles only: the single class id assigned to the tile.
-    -- Null on raster/vector tiles and on never-classified rows.
+    -- Null on raster tiles and on never-classified rows.
     data_class_id INTEGER
 );
 

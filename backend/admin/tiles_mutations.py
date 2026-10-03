@@ -24,6 +24,14 @@ def _empty_png(tile_px: int) -> bytes:
     return empty_mask_png(tile_px)
 
 
+def _dedupe(tile_ids: list[int]) -> list[int]:
+    """Drop repeated ids, preserving first-seen order. Every bulk mutation
+    runs this first: a duplicated id would apply the transition twice in one
+    transaction (e.g. block twice stores blocked_from='blocked', leaving the
+    tile permanently blocked) and inflate the reported `affected` count."""
+    return list(dict.fromkeys(tile_ids))
+
+
 def _tile_px_by_id(conn, tile_ids: list[int]) -> dict[int, int]:
     """Bulk-resolve tile_px for each tile in `tile_ids`. One SELECT joining
     tiles → project_service cache, instead of N round-trips inside the loop."""
@@ -44,23 +52,31 @@ def _tile_px_by_id(conn, tile_ids: list[int]) -> dict[int, int]:
 
 
 def reset_many(tile_ids: list[int], admin_id: int, reason: str | None = None) -> int:
+    """Wipe tiles back to pending. Atomic: an unknown id aborts the batch
+    with 404 (same contract as `block_many`), so the admin never sees a
+    success count for tiles that don't exist."""
+    tile_ids = _dedupe(tile_ids)
     if not tile_ids:
         return 0
     detail = _clean_reason(reason)
     with transaction("IMMEDIATE") as conn:
         px_by_id = _tile_px_by_id(conn, tile_ids)
         for tid in tile_ids:
-            empty = _empty_png(px_by_id.get(tid, 256))
+            if tid not in px_by_id:
+                raise HTTPException(404, f"tile {tid} not found")
+        for tid in tile_ids:
+            empty = _empty_png(px_by_id[tid])
             # class_counts cleared so the dashboard's class-distribution panel
             # stops reporting pixels of a mask that has been wiped.
-            # data_geojson cleared so a vector tile round-trips back to an
-            # empty FeatureCollection.
+            # blocked_from cleared: reset leaves the blocked branch, and a
+            # stale value would be restored by a later unblock.
             conn.execute(
-                """UPDATE tiles SET status='pending', data_png=?, data_geojson=NULL,
-                   feature_count=NULL, data_class_id=NULL, assigned_to=NULL,
+                """UPDATE tiles SET status='pending', data_png=?,
+                   data_class_id=NULL, assigned_to=NULL,
                    classified_by=NULL, reviewed_by=NULL, classified_at=NULL,
                    reviewed_at=NULL, problem_note=NULL, paused_at=NULL,
-                   class_counts=NULL, version=version+1 WHERE id=?""",
+                   blocked_from=NULL, class_counts=NULL,
+                   version=version+1 WHERE id=?""",
                 (empty, tid),
             )
             log_action(conn, admin_id, tid, "reset", detail)
@@ -78,6 +94,7 @@ def report_problem_many(tile_ids: list[int], admin_id: int, note: str) -> dict:
     Mirrors the operator-side report: wipes the mask and frees the slot.
     Accepts any current state — blocked tiles get their blocked_from cleared
     since the state machine leaves that branch."""
+    tile_ids = _dedupe(tile_ids)
     if not tile_ids:
         return {"affected": 0}
     note = (note or "").strip()
@@ -94,7 +111,7 @@ def report_problem_many(tile_ids: list[int], admin_id: int, note: str) -> dict:
             empty = _empty_png(px_by_id[tid])
             conn.execute(
                 """UPDATE tiles SET status='problem', problem_note=?, data_png=?,
-                   data_geojson=NULL, feature_count=NULL, data_class_id=NULL,
+                   data_class_id=NULL,
                    assigned_to=NULL, paused_at=NULL, blocked_from=NULL,
                    class_counts=NULL, version=version+1 WHERE id=?""",
                 (note, empty, tid),
@@ -107,6 +124,7 @@ def report_problem_many(tile_ids: list[int], admin_id: int, note: str) -> dict:
 
 def re_review_many(tile_ids: list[int], admin_id: int, strict: bool = False,
                     reason: str | None = None) -> int:
+    tile_ids = _dedupe(tile_ids)
     if not tile_ids:
         return 0
     detail = _clean_reason(reason)
@@ -145,8 +163,10 @@ def assign_many(tile_ids: list[int], user_id: int, admin_id: int,
     more work.
 
     Atomic: if any tile fails validation (wrong status, already assigned to
-    someone else, reviewer==classifier, etc.), nothing is written.
+    someone else, reviewer==classifier, assignee not a member of the tile's
+    project, etc.), nothing is written.
     """
+    tile_ids = _dedupe(tile_ids)
     if not tile_ids:
         return {"affected": 0, "ids": []}
     detail = _clean_reason(reason)
@@ -163,15 +183,24 @@ def assign_many(tile_ids: list[int], user_id: int, admin_id: int,
         # Review eligibility is per-project membership now, not a global flag.
         # Cache the lookup keyed by project_id so a mixed batch (different
         # projects) doesn't hit the DB N times.
-        review_eligibility_cache: dict[int, bool] = {}
-        def _can_review(project_id: int) -> bool:
-            if project_id not in review_eligibility_cache:
+        member_role_cache: dict[int, str | None] = {}
+        def _member_role(project_id: int) -> str | None:
+            if project_id not in member_role_cache:
                 m = conn.execute(
                     "SELECT role FROM project_members WHERE project_id=? AND user_id=?",
                     (project_id, user_id),
                 ).fetchone()
-                review_eligibility_cache[project_id] = bool(m) and m["role"] == "reviewer"
-            return review_eligibility_cache[project_id]
+                member_role_cache[project_id] = m["role"] if m else None
+            return member_role_cache[project_id]
+
+        def _can_review(project_id: int) -> bool:
+            return _member_role(project_id) == "reviewer"
+
+        # Classification work needs project membership — the same gate /next
+        # applies (`require_membership`: global admins pass). Without it the
+        # assignee would hold a tile from a project they can't even open.
+        def _can_classify(project_id: int) -> bool:
+            return user["role"] == "admin" or _member_role(project_id) is not None
 
         # Validate every tile up-front so a bad one doesn't half-assign the lot.
         plans: list[tuple[int, str, str]] = []  # (tile_id, new_status, assign_action)
@@ -182,6 +211,12 @@ def assign_many(tile_ids: list[int], user_id: int, admin_id: int,
             if not tile:
                 raise HTTPException(404, f"tile {tid} not found")
             status = tile["status"]
+            if status in ("pending", "classified") and not _can_classify(tile["project_id"]):
+                raise HTTPException(409, detail={
+                    "error": "not_project_member",
+                    "tile_id": tid,
+                    "message": f"Usuário não é membro do projeto do tile {tid}.",
+                })
             if status == "pending":
                 plans.append((tid, "in_progress", "assign_classify"))
             elif status == "classified":
@@ -202,10 +237,13 @@ def assign_many(tile_ids: list[int], user_id: int, admin_id: int,
 
         items = []
         for tid, new_status, action in plans:
+            # last_heartbeat_at=now: a classified tile still carries the
+            # classifier's old heartbeat; refreshing it keeps the stale-tile
+            # sweep from pausing the tile right after /next resumes it.
             conn.execute(
                 """UPDATE tiles SET status=?, assigned_to=?, paused_at=?,
-                   version=version+1 WHERE id=?""",
-                (new_status, user_id, now, tid),
+                   last_heartbeat_at=?, version=version+1 WHERE id=?""",
+                (new_status, user_id, now, now, tid),
             )
             # Log under the assignee so dashboard avg_classify/avg_review pairs
             # assign→classify correctly. We also immediately log `pause` so the
@@ -344,6 +382,7 @@ def unassign_many(tile_ids: list[int], admin_id: int, reason: str | None = None)
     assigned set (in_progress|in_review) aborts the batch — same contract as
     `block_many`/`assign_many`, so admins see one error and retry rather than
     a partial result they can't reason about. Mask data is preserved."""
+    tile_ids = _dedupe(tile_ids)
     if not tile_ids:
         return 0
     detail = _clean_reason(reason)
@@ -386,6 +425,7 @@ def block_many(tile_ids: list[int], admin_id: int, reason: str | None = None) ->
     Atomic: any tile failing the state gate aborts the whole batch, matching
     the behaviour of `assign_many` — admins see one error and retry rather
     than getting a partial result they can't reason about."""
+    tile_ids = _dedupe(tile_ids)
     if not tile_ids:
         return 0
     detail = _clean_reason(reason)
@@ -425,8 +465,10 @@ def block_many(tile_ids: list[int], admin_id: int, reason: str | None = None) ->
 
 def unblock_many(tile_ids: list[int], admin_id: int, reason: str | None = None) -> int:
     """Restore each tile's status from `blocked_from`. Reject anything not
-    currently blocked. `blocked_from` is guaranteed set by `block_many` so
-    we read it directly."""
+    currently blocked, and any blocked row whose `blocked_from` is missing or
+    invalid (legacy/corrupt data) — restoring NULL would violate
+    `status NOT NULL`; the admin can reset such a tile instead."""
+    tile_ids = _dedupe(tile_ids)
     if not tile_ids:
         return 0
     detail = _clean_reason(reason)
@@ -442,6 +484,13 @@ def unblock_many(tile_ids: list[int], admin_id: int, reason: str | None = None) 
                 raise HTTPException(404, f"tile {tid} not found")
             if found[tid]["status"] != "blocked":
                 raise HTTPException(409, f"tile {tid} is not blocked")
+            if found[tid]["blocked_from"] not in _BLOCKABLE_STATES:
+                raise HTTPException(409, detail={
+                    "error": "blocked_from_missing",
+                    "tile_id": tid,
+                    "message": (f"Tile {tid} não tem status de origem registrado; "
+                                "use reset para liberá-lo."),
+                })
         for tid in tile_ids:
             conn.execute(
                 """UPDATE tiles SET status=?, blocked_from=NULL,

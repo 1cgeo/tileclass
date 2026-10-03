@@ -4,7 +4,7 @@ import json
 from fastapi import HTTPException
 from .database import connect, transaction, log_action, now_iso
 from .mask_utils import encode_mask, decode_mask, empty_mask_png, validate_submission, validate_partial, class_counts
-from . import vector_utils, classify_utils, detection_utils
+from . import classify_utils
 from . import mask_tile_service, project_service
 
 
@@ -128,18 +128,26 @@ def get_resume_tile(user_id: int, project_id: int | None = None) -> dict | None:
         conn.close()
 
 
-def peek_next_tile(user_id: int, project_id: int) -> dict | None:
+def peek_next_tile(user_id: int, project_id: int,
+                   exclude_tile_id: int | None = None) -> dict | None:
     """Read-only look-ahead: returns the tile the user would get next from the
-    given project, without assigning. Pre-load helper for the editor."""
+    given project, without assigning. Pre-load helper for the editor.
+
+    `exclude_tile_id` is the tile the editor currently has open: without it
+    the resume branch returns that very tile (it is assigned to the user), so
+    the "next" preload would cache the open tile's stale mask instead of the
+    tile that /next serves after this one is submitted."""
+    exclude = exclude_tile_id if exclude_tile_id is not None else -1
     conn = connect()
     try:
         row = conn.execute(
             f"""{_TILE_SELECT}
                 WHERE tiles.assigned_to=? AND tiles.project_id=?
                   AND tiles.status IN ('in_progress','in_review')
+                  AND tiles.id != ?
                 {_RESUME_ORDER_BY}
                 LIMIT 1""",
-            (user_id, project_id, user_id),
+            (user_id, project_id, exclude, user_id),
         ).fetchone()
         if row:
             return _row_to_tile_dict(row)
@@ -355,8 +363,11 @@ def _auto_pause_stale(conn) -> int:
         return 0
     now = now_iso()
     for r in rows:
+        # No version bump: an auto-pause is timer bookkeeping, not a content
+        # change. Bumping would 409 the (still assigned) owner's next submit
+        # and make the editor drop its unsynced local backup on reload.
         conn.execute(
-            "UPDATE tiles SET paused_at=?, version=version+1 WHERE id=?",
+            "UPDATE tiles SET paused_at=? WHERE id=?",
             (now, r["id"]),
         )
         log_action(conn, r["assigned_to"], r["id"], "pause", "auto")
@@ -413,9 +424,14 @@ def get_next_tile(user_id: int, project_id: int) -> dict | None:
                     (row["id"], user_id),
                 ).fetchone()
                 if last_pause and last_pause["detail"] in ("queue", "auto"):
+                    # Refresh the heartbeat: the old one is stale (that is
+                    # why the tile was paused) and would make the very next
+                    # sweep re-pause the tile the user just got back. No
+                    # version bump — resuming doesn't change the mask.
                     conn.execute(
-                        "UPDATE tiles SET paused_at=NULL, version=version+1 WHERE id=?",
-                        (row["id"],),
+                        "UPDATE tiles SET paused_at=NULL, last_heartbeat_at=? "
+                        "WHERE id=?",
+                        (now_iso(), row["id"]),
                     )
                     log_action(conn, user_id, row["id"], "resume")
                     row = conn.execute(
@@ -478,8 +494,8 @@ def get_tile(tile_id: int) -> dict | None:
 
 
 def get_tile_image(tile_id: int) -> bytes | None:
-    """Return the raster mask body for a tile (PNG bytes); call sites that
-    work with vector tiles use `get_tile_geojson` instead."""
+    """Return the raster mask body for a tile (PNG bytes); classification
+    tiles use `get_tile_class_id` instead."""
     conn = connect()
     try:
         row = conn.execute(
@@ -507,21 +523,6 @@ def get_tile_class_id(tile_id: int) -> int | None:
     if not row:
         return None
     return row["data_class_id"]
-
-
-def get_tile_geojson(tile_id: int) -> str | None:
-    """Vector body. None when the tile has never been submitted; the empty
-    FeatureCollection serves as the editor's starting point in that case."""
-    conn = connect()
-    try:
-        row = conn.execute(
-            "SELECT data_geojson FROM tiles WHERE id=?", (tile_id,)
-        ).fetchone()
-    finally:
-        conn.close()
-    if not row:
-        return None
-    return row["data_geojson"] or vector_utils.empty_feature_collection()
 
 
 def project_for_tile(tile_id: int) -> dict:
@@ -555,7 +556,7 @@ def _lock_tile_for_user(conn, tile_id: int, user_id: int,
     never a 409 that would leak the tile's current version / a 'your progress
     was saved' message for a tile they never held."""
     row = conn.execute(
-        "SELECT status, assigned_to, version FROM tiles WHERE id=?", (tile_id,)
+        "SELECT status, assigned_to, version, paused_at FROM tiles WHERE id=?", (tile_id,)
     ).fetchone()
     if not row:
         raise HTTPException(404, "tile not found")
@@ -569,25 +570,29 @@ def _lock_tile_for_user(conn, tile_id: int, user_id: int,
     return row
 
 
+def _close_open_pause(conn, row, tile_id: int, user_id: int) -> None:
+    """Submitting a still-paused tile (e.g. auto-paused while the laptop
+    slept) implicitly resumes it. Log the `resume` so the dashboard's
+    pause→resume pairing subtracts the away time from the cycle duration."""
+    if row["paused_at"] is not None:
+        log_action(conn, user_id, tile_id, "resume")
+
+
 def submit_classification(tile_id: int, user_id: int, body: bytes,
                           expected_version: int | None = None,
                           *, proj: dict | None = None) -> dict:
-    """Dispatcher: raster expects raw 65536-byte mask; vector expects UTF-8
-    JSON FeatureCollection. The project's `kind` decides which path runs;
-    a Content-Type mismatch is caught earlier in the operator router.
+    """Dispatcher: raster expects the raw tile_px² mask; classification
+    expects a UTF-8 JSON `{"class_id": int}`. The project's `kind` decides
+    which path runs; a Content-Type mismatch is caught earlier in the
+    operator router.
 
     `proj` may be passed by callers that already resolved it (e.g. the
     operator router needs it to size the body) — saves a duplicate
     project_for_tile lookup on every submit."""
     if proj is None:
         proj = project_for_tile(tile_id)
-    kind = proj.get("kind")
-    if kind == "vector":
-        return _submit_vector(tile_id, user_id, body, proj, expected_version)
-    if kind == "classification":
+    if proj.get("kind") == "classification":
         return _submit_classification(tile_id, user_id, body, proj, expected_version)
-    if kind == "detection":
-        return _submit_detection(tile_id, user_id, body, proj, expected_version)
     return _submit_raster(tile_id, user_id, body, proj, expected_version)
 
 
@@ -627,6 +632,7 @@ def _submit_raster(tile_id: int, user_id: int, raw_mask: bytes,
                    class_counts=? WHERE id=?""",
                 (png, user_id, now_iso(), cc_json, tile_id),
             )
+            _close_open_pause(conn, row, tile_id, user_id)
             log_action(conn, user_id, tile_id, "classify")
         elif status == "in_review":
             conn.execute(
@@ -635,106 +641,13 @@ def _submit_raster(tile_id: int, user_id: int, raw_mask: bytes,
                    class_counts=? WHERE id=?""",
                 (png, user_id, now_iso(), cc_json, tile_id),
             )
+            _close_open_pause(conn, row, tile_id, user_id)
             log_action(conn, user_id, tile_id, "review")
         else:
             raise HTTPException(409, f"invalid state for submit: {status}")
     # Mask just changed and the new status is visible in the overlay
     # (classified or reviewed). Invalidate after commit so a failed submit
     # leaves the cache untouched.
-    mask_tile_service.safe_invalidate_tile(tile_id)
-    return {"ok": True}
-
-
-# Cap on the serialized FeatureCollection. ~1MB is generous given a tile is
-# 640m × 640m and the operator is hand-drawing — an operator hitting this
-# probably has a runaway editing bug.
-_MAX_VECTOR_BODY_BYTES = 1_000_000
-
-
-def _submit_vector(tile_id: int, user_id: int, body: bytes,
-                   proj: dict, expected_version: int | None) -> dict:
-    if len(body) > _MAX_VECTOR_BODY_BYTES:
-        raise HTTPException(413, detail={"error": "body_too_large"})
-    try:
-        text = body.decode("utf-8")
-    except UnicodeDecodeError:
-        raise HTTPException(400, detail={"error": "invalid_utf8"})
-    ok, payload = vector_utils.validate_submission(
-        text, proj.get("attributes") or [],
-        topology_required=bool(proj.get("topology_required")),
-    )
-    if not ok:
-        raise HTTPException(422, detail={"error": "invalid_features", **payload})
-    fcount = len(payload["doc"]["features"])
-
-    with transaction("IMMEDIATE") as conn:
-        row = _lock_tile_for_user(conn, tile_id, user_id, expected_version)
-        status = row["status"]
-        if status == "in_progress":
-            conn.execute(
-                """UPDATE tiles SET status='classified', data_geojson=?,
-                   feature_count=?, classified_by=?, classified_at=?,
-                   assigned_to=NULL, paused_at=NULL, version=version+1
-                   WHERE id=?""",
-                (text, fcount, user_id, now_iso(), tile_id),
-            )
-            log_action(conn, user_id, tile_id, "classify")
-        elif status == "in_review":
-            conn.execute(
-                """UPDATE tiles SET status='reviewed', data_geojson=?,
-                   feature_count=?, reviewed_by=?, reviewed_at=?,
-                   assigned_to=NULL, paused_at=NULL, version=version+1
-                   WHERE id=?""",
-                (text, fcount, user_id, now_iso(), tile_id),
-            )
-            log_action(conn, user_id, tile_id, "review")
-        else:
-            raise HTTPException(409, f"invalid state for submit: {status}")
-    mask_tile_service.safe_invalidate_tile(tile_id)
-    return {"ok": True}
-
-
-def _submit_detection(tile_id: int, user_id: int, body: bytes,
-                      proj: dict, expected_version: int | None) -> dict:
-    if len(body) > _MAX_VECTOR_BODY_BYTES:
-        raise HTTPException(413, detail={"error": "body_too_large"})
-    try:
-        text = body.decode("utf-8")
-    except UnicodeDecodeError:
-        raise HTTPException(400, detail={"error": "invalid_utf8"})
-    allowed = [c["id"] for c in proj["classes"]]
-    ok, payload = detection_utils.validate_submission(
-        text, allowed, box_required=bool(proj.get("box_required")),
-    )
-    if not ok:
-        raise HTTPException(422, detail={"error": "invalid_boxes", **payload})
-    doc = payload["doc"]
-    fcount = len(doc["features"])
-    cc_json = json.dumps(detection_utils.class_counts(doc), separators=(",", ":"))
-
-    with transaction("IMMEDIATE") as conn:
-        row = _lock_tile_for_user(conn, tile_id, user_id, expected_version)
-        status = row["status"]
-        if status == "in_progress":
-            conn.execute(
-                """UPDATE tiles SET status='classified', data_geojson=?,
-                   feature_count=?, class_counts=?, classified_by=?, classified_at=?,
-                   assigned_to=NULL, paused_at=NULL, version=version+1
-                   WHERE id=?""",
-                (text, fcount, cc_json, user_id, now_iso(), tile_id),
-            )
-            log_action(conn, user_id, tile_id, "classify")
-        elif status == "in_review":
-            conn.execute(
-                """UPDATE tiles SET status='reviewed', data_geojson=?,
-                   feature_count=?, class_counts=?, reviewed_by=?, reviewed_at=?,
-                   assigned_to=NULL, paused_at=NULL, version=version+1
-                   WHERE id=?""",
-                (text, fcount, cc_json, user_id, now_iso(), tile_id),
-            )
-            log_action(conn, user_id, tile_id, "review")
-        else:
-            raise HTTPException(409, f"invalid state for submit: {status}")
     mask_tile_service.safe_invalidate_tile(tile_id)
     return {"ok": True}
 
@@ -768,6 +681,7 @@ def _submit_classification(tile_id: int, user_id: int, body: bytes,
                    paused_at=NULL, version=version+1 WHERE id=?""",
                 (class_id, user_id, now_iso(), tile_id),
             )
+            _close_open_pause(conn, row, tile_id, user_id)
             log_action(conn, user_id, tile_id, "classify")
         elif status == "in_review":
             conn.execute(
@@ -776,6 +690,7 @@ def _submit_classification(tile_id: int, user_id: int, body: bytes,
                    paused_at=NULL, version=version+1 WHERE id=?""",
                 (class_id, user_id, now_iso(), tile_id),
             )
+            _close_open_pause(conn, row, tile_id, user_id)
             log_action(conn, user_id, tile_id, "review")
         else:
             raise HTTPException(409, f"invalid state for submit: {status}")
@@ -864,15 +779,22 @@ def report_problem(tile_id: int, user_id: int, note: str) -> dict:
             raise HTTPException(404, "tile not found")
         if row["assigned_to"] != user_id:
             raise HTTPException(403, "not assigned to you")
+        # Only a tile the operator is actively holding can be reported;
+        # anything else is a stale client acting on a finished tile.
+        if row["status"] not in ("in_progress", "in_review"):
+            raise HTTPException(
+                409, f"invalid state for report_problem: {row['status']}"
+            )
         proj = project_service.get_project(row["project_id"]) or {}
         tile_px = int(proj.get("tile_px", 256))
         # Wipe both bodies — kind-agnostic so a future kind switch on the
         # project wouldn't leak a stale body into a fresh classify cycle.
+        # version bump: any open editor/admin view holding the old version
+        # must get 409 tile_modified instead of writing over the report.
         conn.execute(
             """UPDATE tiles SET status='problem', problem_note=?, data_png=?,
                assigned_to=NULL, paused_at=NULL, class_counts=NULL,
-               data_geojson=NULL, feature_count=NULL,
-               data_class_id=NULL WHERE id=?""",
+               data_class_id=NULL, version=version+1 WHERE id=?""",
             (note, empty_mask_png(tile_px), tile_id),
         )
         log_action(conn, user_id, tile_id, "report_problem", note)
@@ -886,23 +808,17 @@ def pause_tile(tile_id: int, user_id: int, body: bytes,
                expected_version: int | None = None,
                *, proj: dict | None = None) -> dict:
     """Save partial body and freeze the timer (dashboard subtracts
-    pause→resume). Dispatches by project.kind: raster persists a PNG mask,
-    vector persists a (possibly partial / invalid-topology) FeatureCollection.
+    pause→resume). Only raster persists a (partial) PNG mask.
     `proj` may be passed pre-resolved by the router to skip a duplicate lookup."""
     if proj is None:
         proj = project_for_tile(tile_id)
-    kind = proj.get("kind")
-    if kind == "classification":
+    if proj.get("kind") == "classification":
         # Classification is a single-click submit — partial state has no
         # meaning, so pause is not supported.
         raise HTTPException(409, detail={
             "error": "pause_not_supported",
             "message": "Projetos de classification não suportam pause.",
         })
-    if kind == "vector":
-        return _pause_vector(tile_id, user_id, body, proj, expected_version)
-    if kind == "detection":
-        return _pause_detection(tile_id, user_id, body, proj, expected_version)
     return _pause_raster(tile_id, user_id, body, proj, expected_version)
 
 
@@ -911,12 +827,16 @@ def _pause_raster(tile_id: int, user_id: int, raw_mask: bytes,
     allowed = [c["id"] for c in proj["classes"]]
     tile_px = int(proj.get("tile_px", 256))
     try:
-        validate_partial(raw_mask, allowed_ids=allowed, tile_px=tile_px)
+        missing = validate_partial(raw_mask, allowed_ids=allowed, tile_px=tile_px)
     except ValueError as e:
         raise HTTPException(400, detail={"error": "invalid_mask", "message": str(e)})
     png = encode_mask(raw_mask, tile_px)
     if len(png) > 4 * tile_px * tile_px:
         raise HTTPException(413, detail={"error": "mask_too_large"})
+    # class_counts always mirrors the stored mask; leaving the previous
+    # cycle's counts would make the dashboard report pixels that no longer
+    # exist in data_png.
+    cc_json = json.dumps(class_counts(raw_mask), separators=(",", ":"))
 
     with transaction("IMMEDIATE") as conn:
         row = _lock_tile_for_user(
@@ -925,73 +845,21 @@ def _pause_raster(tile_id: int, user_id: int, raw_mask: bytes,
         )
         if row["status"] not in ("in_progress", "in_review"):
             raise HTTPException(409, f"cannot pause from state: {row['status']}")
+        # An in_review tile already holds the classifier's complete mask.
+        # Letting the reviewer park a partial one would overwrite it, and an
+        # admin unassign would then hand a 'classified' tile with holes back
+        # to the review queue. in_progress pauses stay permissive.
+        if (row["status"] == "in_review" and proj["mask_complete_required"]
+                and missing > 0):
+            raise HTTPException(422, detail={
+                "error": "unfilled_pixels",
+                "missing": missing,
+                "message": "Na revisão, só é possível pausar com a máscara completa.",
+            })
         conn.execute(
-            "UPDATE tiles SET data_png=?, paused_at=?, version=version+1 WHERE id=?",
-            (png, now_iso(), tile_id),
-        )
-        log_action(conn, user_id, tile_id, "pause")
-        row = conn.execute(f"{_TILE_SELECT} WHERE tiles.id=?", (tile_id,)).fetchone()
-    mask_tile_service.safe_invalidate_tile(tile_id)
-    return _row_to_tile_dict(row)
-
-
-def _pause_vector(tile_id: int, user_id: int, body: bytes,
-                  proj: dict, expected_version: int | None) -> dict:
-    """Pause for vector tiles only checks the body parses as GeoJSON.
-    Attribute / topology validation is deferred to submit because pause is
-    explicitly a "save my partial work" affordance — operators expect an
-    incomplete state to round-trip."""
-    if len(body) > _MAX_VECTOR_BODY_BYTES:
-        raise HTTPException(413, detail={"error": "body_too_large"})
-    try:
-        text = body.decode("utf-8")
-    except UnicodeDecodeError:
-        raise HTTPException(400, detail={"error": "invalid_utf8"})
-    try:
-        doc = vector_utils.parse_geojson(text)
-    except ValueError as e:
-        raise HTTPException(400, detail={"error": "invalid_geojson", "message": str(e)})
-    fcount = len(doc["features"])
-    with transaction("IMMEDIATE") as conn:
-        row = _lock_tile_for_user(conn, tile_id, user_id, expected_version)
-        if row["status"] not in ("in_progress", "in_review"):
-            raise HTTPException(409, f"cannot pause from state: {row['status']}")
-        conn.execute(
-            "UPDATE tiles SET data_geojson=?, feature_count=?, paused_at=?, "
+            "UPDATE tiles SET data_png=?, class_counts=?, paused_at=?, "
             "version=version+1 WHERE id=?",
-            (text, fcount, now_iso(), tile_id),
-        )
-        log_action(conn, user_id, tile_id, "pause")
-        row = conn.execute(f"{_TILE_SELECT} WHERE tiles.id=?", (tile_id,)).fetchone()
-    mask_tile_service.safe_invalidate_tile(tile_id)
-    return _row_to_tile_dict(row)
-
-
-def _pause_detection(tile_id: int, user_id: int, body: bytes,
-                     proj: dict, expected_version: int | None) -> dict:
-    """Pause for detection tiles only checks the body parses as a box
-    FeatureCollection (structural). class_id membership and the box_required
-    gate are deferred to submit — pause is a "save my partial work" affordance."""
-    if len(body) > _MAX_VECTOR_BODY_BYTES:
-        raise HTTPException(413, detail={"error": "body_too_large"})
-    try:
-        text = body.decode("utf-8")
-    except UnicodeDecodeError:
-        raise HTTPException(400, detail={"error": "invalid_utf8"})
-    try:
-        doc = detection_utils.parse_detection(text)
-    except ValueError as e:
-        raise HTTPException(400, detail={"error": "invalid_geojson", "message": str(e)})
-    fcount = len(doc["features"])
-    cc_json = json.dumps(detection_utils.class_counts(doc), separators=(",", ":"))
-    with transaction("IMMEDIATE") as conn:
-        row = _lock_tile_for_user(conn, tile_id, user_id, expected_version)
-        if row["status"] not in ("in_progress", "in_review"):
-            raise HTTPException(409, f"cannot pause from state: {row['status']}")
-        conn.execute(
-            "UPDATE tiles SET data_geojson=?, feature_count=?, class_counts=?, "
-            "paused_at=?, version=version+1 WHERE id=?",
-            (text, fcount, cc_json, now_iso(), tile_id),
+            (png, cc_json, now_iso(), tile_id),
         )
         log_action(conn, user_id, tile_id, "pause")
         row = conn.execute(f"{_TILE_SELECT} WHERE tiles.id=?", (tile_id,)).fetchone()
@@ -1013,9 +881,14 @@ def resume_tile(tile_id: int, user_id: int) -> dict:
             raise HTTPException(409, f"cannot resume from state: {row['status']}")
         if row["paused_at"] is None:
             raise HTTPException(409, "tile is not paused")
+        # Refresh the heartbeat on (re)activation: a tile paused for longer
+        # than the sweep timeout still carries its pre-pause timestamp, and
+        # any user's /next would immediately re-pause it. No version bump:
+        # the owner resuming doesn't change the mask, and keeping the version
+        # lets the editor's token and local backup stay valid.
         conn.execute(
-            "UPDATE tiles SET paused_at=NULL, version=version+1 WHERE id=?",
-            (tile_id,),
+            "UPDATE tiles SET paused_at=NULL, last_heartbeat_at=? WHERE id=?",
+            (now_iso(), tile_id),
         )
         log_action(conn, user_id, tile_id, "resume")
         row = conn.execute(f"{_TILE_SELECT} WHERE tiles.id=?", (tile_id,)).fetchone()

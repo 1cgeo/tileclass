@@ -3,8 +3,7 @@ tiles_query, tiles_mutations, users, thumbnails}.py`. Re-exports keep the
 existing import paths (`from .. import admin_service`, tests, routers) working
 without touching call sites."""
 from .admin.dashboard import (
-    dashboard, class_distribution, feature_distribution, tile_class_distribution,
-    detection_distribution, projects_stats,
+    dashboard, class_distribution, tile_class_distribution, projects_stats,
 )
 from .admin.tiles_query import (
     list_tiles,
@@ -41,8 +40,7 @@ from .admin.thumbnails import (
 )
 
 __all__ = [
-    "dashboard", "class_distribution", "feature_distribution",
-    "tile_class_distribution", "detection_distribution", "projects_stats",
+    "dashboard", "class_distribution", "tile_class_distribution", "projects_stats",
     "list_tiles", "count_tiles", "list_tiles_map", "list_problems",
     "reset_many", "reset_tile",
     "report_problem_many",

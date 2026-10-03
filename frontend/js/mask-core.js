@@ -47,25 +47,62 @@ export function paintLine(mask, x0, y0, x1, y1, value, r = 0,
     return { touched, deltaFilled: delta };
 }
 
-// 4-way flood fill. Replaces contiguous region of `target` color with `replacement`.
+// 4-way flood fill. Replaces the contiguous (4-connected) region of the seed's
+// color with `replacement`. Returns the undo entry directly in the CLAUDE.md
+// format — { positions: Uint32Array, prevValues: Uint8Array } — plus
+// deltaFilled. Memory is O(region) in typed arrays: pixels are painted as
+// they are pushed (the mask doubles as the visited set, since replacement
+// ≠ target), so each index enters the stack at most once.
+function _grow(arr, need, cap) {
+    // Never exceeds `cap` (= tile pixels): each index is pushed at most once.
+    if (need <= arr.length || arr.length >= cap) return arr;
+    const next = new Uint32Array(Math.min(cap, Math.max(need, arr.length * 2)));
+    next.set(arr);
+    return next;
+}
+
 export function floodFill(mask, cx, cy, replacement, tilePx = TILE) {
-    const target = mask[cy * tilePx + cx];
-    const touched = new Map();
-    if (target === replacement) return { touched, deltaFilled: 0 };
-    let delta = 0;
-    const stack = [[cx, cy]];
-    while (stack.length) {
-        const [x, y] = stack.pop();
-        if (x < 0 || x >= tilePx || y < 0 || y >= tilePx) continue;
-        const i = y * tilePx + x;
-        if (mask[i] !== target) continue;
-        touched.set(i, target);
-        if (target === EMPTY && replacement !== EMPTY) delta++;
-        else if (target !== EMPTY && replacement === EMPTY) delta--;
-        mask[i] = replacement;
-        stack.push([x + 1, y], [x - 1, y], [x, y + 1], [x, y - 1]);
+    const n = tilePx * tilePx;
+    const start = cy * tilePx + cx;
+    const target = mask[start];
+    if (target === replacement || cx < 0 || cy < 0 || cx >= tilePx || cy >= tilePx) {
+        return { positions: new Uint32Array(0), prevValues: new Uint8Array(0), deltaFilled: 0 };
     }
-    return { touched, deltaFilled: delta };
+    const initial = Math.min(n, 4096);
+    let positions = new Uint32Array(initial);
+    let stack = new Uint32Array(initial);
+    let count = 0, sp = 0;
+    mask[start] = replacement;
+    positions[count++] = start;
+    stack[sp++] = start;
+    while (sp > 0) {
+        const i = stack[--sp];
+        const x = i % tilePx;
+        // Up to 4 pushes per pop: make room once, not per neighbor.
+        if (sp + 4 > stack.length) stack = _grow(stack, sp + 4, n);
+        if (count + 4 > positions.length) positions = _grow(positions, count + 4, n);
+        let j;
+        if (x + 1 < tilePx && mask[j = i + 1] === target) {
+            mask[j] = replacement; positions[count++] = j; stack[sp++] = j;
+        }
+        if (x > 0 && mask[j = i - 1] === target) {
+            mask[j] = replacement; positions[count++] = j; stack[sp++] = j;
+        }
+        if (i + tilePx < n && mask[j = i + tilePx] === target) {
+            mask[j] = replacement; positions[count++] = j; stack[sp++] = j;
+        }
+        if (i >= tilePx && mask[j = i - tilePx] === target) {
+            mask[j] = replacement; positions[count++] = j; stack[sp++] = j;
+        }
+    }
+    let deltaFilled = 0;
+    if (target === EMPTY && replacement !== EMPTY) deltaFilled = count;
+    else if (target !== EMPTY && replacement === EMPTY) deltaFilled = -count;
+    return {
+        positions: count === positions.length ? positions : positions.slice(0, count),
+        prevValues: new Uint8Array(count).fill(target),
+        deltaFilled,
+    };
 }
 
 // Compact an in-gesture Map<index, prevValue> into paired typed arrays.

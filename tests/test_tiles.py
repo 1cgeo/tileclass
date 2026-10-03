@@ -81,6 +81,31 @@ def test_preview_does_not_assign(client, operators, tiles):
     assert row["assigned_to"] is None
 
 
+def test_preview_excluding_open_tile_returns_the_following_one(client, operators, tiles):
+    """With a tile open, a plain peek returns that same tile (resume branch);
+    excluding it must return what /next serves after it is submitted — the
+    pending head — and never the open tile."""
+    t = token(client, "op1", "secret123")
+    cur = client.get("/api/tiles/next", headers=headers(t)).json()
+    plain = client.get("/api/tiles/next-preview", headers=headers(t)).json()
+    assert plain["id"] == cur["id"]
+    r = client.get(f"/api/tiles/next-preview?exclude_tile_id={cur['id']}", headers=headers(t))
+    assert r.status_code == 200
+    nxt = r.json()
+    assert nxt["id"] != cur["id"]
+    assert nxt["status"] == "pending"
+    # Still a pure peek: the excluded tile stays assigned, the peeked one untouched.
+    from backend.database import connect
+    conn = connect()
+    try:
+        rows = {r["id"]: (r["status"], r["assigned_to"]) for r in conn.execute(
+            "SELECT id, status, assigned_to FROM tiles WHERE id IN (?,?)", (cur["id"], nxt["id"]))}
+    finally:
+        conn.close()
+    assert rows[cur["id"]][0] == "in_progress"
+    assert rows[nxt["id"]] == ("pending", None)
+
+
 def test_classify_submit_valid(client, operators, tiles):
     t = token(client, "op1", "secret123")
     tile = client.get("/api/tiles/next", headers=headers(t)).json()

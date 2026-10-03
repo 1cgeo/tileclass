@@ -48,12 +48,13 @@ def test_get_tile_image_unknown_id_404(client, operators):
     assert r.status_code == 404
 
 
-def test_history_unknown_tile_returns_empty(client, operators):
-    """Unknown tile_id must return [] — not 500 nor 404."""
+def test_history_unknown_tile_returns_404(client, operators):
+    """Unknown tile_id must return 404 (not 500). History is membership-gated
+    by the tile's project, so a missing tile has no project to authorise
+    against — same 404 contract as GET /api/tiles/{id}."""
     t = token(client, "op1", "secret123")
     r = client.get("/api/tiles/9999/history", headers=h(t))
-    assert r.status_code == 200
-    assert r.json() == []
+    assert r.status_code == 404
 
 
 # ---------- State-machine illegal transitions ----------

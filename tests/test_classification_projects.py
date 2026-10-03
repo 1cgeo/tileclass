@@ -1,9 +1,9 @@
 """Classification projects: end-to-end via the HTTP API.
 
-Covers project CRUD with kind='classification', the mutual-exclusion rules,
-the submit flow (JSON body with class_id, validation against allowed
-class ids), the no-pause guard, GET /classification, the /image and
-/features 415 responses, the dashboard's tile_class_distribution, the
+Covers project CRUD with kind='classification', the rejection of retired
+kinds, the submit flow (JSON body with class_id, validation against allowed
+class ids), the no-pause guard, GET /classification, the /image 415
+response, the dashboard's tile_class_distribution, the
 admin reset/report-problem clearing of data_class_id, and the CSV
 export script."""
 from __future__ import annotations
@@ -91,19 +91,28 @@ def test_create_classification_project_with_classes(client, admin_user, tmp_path
     assert proj["classes"][0]["name"] == "agua"
 
 
-def test_classification_rejects_attributes_payload(client, admin_user, tmp_path):
-    """Mutual exclusion: classification expects classes, never attributes."""
+def test_retired_kinds_are_rejected(client, admin_user, tmp_path):
+    """'vector' and 'detection' were removed: creating one is refused and no
+    project row is written (the DB CHECK still lists them for legacy rows)."""
+    from backend.database import connect
     tok = token(client, admin_user["username"], admin_user["password"])
-    body = {
-        "name": "bad",
-        "kind": "classification",
-        "primary_mbtiles": _real_mbtiles(tmp_path),
-        "classes": [{"id": 1, "name": "x", "color": "#000000"}],
-        "attributes": [{"key": "k", "label": "K", "type": "text"}],
-    }
-    r = client.post("/api/admin/projects", json=body, headers=h(tok))
-    assert r.status_code == 400
-    assert r.json()["detail"]["error"] == "attributes_not_supported"
+    for kind in ("vector", "detection"):
+        body = {
+            "name": f"old_{kind}",
+            "kind": kind,
+            "primary_mbtiles": _real_mbtiles(tmp_path),
+            "classes": [{"id": 1, "name": "x", "color": "#000000"}],
+        }
+        r = client.post("/api/admin/projects", json=body, headers=h(tok))
+        assert r.status_code == 422, (kind, r.text)
+    conn = connect()
+    try:
+        n = conn.execute(
+            "SELECT COUNT(*) FROM projects WHERE kind IN ('vector','detection')"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert n == 0
 
 
 def test_classification_requires_classes(client, admin_user, tmp_path):
@@ -213,6 +222,18 @@ def test_image_endpoint_415_on_classification(client, admin_user, operators, tmp
     r = client.get(f"/api/tiles/{tile_id}/image", headers=h(op_tok))
     assert r.status_code == 415
     assert r.json()["detail"]["error"] == "wrong_kind"
+
+
+def test_tile_detail_exposes_project_id(client, admin_user, tmp_path):
+    """GET /api/tiles/{id} must carry project_id: the admin viewer resolves the
+    tile's kind from it. Without it every tile looked raster and the viewer
+    hit /image (415) for classification tiles."""
+    tok = token(client, admin_user["username"], admin_user["password"])
+    proj = _create_classification_project(client, tok, tmp_path, name="detail-pid")
+    tile_id = _seed_pending_tile(proj["id"])
+    r = client.get(f"/api/tiles/{tile_id}", headers=h(tok))
+    assert r.status_code == 200
+    assert r.json()["project_id"] == proj["id"]
 
 
 def test_classification_endpoint_204_when_unset(client, admin_user, operators, tmp_path):
@@ -478,7 +499,7 @@ def test_cannot_remove_class_used_by_classification_tile(
 
 def test_classification_kind_is_immutable(client, admin_user, tmp_path):
     """ProjectUpdateIn has no `kind` field — PATCH silently drops it. Same
-    invariant as vector; ensures a future allow-list edit doesn't accidentally
+    invariant as raster; ensures a future allow-list edit doesn't accidentally
     let classification flip to raster (which would orphan data_class_id)."""
     tok = token(client, admin_user["username"], admin_user["password"])
     proj = _create_classification_project(client, tok, tmp_path, name="lock")

@@ -6,8 +6,7 @@ from pydantic import BaseModel
 
 from .. import auth, export_service, mbtiles_service, project_service, tile_ingest
 from ..models import (
-    ProjectCreateIn, ProjectUpdateIn, ProjectClassesIn, ProjectAttributesIn,
-    ProjectMemberIn,
+    ProjectCreateIn, ProjectUpdateIn, ProjectClassesIn, ProjectMemberIn,
 )
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
@@ -132,8 +131,6 @@ def create_project(
         name=body.name,
         description=body.description,
         kind=body.kind,
-        topology_required=body.topology_required,
-        box_required=body.box_required,
         mask_complete_required=body.mask_complete_required,
         tile_px=body.tile_px,
         meters_per_pixel=body.meters_per_pixel,
@@ -143,7 +140,6 @@ def create_project(
         ref_mask_primary_mbtiles=body.ref_mask_primary_mbtiles,
         ref_mask_secondary_mbtiles=body.ref_mask_secondary_mbtiles,
         classes=[c.model_dump() for c in body.classes] if body.classes else None,
-        attributes=[a.model_dump() for a in body.attributes] if body.attributes else None,
         created_by=admin.id,
     )
 
@@ -171,14 +167,17 @@ def delete_project(
 def export_project(
     project_id: int,
     status: str = Query("reviewed", pattern="^(reviewed|classified|reviewed_classified)$"),
+    remap: str = Query("auto", pattern="^(auto|edgv|raw)$"),
     admin: auth.CurrentUser = Depends(auth.require_admin),
 ):
     """Stream the project's finished data as a ZIP. Format follows the project
-    kind (raster→GeoTIFF, vector/detection→GeoJSON, classification→CSV); a
+    kind (raster→GeoTIFF, classification→CSV); a
     manifest is always included. `status` selects reviewed-only or
-    reviewed+classified. The X-Tile-Count header reports how many tiles went in."""
+    reviewed+classified. `remap` (raster only): auto = EDGV only for the legacy
+    {1..6} palette, edgv/raw force it. The X-Tile-Count header reports how many
+    tiles went in."""
     try:
-        data, fname, count = export_service.export_zip(project_id, status)
+        data, fname, count = export_service.export_zip(project_id, status, remap)
     except ValueError:
         raise HTTPException(400, detail={"error": "invalid_status"})
     except LookupError:
@@ -199,13 +198,14 @@ def export_project(
 def create_export_job(
     project_id: int,
     status: str = Query("reviewed", pattern="^(reviewed|classified|reviewed_classified)$"),
+    remap: str = Query("auto", pattern="^(auto|edgv|raw)$"),
     admin: auth.CurrentUser = Depends(auth.require_admin),
 ):
     """Start an asynchronous export. The ZIP is built off the request thread and
     written to disk; poll GET /api/admin/export-jobs/{id} and download when
     state='done'. For large datasets that would time out a synchronous request."""
     try:
-        return export_service.create_job(project_id, status, by_user=admin.id)
+        return export_service.create_job(project_id, status, by_user=admin.id, remap=remap)
     except ValueError:
         raise HTTPException(400, detail={"error": "invalid_status"})
     except LookupError:
@@ -268,21 +268,6 @@ def replace_classes(
     return project_service.set_classes(
         project_id,
         [c.model_dump() for c in body.classes],
-        updated_by=admin.id,
-    )
-
-
-@admin_router.put("/{project_id}/attributes")
-def replace_attributes(
-    project_id: int,
-    body: ProjectAttributesIn,
-    admin: auth.CurrentUser = Depends(auth.require_admin),
-):
-    """Vector projects only — replace the per-feature attribute schema.
-    Removing a key in use by any feature → 409 attribute_in_use."""
-    return project_service.set_attributes(
-        project_id,
-        [a.model_dump() for a in body.attributes],
         updated_by=admin.id,
     )
 

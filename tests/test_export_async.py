@@ -106,3 +106,74 @@ def test_export_job_endpoints_require_admin(client, admin_user, operators, tiles
 def test_job_not_found_returns_404(client, admin_user):
     adm = token(client, admin_user["username"], admin_user["password"])
     assert client.get("/api/admin/export-jobs/99999", headers=h(adm)).status_code == 404
+
+
+# ---- Archive hygiene / restart recovery ------------------------------------
+
+def test_exports_dir_is_isolated_per_test(app_env):
+    """Tests must never write into the dev server's real %TEMP% export dir."""
+    from backend import export_service
+    assert app_env.parent in export_service.EXPORTS_DIR.parents
+
+
+def test_create_job_prunes_archives_older_than_24h(client, admin_user, tiles):
+    import os
+    from backend import export_service
+    d = export_service.EXPORTS_DIR
+    d.mkdir(parents=True, exist_ok=True)
+    old, fresh, other = d / "job_9001.zip", d / "job_9002.zip", d / "notes.txt"
+    for p in (old, fresh, other):
+        p.write_bytes(b"x")
+    stale = time.time() - 25 * 3600
+    os.utime(old, (stale, stale))
+    os.utime(other, (stale, stale))
+    _seed_reviewed_raster(1, "prune")
+    job = export_service.create_job(1, "reviewed", by_user=admin_user["id"], run_async=False)
+    assert job["state"] == "done"
+    assert not old.exists()
+    assert fresh.exists() and other.exists()
+    assert (d / f"job_{job['id']}.zip").exists()
+
+
+def test_startup_marks_interrupted_jobs_failed(app_env, admin_user):
+    from backend.database import connect, now_iso
+    from backend.main import app
+    from fastapi.testclient import TestClient
+    from tests.conftest import _seed_test_project
+    conn = connect()
+    try:
+        _seed_test_project(conn)
+        ids = {}
+        for state in ("pending", "running", "done", "error"):
+            cur = conn.execute(
+                "INSERT INTO export_jobs(project_id,status_param,state,created_by,created_at) "
+                "VALUES (1,'reviewed',?,?,?)", (state, admin_user["id"], now_iso()))
+            ids[state] = cur.lastrowid
+        conn.commit()
+    finally:
+        conn.close()
+    with TestClient(app):
+        pass
+    conn = connect()
+    try:
+        rows = {r["id"]: r for r in conn.execute("SELECT * FROM export_jobs")}
+    finally:
+        conn.close()
+    for st in ("pending", "running"):
+        r = rows[ids[st]]
+        assert r["state"] == "error" and "reinicializa" in r["error"] and r["finished_at"]
+    assert rows[ids["done"]]["state"] == "done"
+    assert rows[ids["error"]]["error"] is None
+
+
+def test_failed_build_removes_partial_zip(client, admin_user, tiles, monkeypatch):
+    from backend import export_service
+
+    def broken(project_id, status_param, dest, *a, **k):
+        dest.write_bytes(b"PK\x03\x04truncated")
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(export_service, "_build_zip", broken)
+    job = export_service.create_job(1, "reviewed", by_user=admin_user["id"], run_async=False)
+    assert job["state"] == "error" and "disk full" in job["error"]
+    assert not (export_service.EXPORTS_DIR / f"job_{job['id']}.zip").exists()

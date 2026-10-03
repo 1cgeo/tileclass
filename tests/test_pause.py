@@ -145,7 +145,10 @@ def test_pause_works_for_in_review_too(client, operators, tiles):
     t2 = token(client, "op2", "secret123")
     rev = client.get("/api/tiles/next", headers=h(t2)).json()
     assert rev["status"] == "in_review"
-    r = _pause(client, t2, rev["id"], _mask(fill=2, missing=True), version=rev["version"])
+    # In review the mask must stay complete (the classifier's work is never
+    # replaced by a partial one) — incomplete pauses are covered in
+    # test_audit_fixes.test_reviewer_pause_with_incomplete_mask_rejected.
+    r = _pause(client, t2, rev["id"], _mask(fill=2), version=rev["version"])
     assert r.status_code == 200
     assert r.json()["status"] == "in_review"
 
@@ -165,7 +168,8 @@ def test_resume_clears_paused_at_and_logs(client, operators, tiles):
     data = r.json()
     assert data["paused_at"] is None
     assert data["status"] == "in_progress"
-    assert data["version"] == paused_version + 1
+    # Resuming doesn't change the mask, so the version token stays valid.
+    assert data["version"] == paused_version
 
     conn = connect()
     try:
