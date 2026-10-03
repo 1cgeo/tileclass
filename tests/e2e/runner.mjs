@@ -121,6 +121,16 @@ async function login(page, user, pass, waitForTile = true) {
     }
 }
 
+// Admins land on the admin panel (not the editor), so login() doesn't fit.
+async function loginAdmin(page) {
+    await page.goto(`${BASE}/?test=1`);
+    await page.waitForSelector("#login-form", { timeout: 10000 });
+    await page.type("#login-username", "admin");
+    await page.type("#login-password", "admin123");
+    await page.evaluate(() => document.querySelector("#login-form").requestSubmit());
+    await page.waitForSelector("#view-admin:not(.hidden)", { timeout: 10000 });
+}
+
 async function getMask(page) {
     return await page.evaluate(() => Array.from(window.__tcTest__.mask));
 }
@@ -563,13 +573,7 @@ try {
 
     await test("admin viewer shows the class of a classification tile", async () => {
         const page = await newPageBlocked();
-        // Admins land on the admin panel (not the editor), so no login() helper.
-        await page.goto(`${BASE}/?test=1`);
-        await page.waitForSelector("#login-form", { timeout: 10000 });
-        await page.type("#login-username", "admin");
-        await page.type("#login-password", "admin123");
-        await page.evaluate(() => document.querySelector("#login-form").requestSubmit());
-        await page.waitForSelector("#view-admin:not(.hidden)", { timeout: 10000 });
+        await loginAdmin(page);
         await page.click('.admin-nav button[data-tab="tiles"]');
         await page.waitForSelector("#tiles-project-filter", { timeout: 5000 });
         await page.select("#tiles-project-filter", "2");
@@ -735,6 +739,38 @@ try {
         await page.keyboard.down("Control"); await page.keyboard.press("s"); await page.keyboard.up("Control");
         const toast = await page.$eval("#toast", el => el.textContent);
         assert(/Faltam/.test(toast), `Ctrl+S should run submit, toast="${toast}"`);
+        await page.close(); await page._tcContext?.close();
+    });
+
+    await test("admin export: remap select reaches the API and names the ZIP", async () => {
+        const page = await newPageBlocked();
+        let jobUrl = null, downloadName = null;
+        page.on("request", (req) => {
+            if (req.method() === "POST" && /\/export-jobs\?/.test(req.url())) jobUrl = req.url();
+        });
+        page.on("response", (r) => {
+            if (/\/export-jobs\/\d+\/download$/.test(r.url())) {
+                downloadName = r.headers()["content-disposition"] || "";
+            }
+        });
+        await loginAdmin(page);
+        await page.click('.admin-nav button[data-tab="projects"]');
+        await page.waitForSelector('tr[aria-label="Abrir projeto default"]', { timeout: 5000 });
+        await page.click('tr[aria-label="Abrir projeto default"]');
+        await page.waitForSelector("#export-remap", { timeout: 5000 });
+        // Default palette (ids 1..6) → "auto" is preselected; pick raw explicitly.
+        const initial = await page.$eval("#export-remap", el => el.value);
+        assert(initial === "auto", `remap select should default to auto, got ${initial}`);
+        await page.select("#export-remap", "raw");
+        await page.click("#btn-export");
+        await page.waitForFunction(
+            () => /Pronto:/.test(document.getElementById("export-status-line")?.textContent || ""),
+            { timeout: 15000 },
+        );
+        assert(jobUrl && new URL(jobUrl).searchParams.get("remap") === "raw",
+            `export-jobs request should carry remap=raw, got ${jobUrl}`);
+        assert(downloadName && downloadName.includes("_raw_"),
+            `download filename should carry the effective remap, got ${downloadName}`);
         await page.close(); await page._tcContext?.close();
     });
 

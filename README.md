@@ -57,7 +57,7 @@ python -m backend.scripts.export_classifications ./out --project meu-projeto  # 
 
 Ambos aceitam `--status reviewed|classified|reviewed+classified` (padrão: `reviewed`). A segmentação gera um GeoTIFF por tile + `manifest.csv`; a classificação gera um único `classifications.csv`.
 
-Remap de classes (segmentação): por padrão é automático — projetos com a paleta de 6 classes (IDs 1–6) saem remapeados para EDGV, os demais com os IDs originais. Force com `--edgv` ou `--raw` (na UI: "Remapeamento de classes"). O manifest registra o remap aplicado. `--mosaic` gera um mosaico por projeto.
+Remap de classes (segmentação): por padrão é automático — projetos com a paleta de 6 classes (IDs 1–6) saem remapeados para EDGV, os demais com os IDs originais. Force com `--edgv` ou `--raw` (na UI: "Remapeamento de classes"). O manifest e o nome do ZIP baixado pela UI registram o remap aplicado (`..._edgv_...` / `..._raw_...`). `--mosaic` gera um mosaico por projeto.
 
 ## Manutenção
 

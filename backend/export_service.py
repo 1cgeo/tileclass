@@ -79,7 +79,14 @@ def _build_zip(project_id: int, status_param: str, dest: Path,
                 if p.is_file():
                     zf.write(p, p.relative_to(out))
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
-    fname = f"{_safe(proj['name'])}_{status_param}_{stamp}.zip"
+    # Raster ZIPs name the effective remap (edgv|raw, never 'auto') so two
+    # same-day downloads with different remaps can't be mistaken for each
+    # other. Same resolution the exporter used for the manifest column.
+    remap_tag = ""
+    if kind != "classification":
+        from .scripts.export_tiles import resolve_remap
+        remap_tag = "_" + resolve_remap(remap, [c["id"] for c in proj.get("classes") or []])
+    fname = f"{_safe(proj['name'])}_{status_param}{remap_tag}_{stamp}.zip"
     return fname, count
 
 

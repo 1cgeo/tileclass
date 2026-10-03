@@ -179,6 +179,70 @@ def test_export_service_zip_and_filename(client, admin_user, tiles):
     assert "manifest.csv" in names and "gt_svc.tif" in names
 
 
+def test_export_zip_filename_carries_effective_remap(client, admin_user, tiles, tmp_path):
+    """Raster ZIPs name the effective remap (resolved, never 'auto') so two
+    same-day downloads with different remaps can't be confused; the name must
+    agree with the manifest's remap column."""
+    import csv as _csv
+    from backend import export_service
+    _seed_raster(1, "fn", np.full(65536, 1, dtype=np.uint8).tobytes())
+
+    def manifest_remap(data):
+        text = zipfile.ZipFile(io.BytesIO(data)).read("manifest.csv").decode()
+        return {row["remap"] for row in _csv.DictReader(io.StringIO(text))}
+
+    # Default project has the legacy 6-class palette → auto resolves to EDGV.
+    data, fname, _ = export_service.export_zip(1, "reviewed")
+    assert fname.startswith("default_reviewed_edgv_"), fname
+    assert manifest_remap(data) == {"edgv"}
+    data, fname, _ = export_service.export_zip(1, "reviewed", remap="raw")
+    assert fname.startswith("default_reviewed_raw_"), fname
+    assert manifest_remap(data) == {"raw"}
+
+    # Custom palette → auto resolves to raw.
+    adm = _adm(client, admin_user)
+    proj = _create(client, adm, {
+        "name": "custom", "kind": "raster",
+        "primary_mbtiles": make_real_mbtiles(tmp_path, "cu.mbtiles"),
+        "classes": [{"id": 1, "name": "a", "color": "#112233"},
+                    {"id": 9, "name": "b", "color": "#445566"}],
+    })
+    _, fname, _ = export_service.export_zip(proj["id"], "reviewed")
+    assert fname.startswith("custom_reviewed_raw_"), fname
+    _, fname, _ = export_service.export_zip(proj["id"], "reviewed", remap="edgv")
+    assert fname.startswith("custom_reviewed_edgv_"), fname
+
+
+def test_export_job_download_filename_carries_remap(client, admin_user, tiles):
+    """The async job's download (what the admin UI saves) uses the same name."""
+    adm = _adm(client, admin_user)
+    r = client.post("/api/admin/projects/1/export-jobs?status=reviewed&remap=raw", headers=h(adm))
+    assert r.status_code == 200, r.text
+    job_id = r.json()["id"]
+    for _ in range(100):
+        job = client.get(f"/api/admin/export-jobs/{job_id}", headers=h(adm)).json()
+        if job["state"] in ("done", "error"):
+            break
+        import time
+        time.sleep(0.05)
+    assert job["state"] == "done", job
+    d = client.get(f"/api/admin/export-jobs/{job_id}/download", headers=h(adm))
+    assert d.status_code == 200
+    assert "_reviewed_raw_" in d.headers["content-disposition"]
+
+
+def test_classification_zip_filename_has_no_remap(client, admin_user, tmp_path):
+    from backend import export_service
+    adm = _adm(client, admin_user)
+    proj = _create(client, adm, {
+        "name": "cls", "kind": "classification",
+        "primary_mbtiles": make_real_mbtiles(tmp_path, "cls.mbtiles"),
+        "classes": [{"id": 1, "name": "a", "color": "#112233"}],
+    })
+    _, fname, _ = export_service.export_zip(proj["id"], "reviewed")
+    assert fname.startswith("cls_reviewed_2"), fname  # date follows directly
+
+
 def test_export_service_sanitizes_project_name(client, admin_user, tmp_path):
     """A project name with spaces/odd chars yields a safe ZIP filename."""
     from backend import export_service
